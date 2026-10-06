@@ -1,0 +1,18 @@
+--- section_old.md	2026-10-01 09:07:17.566183608 +0200
++++ section_new.md	2026-10-01 09:11:02.334883663 +0200
+@@ -2,7 +2,7 @@
+ 
+ ## 2026.10
+ 
+-Initial public release of `kb`.
++Initial public release of `kb` with FTS5 search and a Verus-verified core.
+ 
+ ## 2026.09
+ 
+@@ -12,4 +12,5 @@
+ 
+ ## 2026.08
+ 
+-Internal alpha. First working `kb search`.
++Internal alpha. First working `kb search`. Removed the legacy
++`kb index --rebuild` flag (use `kb reindex` instead).

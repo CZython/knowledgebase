@@ -1,0 +1,10 @@
+[package]
+name = "kb-db"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+kb-core = { path = "../kb-core" }
+rusqlite = { workspace = true }
+dirs     = { workspace = true }

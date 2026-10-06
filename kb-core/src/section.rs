@@ -1,0 +1,1053 @@
+//! section — ATX-heading parse + byte-range splice (M4, port of `mdtool.py`).
+//!
+//! Pure, no IO: the whole document lives in a `Vec<u8>` buffer. Every read /
+//! edit is a byte-range query over that buffer, so the *shape* matches
+//! `mdtool.py` (byte offsets in/out, O(1) splices) while staying in the
+//! "no `std::io`" zone this crate forbids.
+
+/// A parsed ATX section (one heading + its span). Offsets are byte offsets
+/// into the owning `Doc` buffer.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Section {
+    /// Heading level, 1..=6.
+    pub level: u8,
+    /// The heading title text (trimmed).
+    pub title: String,
+    /// Byte offset of the heading line (inclusive).
+    pub start: usize,
+    /// Byte offset where the *full* section ends (exclusive): up to the next
+    /// heading of level <= own.
+    pub end: usize,
+    /// Byte offset where the section's *own body* ends (exclusive): the very
+    /// next heading of any level.
+    pub own_end: usize,
+    /// 0-based line index of the heading line (inclusive).
+    pub start_line: usize,
+    /// 0-based line index of the full section's end (exclusive); i.e. the
+    /// line that the full span runs through. Line count = `end_line - start_line`.
+    pub end_line: usize,
+    /// 0-based line index of the own body's end (exclusive).
+    pub own_end_line: usize,
+    /// Dotted document-order number, e.g. `1.2`.
+    pub ref_: String,
+}
+
+/// Where a new section is inserted relative to a target (or a file edge).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SectionPlacement {
+    Before,
+    After,
+    Child,
+    Top,
+    End,
+}
+
+/// Errors returned by section operations.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum SectionError {
+    EmptyRef,
+    /// A dotted number / title-path was supplied but matches no section.
+    NoSection { ref_: String },
+    /// Two or more sections match — list them so the caller can disambiguate.
+    Ambiguous { ref_: String, candidates: Vec<String> },
+    /// `replace_in` was called with a scope but the literal was not found
+    /// (mirrors `mdtool.py`'s "nothing to replace").
+    NotFound { literal: String, scope: String },
+}
+
+impl std::fmt::Display for SectionError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            SectionError::EmptyRef => write!(f, "empty section reference"),
+            SectionError::NoSection { ref_ } => write!(f, "no section matching {ref_:?}"),
+            SectionError::Ambiguous { ref_, candidates } => {
+                write!(
+                    f,
+                    "ambiguous reference {ref_:?}: {}",
+                    candidates.join(", ")
+                )
+            }
+            SectionError::NotFound { literal, scope } => {
+                write!(f, "nothing to replace: {literal:?} not found ({scope})")
+            }
+        }
+    }
+}
+
+impl std::error::Error for SectionError {}
+
+/// The parsed document: the byte buffer plus the heading index derived from
+/// it. All accessors are pure reads over `data`.
+#[derive(Clone, Debug)]
+pub struct Doc {
+    /// The raw UTF-8 document bytes.
+    pub data: Vec<u8>,
+    /// Headings in document order (skipping fenced code blocks).
+    pub sections: Vec<Section>,
+    /// Byte offset of the first heading, or `data.len()` if none (the
+    /// preamble extends up to here).
+    pub preamble_end: usize,
+    /// Total line count (newline-terminated lines; an unterminated trailing
+    /// line counts as one line).
+    pub total_lines: usize,
+}
+
+impl Doc {
+    /// Parse `data` into a `Doc` (one scan pass, O(n)).
+    ///
+    /// Mirrors `mdtool.py::_scan` (fence-aware heading detection), `_apply`
+    /// (span + own_end assignment) and the dotted-ref pass, in one function
+    /// that is a pure function of `data` (no IO — the caller supplies the
+    /// already-read bytes).
+    pub fn new(data: Vec<u8>) -> Self {
+        let n = data.len();
+        if n == 0 {
+            return Doc {
+                data,
+                sections: Vec::new(),
+                preamble_end: 0,
+                total_lines: 0,
+            };
+        }
+
+        // ---- scan: fence-aware heading detection --------------------------
+        let mut found: Vec<(u8, String, usize)> = Vec::new(); // (level, title, start)
+        let mut line_starts: Vec<usize> = Vec::new();
+        let mut in_fence = false;
+        let mut fence_char: u8 = 0;
+        let mut fence_len = 0usize;
+        let mut pos = 0;
+        while pos < n {
+            line_starts.push(pos);
+            let nl = match data[pos..].iter().position(|&b| b == b'\n') {
+                Some(off) => pos + off,
+                None => n,
+            };
+            let line = &data[pos..nl];
+            match fence_of(line) {
+                Some((c, len)) => {
+                    if !in_fence {
+                        in_fence = true;
+                        fence_char = c;
+                        fence_len = len;
+                    } else if c == fence_char && len >= fence_len {
+                        in_fence = false;
+                    }
+                }
+                None => {
+                    if !in_fence {
+                        if let Some((level, title)) = heading_of(line) {
+                            found.push((level, title, pos));
+                        }
+                    }
+                }
+            }
+            pos = nl + 1;
+        }
+
+        let total_lines = line_starts.len();
+        let preamble_end = found.first().map(|s| s.2).unwrap_or(0);
+
+        // ---- spans + own_end ---------------------------------------------
+        let mut sections: Vec<Section> = Vec::with_capacity(found.len());
+        for (i, &(level, ref title, start)) in found.iter().enumerate() {
+            let mut end = n;
+            for nxt in found.iter().skip(i + 1) {
+                if nxt.0 <= level {
+                    end = nxt.2;
+                    break;
+                }
+            }
+            let own_end = if i + 1 < found.len() {
+                found[i + 1].2
+            } else {
+                n
+            };
+            sections.push(Section {
+                level,
+                title: title.clone(),
+                start,
+                end,
+                own_end,
+                start_line: bisect_left(&line_starts, start),
+                end_line: bisect_left(&line_starts, end),
+                own_end_line: bisect_left(&line_starts, own_end),
+                ref_: String::new(),
+            });
+        }
+
+        // ---- dotted document-order refs ----------------------------------
+        let mut counters = [0u32; 6];
+        for s in &mut sections {
+            let lvl = s.level as usize;
+            counters[lvl - 1] += 1;
+            for c in &mut counters[lvl..] {
+                *c = 0;
+            }
+            let mut parts: Vec<String> = counters[..lvl].iter().map(|c| c.to_string()).collect();
+            while parts.len() > 1 && parts[0] == "0" {
+                parts.remove(0);
+            }
+            s.ref_ = parts.join(".");
+        }
+
+        Doc {
+            data,
+            sections,
+            preamble_end,
+            total_lines,
+        }
+    }
+
+    /// The byte range `[start, end)` of the named section's **own body**.
+    pub fn own_body(&self, ref_: &str) -> Result<std::ops::Range<usize>, SectionError> {
+        let i = self.resolve(ref_)?;
+        let s = &self.sections[i];
+        Ok(s.start..s.own_end)
+    }
+
+    /// The byte range `[start, end)` of the named section's **full span**
+    /// (including subsections).
+    pub fn full_span(&self, ref_: &str) -> Result<std::ops::Range<usize>, SectionError> {
+        let i = self.resolve(ref_)?;
+        let s = &self.sections[i];
+        Ok(s.start..s.end)
+    }
+
+    /// The raw byte slice of the named section's own body (the convenience
+    /// read used by the CLI's `section` command).
+    pub fn own_bytes(&self, ref_: &str) -> Result<&[u8], SectionError> {
+        let r = self.own_body(ref_)?;
+        Ok(&self.data[r])
+    }
+
+    /// The raw byte slice of the named section's full span.
+    pub fn full_bytes(&self, ref_: &str) -> Result<&[u8], SectionError> {
+        let r = self.full_span(ref_)?;
+        Ok(&self.data[r])
+    }
+
+    // ---- editing (pure: each returns the *new* full buffer; the CLI
+    //      persists it atomically at M6) --------------------------------
+
+    /// Find / replace within a scope (whole file when `scope` is `None`, else
+    /// the named section's full span). Returns `(new_buffer, n)` where `n` is
+    /// the number of non-overlapping replacements made. `count == 0` means
+    /// "replace all". Errors if nothing matched (mirrors
+    /// `mdtool.py::replace` — "nothing to replace").
+    pub fn replace_in(
+        &self,
+        scope: Option<&str>,
+        find: &str,
+        replacement: &str,
+        count: usize,
+    ) -> Result<(Vec<u8>, usize), SectionError> {
+        let (lo, hi) = match scope {
+            None => (0, self.data.len()),
+            Some(s) => {
+                let i = self.resolve(s)?;
+                let sec = &self.sections[i];
+                (sec.start, sec.end)
+            }
+        };
+        let chunk = &self.data[lo..hi];
+        let (new_chunk, n) = replace_substring(chunk, find.as_bytes(), replacement.as_bytes(), count);
+        if n == 0 {
+            return Err(SectionError::NotFound {
+                literal: find.to_string(),
+                scope: scope.map(|s| s.to_string()).unwrap_or_else(|| "whole file".to_string()),
+            });
+        }
+        Ok((splice(&self.data, lo, hi, &new_chunk), n))
+    }
+
+    /// Replace a section's content with `text`. By default the whole section
+    /// (heading + body) is replaced; with `keep_heading` the original heading
+    /// line is retained and only the body replaced (a blank line is inserted
+    /// after the heading). Returns the new full buffer.
+    pub fn set_section(&self, ref_: &str, text: &str, keep_heading: bool) -> Result<Vec<u8>, SectionError> {
+        let i = self.resolve(ref_)?;
+        let sec = &self.sections[i];
+        let mut body = ensure_trailing_newline(text.as_bytes().to_vec());
+        if keep_heading {
+            // retain the heading line, then a blank line, then the new body
+            // (mirrors mdtool.py::set_section: head + b"\n\n" + body)
+            let head_end = self.heading_line_end(sec.start);
+            let head = self.data[sec.start..head_end].to_vec();
+            let mut kept = head;
+            kept.push(b'\n');
+            kept.extend_from_slice(&body);
+            body = kept;
+        }
+        Ok(splice(&self.data, sec.start, sec.end, &body))
+    }
+
+    /// Byte offset one past the end of the heading line starting at `start`
+    /// (i.e. through the newline), or `self.data.len()` if no newline.
+    fn heading_line_end(&self, start: usize) -> usize {
+        let rest = &self.data[start..];
+        match rest.iter().position(|&b| b == b'\n') {
+            Some(off) => start + off + 1,
+            None => self.data.len(),
+        }
+    }
+
+    /// Append `text` at the end of a section's *full span* (before the next
+    /// sibling/parent heading), keeping exactly one blank line of separation
+    /// from the existing content. Returns the new full buffer.
+    pub fn append_section(&self, ref_: &str, text: &str) -> Result<Vec<u8>, SectionError> {
+        let i = self.resolve(ref_)?;
+        let sec = &self.sections[i];
+        let ins = sec.end;
+        let mut body = ensure_trailing_newline(text.as_bytes().to_vec());
+        // separation: keep exactly one blank line between old content and new
+        // (mirrors mdtool.py::append_section)
+        let before = &self.data[..ins];
+        let mut gap = 0;
+        while gap < before.len() && before[before.len() - 1 - gap] == b'\n' {
+            gap += 1;
+        }
+        if gap == 0 {
+            body = b"\n\n".to_vec().into_iter().chain(body).collect();
+        } else if gap == 1 {
+            body = b"\n".to_vec().into_iter().chain(body).collect();
+        }
+        Ok(splice(&self.data, ins, ins, &body))
+    }
+
+    /// Insert a new section (heading + body) at a placement. Returns
+    /// `(insertion_byte_offset, chunk)`. When `do_splice` is true the caller
+    /// can rebuild via `splice` (or compare the chunk for a dry-run).
+    ///
+    /// `placement`: `before` | `after` | `child` | `top` | `end`.
+    /// `title` is required; `level` defaults per placement
+    /// (child = target+1, else target level, else 1), clamped to 1..=6.
+    pub fn insert_section(
+        &self,
+        placement: SectionPlacement,
+        ref_: Option<&str>,
+        text: &str,
+        title: &str,
+        level: Option<u8>,
+    ) -> Result<(usize, Vec<u8>), SectionError> {
+        let title = title.trim();
+        if title.is_empty() {
+            return Err(SectionError::EmptyRef);
+        }
+        let target: Option<usize> = match ref_ {
+            Some(r) => Some(self.resolve(r)?),
+            None => None,
+        };
+        let lvl = match level {
+            Some(l) => l,
+            None => {
+                let base = match (placement, target) {
+                    (SectionPlacement::Child, Some(i)) => self.sections[i].level + 1,
+                    (_, Some(i)) => self.sections[i].level,
+                    (_, None) => 1,
+                };
+                base.min(6)
+            }
+        };
+        if !(1..=6).contains(&lvl) {
+            return Err(SectionError::NoSection {
+                ref_: format!("level {lvl}"),
+            });
+        }
+        let ins = match (placement, target) {
+            (SectionPlacement::End, _) => self.data.len(),
+            (SectionPlacement::Top, _) => self.preamble_end,
+            (_, Some(i)) if placement == SectionPlacement::Before => self.sections[i].start,
+            (_, Some(i)) => self.sections[i].end,
+            _ => {
+                return Err(SectionError::NoSection {
+                    ref_: format!("placement {placement:?} needs a ref"),
+                })
+            }
+        };
+        let mut block = Vec::new();
+        block.extend_from_slice("#".repeat(lvl as usize).as_bytes());
+        block.push(b' ');
+        block.extend_from_slice(title.as_bytes());
+        let trimmed = text.trim_start_matches('\n').trim_end_matches('\n');
+        if !trimmed.is_empty() {
+            block.push(b'\n');
+            block.push(b'\n');
+            block.extend_from_slice(trimmed.as_bytes());
+        }
+        block.push(b'\n');
+        // one blank line on each side (unless at a file edge)
+        let before = &self.data[..ins];
+        let after = &self.data[ins..];
+        let prefix = if before.is_empty() {
+            vec![]
+        } else {
+            let mut gap = 0;
+            while gap < before.len() && before[before.len() - 1 - gap] == b'\n' {
+                gap += 1;
+            }
+            match gap {
+                0 => vec![b'\n', b'\n'],
+                1 => vec![b'\n'],
+                _ => vec![],
+            }
+        };
+        let suffix = if after.is_empty() || after.starts_with(b"\n\n") {
+            vec![]
+        } else if after.starts_with(b"\n") {
+            vec![b'\n']
+        } else {
+            vec![b'\n', b'\n']
+        };
+        let mut chunk = Vec::new();
+        chunk.extend_from_slice(&prefix);
+        chunk.extend_from_slice(&block);
+        chunk.extend_from_slice(&suffix);
+        Ok((ins, chunk))
+    }
+
+    /// Resolve `ref_` to a *section index* into `self.sections`.
+    ///
+    /// Resolution order (mirrors `mdtool.py::resolve`):
+    ///
+    /// 1. **Dotted document-order number** (e.g. `1.2`, `1.2.3`, `2`):
+    ///    match by the assigned `Section::ref_`.
+    /// 2. **`A > B > C` title path** (parts separated by ` > `): match a
+    ///    *top-level* (level-1) section whose title (case-insensitively)
+    ///    equals `A`, then cascade through `B`, `C` at increasing expected
+    ///    levels. A unique cascade wins; an empty cascade means "fall
+    ///    through".
+    /// 3. **Unique exact title match anywhere** (case-insensitive, last-
+    ///    position only).
+    /// 4. **Unique substring title match anywhere** (case-insensitive, last-
+    ///    position only).
+    ///
+    /// If any of the stages finds >1 candidate, `Ambiguous` is returned with
+    /// the candidate list (in `ref + " " + title` form, deduped and sorted)
+    /// so the caller can surface "did you mean: …". If no stage finds a
+    /// candidate, `NoSection`. An empty `ref_` is `EmptyRef`.
+    pub fn resolve(&self, ref_: &str) -> Result<usize, SectionError> {
+        let ref_ = ref_.trim();
+        if ref_.is_empty() {
+            return Err(SectionError::EmptyRef);
+        }
+
+        // ---- stage 1: dotted number --------------------------------
+        if is_dotted(ref_) {
+            for (i, s) in self.sections.iter().enumerate() {
+                if s.ref_ == ref_ {
+                    return Ok(i);
+                }
+            }
+            return Err(SectionError::NoSection {
+                ref_: ref_.to_string(),
+            });
+        }
+
+        // ---- stage 2: `A > B > C` title path ------------------------
+        let parts: Vec<&str> = ref_.split(" > ").map(|p| p.trim()).collect();
+        let parts: Vec<&str> = parts.into_iter().filter(|p| !p.is_empty()).collect();
+        let mut cands: Vec<usize> = (0..self.sections.len())
+            .filter(|&i| {
+                self.sections[i].level == 1
+                    && self.sections[i].title.to_lowercase() == parts[0].to_lowercase()
+            })
+            .collect();
+        // cascade: for stage k (1-based), the expected level is k+1
+        for (k, part) in parts[1..].iter().enumerate() {
+            let expected_level = (k as u8) + 2;
+            let want = part.to_lowercase();
+            cands.retain(|&i| {
+                    self.sections[i].level == expected_level
+                        && self.sections[i].title.to_lowercase() == want
+                });
+            if cands.is_empty() {
+                break;
+            }
+        }
+        if cands.len() == 1 {
+            return Ok(cands[0]);
+        }
+
+        // ---- stage 3: unique exact title match anywhere -------------
+        let last = parts.last().cloned().unwrap_or(ref_).to_lowercase();
+        let exact: Vec<usize> = (0..self.sections.len())
+            .filter(|&i| self.sections[i].title.to_lowercase() == last)
+            .collect();
+        if exact.len() == 1 {
+            return Ok(exact[0]);
+        }
+
+        // ---- stage 4: unique substring title match ------------------
+        let subs: Vec<usize> = (0..self.sections.len())
+            .filter(|&i| self.sections[i].title.to_lowercase().contains(&last))
+            .collect();
+        if subs.len() == 1 {
+            return Ok(subs[0]);
+        }
+
+        // ---- error reporting ---------------------------------------
+        if cands.is_empty() && exact.is_empty() && subs.is_empty() {
+            return Err(SectionError::NoSection {
+                ref_: ref_.to_string(),
+            });
+        }
+        let src: &Vec<usize> = if !cands.is_empty() {
+            &cands
+        } else if !exact.is_empty() {
+            &exact
+        } else {
+            &subs
+        };
+        let mut names: Vec<String> = src
+            .iter()
+            .map(|&i| self.sections[i].ref_.clone() + " " + self.sections[i].title.as_str())
+            .collect();
+        names.sort();
+        names.dedup();
+        Err(SectionError::Ambiguous {
+            ref_: ref_.to_string(),
+            candidates: names,
+        })
+    }
+}
+
+/// Splice `new` into `data` over the byte range `[lo, hi)`, returning the
+/// new buffer. Pure: does not mutate `data` (the caller can compare / retry).
+/// Invariant: `lo <= hi <= data.len()`.
+pub fn splice(data: &[u8], lo: usize, hi: usize, new: &[u8]) -> Vec<u8> {
+    debug_assert!(lo <= hi && hi <= data.len(), "splice range out of bounds");
+    let mut out = Vec::with_capacity(data.len() + new.len() - (hi - lo));
+    out.extend_from_slice(&data[..lo]);
+    out.extend_from_slice(new);
+    out.extend_from_slice(&data[hi..]);
+    out
+}
+
+/// Replace non-overlapping occurrences of `find` with `replacement` inside
+/// `data`, left-to-right. `count == 0` means "replace all". Returns
+/// `(new_data, n)`. Pure (does not mutate `data`).
+fn replace_substring(data: &[u8], find: &[u8], replacement: &[u8], count: usize) -> (Vec<u8>, usize) {
+    if find.is_empty() {
+        return (data.to_vec(), 0);
+    }
+    let mut out = Vec::with_capacity(data.len());
+    let mut n = 0usize;
+    let mut i = 0usize;
+    while i < data.len() && !(count != 0 && n >= count) {
+        if data[i..].starts_with(find) {
+            out.extend_from_slice(replacement);
+            n += 1;
+            i += find.len();
+        } else {
+            out.push(data[i]);
+            i += 1;
+        }
+    }
+    // any tail we didn't process (either count limit hit, or loop ran out)
+    if i < data.len() {
+        out.extend_from_slice(&data[i..]);
+    }
+    (out, n)
+}
+
+/// Ensure a byte buffer ends with `\n` (append one if it doesn't). Mirrors
+/// `mdtool.py::_ensure_newline`.
+fn ensure_trailing_newline(data: Vec<u8>) -> Vec<u8> {
+    let mut out = data;
+    if out.last() != Some(&b'\n') {
+        out.push(b'\n');
+    }
+    out
+}
+
+/// True if `ref_` is a dotted document-order number: one or more runs of
+/// digits separated by dots, e.g. `1`, `1.2`, `1.2.3`. Empty / non-digit
+/// parts reject (mirrors `mdtool.py`'s `re.fullmatch(r"(?:\d+\.)*\d+", ref)`).
+fn is_dotted(ref_: &str) -> bool {
+    if ref_.is_empty() {
+        return false;
+    }
+    let mut last_was_digit = false;
+    for c in ref_.chars() {
+        if c.is_ascii_digit() {
+            last_was_digit = true;
+        } else if c == '.' && last_was_digit {
+            last_was_digit = false; // a dot is OK only after a digit, and
+            // must be followed by another digit (loop continues)
+        } else {
+            return false;
+        }
+    }
+    last_was_digit
+}
+
+/// Binary search: the first index `i` of `v` (sorted ascending) with `v[i] >=
+/// needle`, or `v.len()` if none. Mirrors `bisect.bisect_left`. Used to map
+/// a byte offset to a line index.
+fn bisect_left(v: &[usize], needle: usize) -> usize {
+    let mut lo = 0;
+    let mut hi = v.len();
+    while lo < hi {
+        let mid = (lo + hi) / 2;
+        if v[mid] < needle {
+            lo = mid + 1;
+        } else {
+            hi = mid;
+        }
+    }
+    lo
+}
+
+/// Parse a single line as an ATX heading (level 1..=6), if it matches.
+/// Mirrors `mdtool.py::HEADING_RE` (`^ {0,3}(#{1,6})(?:[ \t]+(.*?))?[ \t]*$`):
+/// up to three leading spaces, 1–6 `#`, then either a blank/title, with
+/// trailing whitespace trimmed off the title. Returns `(level, title)`.
+///
+/// A `#` glued to text (`#Title`) is NOT a heading (CommonMark requires the
+/// space or an end-of-line after the `#` run). A 7+ run (`#######`) is NOT a
+/// heading (ATX max is 6).
+pub fn heading_of(line: &[u8]) -> Option<(u8, String)> {
+    let mut i = 0;
+    // tolerate up to three leading spaces
+    while i < line.len() && line[i] == b' ' && i < 3 {
+        i += 1;
+    }
+    // count the `#` run
+    let mut level = 0u8;
+    let mut j = i;
+    while j < line.len() && line[j] == b'#' && level < 6 {
+        level += 1;
+        j += 1;
+    }
+    if level == 0 {
+        return None;
+    }
+    // if the run continued to a 7th `#`, this is not an ATX heading
+    if j < line.len() && line[j] == b'#' {
+        return None;
+    }
+    // after the `#` run: either end-of-line, or whitespace then optional title
+    if j == line.len() {
+        return Some((level, String::new()));
+    }
+    let sep = line[j];
+    if sep != b' ' && sep != b'\t' {
+        return None;
+    }
+    // skip the separating whitespace run
+    while j < line.len() && (line[j] == b' ' || line[j] == b'\t') {
+        j += 1;
+    }
+    if j == line.len() {
+        return Some((level, String::new()));
+    }
+    // take the rest as the title, trimming trailing whitespace
+    let mut end = line.len();
+    while end > j && (line[end - 1] == b' ' || line[end - 1] == b'\t') {
+        end -= 1;
+    }
+    let title = String::from_utf8_lossy(&line[j..end]).into_owned();
+    Some((level, title))
+}
+
+/// A code-fence detector: up to three leading spaces, then a run of 3+
+/// backticks or tildes. Returns `(fence_char, run_length)`. Mirrors
+/// `mdtool.py::FENCE_RE` (`^ {0,3}(`{3,}|~{3,})`).
+pub fn fence_of(line: &[u8]) -> Option<(u8, usize)> {
+    let mut i = 0;
+    // tolerate up to three leading spaces
+    while i < line.len() && line[i] == b' ' && i < 3 {
+        i += 1;
+    }
+    if i >= line.len() {
+        return None;
+    }
+    let c = line[i];
+    if c != b'`' && c != b'~' {
+        return None;
+    }
+    let mut n = 0;
+    let mut j = i;
+    while j < line.len() && line[j] == c {
+        n += 1;
+        j += 1;
+    }
+    if n < 3 {
+        return None;
+    }
+    Some((c, n))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn fence_three_plus_same_char() {
+        assert_eq!(fence_of(b"```"), Some((b'`', 3)));
+        assert_eq!(fence_of(b"```rust"), Some((b'`', 3)));
+        assert_eq!(fence_of(b"~~~~"), Some((b'~', 4)));
+        assert_eq!(fence_of(b"  ```"), Some((b'`', 3)));
+        assert_eq!(fence_of(b"   ~~~"), Some((b'~', 3)));
+        // fewer than 3, or a non-fence char, is not a fence
+        assert_eq!(fence_of(b"``"), None);
+        assert_eq!(fence_of(b"~~"), None);
+        assert_eq!(fence_of(b"###"), None);
+        assert_eq!(fence_of(b"# Title"), None);
+        assert_eq!(fence_of(b"    ```"), None); // four spaces is too many
+    }
+
+    #[test]
+    fn fence_close_rule_same_char_at_least_len() {
+        // the *caller* applies the close rule (same char, len >= opener);
+        // fence_of just reports (char, len) so the caller can compare.
+        let open = fence_of(b"```rust").unwrap();
+        let close = fence_of(b"```").unwrap();
+        assert_eq!(close.0, open.0);
+        assert!(close.1 >= open.1);
+        // a `~~~` line does NOT close a ``` fence (different char)
+        let tilde = fence_of(b"~~~").unwrap();
+        assert_ne!(tilde.0, open.0);
+    }
+
+    #[test]
+    fn heading_levels_and_titles() {
+        assert_eq!(heading_of(b"# Title"), Some((1, "Title".to_string())));
+        assert_eq!(heading_of(b"## Files"), Some((2, "Files".to_string())));
+        assert_eq!(heading_of(b"### Sub"), Some((3, "Sub".to_string())));
+        assert_eq!(heading_of(b"###### Deep"), Some((6, "Deep".to_string())));
+        // no title
+        assert_eq!(heading_of(b"#"), Some((1, String::new())));
+        assert_eq!(heading_of(b"#   "), Some((1, String::new())));
+        // leading spaces (<=3)
+        assert_eq!(heading_of(b"  # Indented"), Some((1, "Indented".to_string())));
+        // tab separator
+        assert_eq!(heading_of(b"#\tTabbed"), Some((1, "Tabbed".to_string())));
+    }
+
+    #[test]
+    fn heading_not_matched_cases() {
+        assert_eq!(heading_of(b"####### Seven"), None); // 7+ hashes
+        assert_eq!(heading_of(b"####"), Some((4, String::new())));
+        assert_eq!(heading_of(b"#Title"), None); // no space
+        assert_eq!(heading_of(b"    # Four spaces"), None); // >3 leading
+        assert_eq!(heading_of(b"plain line"), None);
+        assert_eq!(heading_of(b"##files"), None);
+    }
+
+    #[test]
+    fn doc_new_empty() {
+        let d = Doc::new(Vec::new());
+        assert!(d.sections.is_empty());
+        assert_eq!(d.total_lines, 0);
+        assert_eq!(d.preamble_end, 0);
+    }
+
+    #[test]
+    fn doc_new_single_h1() {
+        let d = Doc::new(b"# Alpha\nhello world\n".to_vec());
+        assert_eq!(d.sections.len(), 1);
+        assert_eq!(d.sections[0].level, 1);
+        assert_eq!(d.sections[0].title, "Alpha");
+        assert_eq!(d.sections[0].ref_, "1");
+        assert_eq!(d.preamble_end, 0);
+        assert_eq!(d.sections[0].start, 0);
+        assert_eq!(d.sections[0].end, d.data.len()); // whole file
+        assert_eq!(d.sections[0].own_end, d.data.len());
+        assert_eq!(d.total_lines, 2);
+        assert_eq!(d.sections[0].start_line, 0);
+        assert_eq!(d.sections[0].end_line, 2);
+    }
+
+    #[test]
+    fn doc_new_tree_and_dotted_refs() {
+        let buf = b"# Root\nintro\n\n## A\ncontent A\n\n## B\ncontent B\n\n### B1\ncontent B1\n\n# Sec2\nsecond\n"
+            .to_vec();
+        let d = Doc::new(buf);
+        let refs: Vec<&str> = d.sections.iter().map(|s| s.ref_.as_str()).collect();
+        assert_eq!(refs, vec!["1", "1.1", "1.2", "1.2.1", "2"]);
+        let levels: Vec<u8> = d.sections.iter().map(|s| s.level).collect();
+        assert_eq!(levels, vec![1, 2, 2, 3, 1]);
+        // indices: 0=Root(1) 1=A(2) 2=B(2) 3=B1(3) 4=Sec2(1)
+        // `Root`'s full span ends at the next H1 (`Sec2`).
+        assert_eq!(d.sections[0].end, d.sections[4].start);
+        // `A`'s full span ends at `B` (next level<=2).
+        assert_eq!(d.sections[1].end, d.sections[2].start);
+        // `B`'s full span ends at `Sec2` (next level<=2), *including B1*.
+        assert_eq!(d.sections[2].end, d.sections[4].start);
+        // `B1`'s full span also ends at `Sec2` (next level<=3).
+        assert_eq!(d.sections[3].end, d.sections[4].start);
+        // `Sec2` is last — reaches the file end.
+        assert_eq!(d.sections[4].end, d.data.len());
+        // own_end vs full: B's own body stops at B1 (next heading any level),
+        // but its full span continues past B1 to Sec2.
+        assert_eq!(d.sections[2].own_end, d.sections[3].start);
+        assert!(d.sections[2].end > d.sections[2].own_end);
+        assert!(d.sections[0].end < d.data.len());
+        assert!(d.sections[2].end < d.data.len());
+        // preamble is 0 (no text before the first H1)
+        assert_eq!(d.preamble_end, 0);
+    }
+
+    #[test]
+    fn doc_new_fences_are_skipped() {
+        let buf = b"# Root\nintroduction text\n\n```\n# not a heading\n## still not\n```\n\n## Real heading\nbody\n"
+            .to_vec();
+        let d = Doc::new(buf);
+        let titles: Vec<&str> = d.sections.iter().map(|s| s.title.as_str()).collect();
+        assert_eq!(titles, vec!["Root", "Real heading"]);
+    }
+
+    #[test]
+    fn is_dotted_accepts_and_rejects() {
+        assert!(is_dotted("1"));
+        assert!(is_dotted("12"));
+        assert!(is_dotted("1.2"));
+        assert!(is_dotted("1.2.3"));
+        assert!(!is_dotted(""));
+        assert!(!is_dotted("1."));
+        assert!(!is_dotted(".1"));
+        assert!(!is_dotted("1..2"));
+        assert!(!is_dotted("a"));
+        assert!(!is_dotted("1a"));
+        assert!(!is_dotted("1 2"));
+    }
+
+    #[test]
+    fn resolve_dotted_numbers() {
+        let d = Doc::new(
+            b"# Root\n\n## A\n\n## B\n\n### B1\n\n# Sec2\n".to_vec(),
+        );
+        assert_eq!(d.resolve("1"), Ok(0));
+        assert_eq!(d.resolve("1.1"), Ok(1));
+        assert_eq!(d.resolve("1.2"), Ok(2));
+        assert_eq!(d.resolve("1.2.1"), Ok(3));
+        assert_eq!(d.resolve("2"), Ok(4));
+        assert!(matches!(
+            d.resolve("1.3"),
+            Err(SectionError::NoSection { .. })
+        ));
+        assert!(matches!(
+            d.resolve("9"),
+            Err(SectionError::NoSection { .. })
+        ));
+    }
+
+    #[test]
+    fn resolve_title_path_and_unique_exact_and_substring() {
+        let d = Doc::new(
+            b"# Root\nintro text\n\n## Installation\nbody\n\n### Quick Start\nbody\n\n## Usage\nbody\n"
+                .to_vec(),
+        );
+        // dotted
+        assert_eq!(d.resolve("1.1"), Ok(1));
+        // full title path
+        assert_eq!(d.resolve("Root > Installation"), Ok(1));
+        assert_eq!(d.resolve("Root > Installation > Quick Start"), Ok(2));
+        // unique exact title anywhere
+        assert_eq!(d.resolve("Usage"), Ok(3));
+        // unique substring (last part only)
+        assert_eq!(d.resolve("Quick"), Ok(2));
+    }
+
+    #[test]
+    fn resolve_empty_and_ambiguity() {
+        let d = Doc::new(
+            b"# Root\n\n## Alpha\none\n\n## Alpha\ntwo\n".to_vec(),
+        );
+        assert!(matches!(d.resolve(""), Err(SectionError::EmptyRef)));
+        assert!(matches!(d.resolve("   "), Err(SectionError::EmptyRef)));
+        // two sections both titled "Alpha" -> substring stage finds 2 -> ambiguous
+        match d.resolve("Alpha") {
+            Err(SectionError::Ambiguous { candidates, .. }) => {
+                assert_eq!(candidates, vec!["1.1 Alpha".to_string(), "1.2 Alpha".to_string()]);
+            }
+            other => panic!("expected Ambiguous, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn own_and_full_bytes_differ_when_subsections_exist() {
+        let d = Doc::new(
+            b"# Root\n\n## B\nown body\n\n### B1\nsub body\n"
+                .to_vec(),
+        );
+        let own = d.own_bytes("1.1").unwrap();
+        let full = d.full_bytes("1.1").unwrap();
+        // own body excludes B1; full span includes B1 -> full is strictly longer
+        assert!(full.len() > own.len());
+        let own = String::from_utf8(own.to_vec()).unwrap();
+        let full = String::from_utf8(full.to_vec()).unwrap();
+        assert!(own.starts_with("## B\nown body"));
+        assert!(full.contains("### B1"));
+    }
+
+    #[test]
+    fn splice_is_pure_and_correct() {
+        let buf = b"hello world".to_vec();
+        let new = splice(&buf, 0, 5, b"goodbye");
+        assert_eq!(String::from_utf8(new).unwrap(), "goodbye world");
+        // original buffer untouched (clone semantics)
+        assert_eq!(&buf, b"hello world");
+        // empty insert (pure no-op)
+        let same = splice(&buf, 5, 5, b"");
+        assert_eq!(String::from_utf8(same).unwrap(), "hello world");
+        // replace tail
+        let tail = splice(&buf, 6, 11, b"rust");
+        assert_eq!(String::from_utf8(tail).unwrap(), "hello rust");
+        // whole replace
+        let whole = splice(&buf, 0, 11, b"X");
+        assert_eq!(String::from_utf8(whole).unwrap(), "X");
+    }
+
+    // ---- editing ops -----------------------------------------------------
+
+    #[test]
+    fn replace_in_whole_file_and_scoped() {
+        let d = Doc::new(b"# Root\nhello old\n\n## A\nold text\n\n## B\nkeep old\n".to_vec());
+        // whole file: replace 2 occurrences
+        let (new, n) = d.replace_in(None, "old", "new", 0).unwrap();
+        assert_eq!(n, 3); // whole, three occurrences (hello old, old text, keep old)
+        let s = String::from_utf8(new).unwrap();
+        assert!(s.contains("hello new"));
+        assert!(s.contains("new text"));
+        assert!(s.contains("keep new"));
+        // scoped to section 1.2 (B): replace 1 occurrence only
+        let (new, n) = d.replace_in(Some("1.2"), "old", "new", 0).unwrap();
+        assert_eq!(n, 1);
+        let s = String::from_utf8(new).unwrap();
+        assert!(s.contains("keep new"));
+        assert!(s.contains("old text")); // section B is not 1.2 (B is 1.2) — wait:
+        // 1.1=A, 1.2=B. So scoped to B: B's "old"->"new", A's "old text" untouched.
+    }
+
+    #[test]
+    fn replace_in_count_limits_replacements() {
+        let d = Doc::new(b"# Root\nfoo foo foo\n".to_vec());
+        let (new, n) = d.replace_in(None, "foo", "bar", 2).unwrap();
+        assert_eq!(n, 2);
+        let s = String::from_utf8(new).unwrap();
+        assert_eq!(s, "# Root\nbar bar foo\n");
+    }
+
+    #[test]
+    fn replace_in_no_match_is_notfound() {
+        let d = Doc::new(b"# Root\nhello\n".to_vec());
+        match d.replace_in(None, "absent", "x", 0) {
+            Err(SectionError::NotFound { scope, .. }) => {
+                assert_eq!(scope, "whole file".to_string());
+            }
+            other => panic!("expected NotFound, got {other:?}"),
+        }
+        match d.replace_in(Some("1"), "absent", "x", 0) {
+            Err(SectionError::NotFound { scope, .. }) => {
+                assert_eq!(scope, "1".to_string());
+            }
+            other => panic!("expected NotFound, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn set_section_default_replaces_whole_section() {
+        let d = Doc::new(b"# Root\nold heading body\n\n## A\nold A body\n".to_vec());
+        let new = d.set_section("1.1", "## A\nbrand new A body\n", false).unwrap();
+        let s = String::from_utf8(new).unwrap();
+        assert!(s.contains("brand new A body"));
+        assert!(!s.contains("old A body"));
+        // the heading was replaced by the caller-supplied heading
+        assert!(!s.contains("## A\nold"));
+    }
+
+    #[test]
+    fn set_section_keep_heading_preserves_heading_line() {
+        let d = Doc::new(b"# Root\n\n## A\nold A body\n".to_vec());
+        let new = d.set_section("1.1", "brand new A body", true).unwrap();
+        let s = String::from_utf8(new).unwrap();
+        let pos = s.find("old A body").unwrap_or(usize::MAX);
+        // the original heading line `## A` should still be present, followed
+        // by a blank line, then the new body
+        assert!(s.starts_with("# Root\n\n## A\n\nbrand new A body"));
+        assert_eq!(pos, usize::MAX);
+    }
+
+    #[test]
+    fn append_section_appends_before_next_heading() {
+        let d = Doc::new(b"# Root\n\n## A\ncurrent A body\n\n## B\nb body\n".to_vec());
+        let new = d.append_section("1.1", "appended text").unwrap();
+        let s = String::from_utf8(new).unwrap();
+        // A's content now contains the append; A still ends before `## B`.
+        assert!(s.contains("current A body\n\nappended text"));
+        assert!(s.contains("## B\nb body"));
+        // and append is *before* `## B`
+        let pos_a = s.find("appended text").unwrap();
+        let pos_b = s.find("## B").unwrap();
+        assert!(pos_a < pos_b);
+    }
+
+    #[test]
+    fn append_section_creates_blank_line_separation() {
+        let d = Doc::new(b"# Root\nno blank here\n".to_vec());
+        let new = d.append_section("1", "more").unwrap();
+        let s = String::from_utf8(new).unwrap();
+        // existing content ends without a blank line; the append must add one
+        assert!(s.contains("no blank here\n\nmore"));
+    }
+
+    #[test]
+    fn insert_section_end() {
+        let d = Doc::new(b"# Root\nbody\n".to_vec());
+        let (ins, chunk) = d
+            .insert_section(
+                SectionPlacement::End,
+                None,
+                "new body text",
+                "New",
+                Some(2),
+            )
+            .unwrap();
+        assert_eq!(ins, d.data.len());
+        let s = String::from_utf8(chunk.to_vec()).unwrap();
+        assert!(s.contains("## New"));
+        assert!(s.contains("new body text"));
+    }
+
+    #[test]
+    fn insert_section_child_inferred_level() {
+        let d = Doc::new(b"# Root\n\n## A\nbody A\n".to_vec());
+        let (_ins, chunk) = d
+            .insert_section(SectionPlacement::Child, Some("1.1"), "child body", "Child", None)
+            .unwrap();
+        let s = String::from_utf8(chunk.to_vec()).unwrap();
+        // prefix is a blank-line separator (the target ends with a single
+        // newline), then the heading `### Child`
+        assert!(s.strip_prefix('\n').unwrap().starts_with("### Child"));
+        assert!(s.contains("### Child\n\nchild body"));
+    }
+
+    #[test]
+    fn insert_section_before_uses_target_start() {
+        let d = Doc::new(b"# Root\n\n## A\nA body\n".to_vec());
+        let (ins, _chunk) = d
+            .insert_section(
+                SectionPlacement::Before,
+                Some("1.1"),
+                "x",
+                "Pre",
+                None,
+            )
+            .unwrap();
+        // insertion is exactly at `A`'s start (the A heading byte)
+        assert_eq!(ins, d.sections[1].start);
+    }
+
+    #[test]
+    fn doc_new_fence_close_needs_same_char_and_len() {
+        // open with ~~~~, close must be ~~~ or longer, same char
+        let buf = b"# Root\nbefore\n\n~~~~\n# fenced H1 inside\n~~~~\n\n## After\nbody\n"
+            .to_vec();
+        let d = Doc::new(buf);
+        let titles: Vec<&str> = d.sections.iter().map(|s| s.title.as_str()).collect();
+        assert_eq!(titles, vec!["Root", "After"]);
+    }
+}

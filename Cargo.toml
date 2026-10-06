@@ -1,0 +1,45 @@
+[workspace]
+# Three crates — one verified core, one DB shell, one CLI:
+#
+#   kb-core   pure Rust + Verus (no std IO) — the *proven* logic
+#   kb-db     rusqlite + FTS5 — the *assumed* shell (FFI/SQL)
+#   kb        single CLI binary — the *assumed* shell (clap)
+#
+# We intentionally separate these three so that the boundary between
+# "proven" and "assumed" is visible in the crate graph. See PLAN.md §9
+# (Verification — proven vs assumed) and §10 (Workspace layout).
+resolver = "2"
+members = ["kb-core", "kb-db", "kb"]
+
+[workspace.package]
+version = "0.0.0"
+edition = "2021"
+license = "MIT"
+
+[workspace.dependencies]
+# --- Verus core ---
+# Exact pin: this machine's Verus (v0.2026.09.06 ARIA fork at
+# ~/.local/bin/verus) was built against vstd 0.0.0-2026-09-06-0133.
+# A `=` pin prevents cargo from drifting to a newer vstd whose
+# metadata won't match what Verus expects.
+vstd = "=0.0.0-2026-09-06-0133"
+
+# --- SQLite (rusqlite + bundled SQLite C) ---
+# `bundled` compiles SQLite from source (needs a C compiler — probed at
+# M0. See §13.1). Avoids a system-wide libsqlite3.
+rusqlite = { version = "0.32", features = ["bundled"] }
+
+# --- CLI ---
+clap = { version = "4.5", features = ["derive"] }
+
+# --- XDG dirs (for ~/.local/share/knowledgebase/kb.db) ---
+dirs = "5"
+
+# --- TUI (M8) ---
+# ratatui = the renderer (pure-Rust, terminal-agnostic, zero C deps);
+# crossterm = the cross-platform terminal backend (raw mode + event loop).
+# Both are *assumed* shells (M8.0): the proven frontmatter-edit +
+# corpus-list logic they wrap is already in `kb-core` + `kb-db`. Versions
+# pinned to what is cached offline on this box (see `~/.cargo/registry`).
+ratatui  = "0.29"
+crossterm = "0.28"

@@ -1,0 +1,13 @@
+# Rust / Cargo (workspace)
+target/
+**/*.rs.bk
+Cargo.lock
+
+# Verus
+verus-cache/
+*.vme
+
+# Stray runtime output from CLI runs (a `--db=X` arg that was mis-parsed as a dir)
+--db=
+err.log
+out.json

@@ -1,0 +1,25 @@
+[package]
+name = "kb"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "kb"
+path = "src/main.rs"
+
+[dependencies]
+clap = { workspace = true }
+kb-core = { path = "../kb-core" }
+kb-db   = { path = "../kb-db" }
+dirs    = { workspace = true }
+# The CLI writes SQL directly against `Db.conn` (a `rusqlite::Connection`),
+# so it needs the crate for `params!` / `OptionalExtension` / the FTS5
+# `snippet`/`bm25` functions — matching `kb-db`'s own dep (same bundled
+# build, one SQLite in the tree).
+rusqlite = { workspace = true }
+# M8 — the TUI shell (assumed, like clap/rusqlite). Only the `kb` binary
+# links these; `kb-core` + `kb-db` stay TUI-free so the verified/assumed
+# boundary stays visible in the crate graph (PLAN §9/§10).
+ratatui   = { workspace = true }
+crossterm = { workspace = true }

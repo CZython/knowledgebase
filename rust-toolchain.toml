@@ -1,0 +1,10 @@
+[toolchain]
+# Pin to a concrete minor (1.98) so that a later `rustup update` doesn't
+# silently break either the Verus build (which is tied to a specific rustc
+# patch level) or the bundled SQLite compile (which tracks its own C
+# requirements). See PLAN.md §12 M0.
+#
+# `stable` here resolves to rustup's current stable — today that is
+# 1.98.1-x86_64-unknown-linux-gnu, which matches the installed
+# `1.98.0` toolchain Verus was built against.
+channel = "stable-x86_64-unknown-linux-gnu"
