@@ -47,6 +47,7 @@
 //! below, the same exec↔spec split as `tags.rs` / `links.rs`.
 
 use std::fmt::Write as _;
+use std::collections::BTreeMap;
 
 /// The line-level codec constant: a single ASCII tab separates the two fields.
 /// It is a *data* separator, chosen because tag strings never contain one
@@ -138,16 +139,23 @@ pub fn to_text(aliases: &[(String, String)]) -> String {
 ///
 /// Deterministic in the input text: the same text always yields the same set.
 pub fn from_text(text: &str) -> Vec<(String, String)> {
+    // SECURITY_REPORT 3.16: `rows.iter_mut().find(…)` per input line was
+    // O(R²) for large alias files. A `BTreeMap<alias, row-index>` gives
+    // O(log R) last-wins lookups while still preserving first-occurrence
+    // order of the surviving rows.
     let mut rows: Vec<(String, String)> = Vec::new();
+    let mut idx: BTreeMap<String, usize> = BTreeMap::new();
     for line in text.lines() {
         let Some((alias, canonical)) = parse_line(line) else {
             continue;
         };
         // last-wins: replace an existing alias, else push preserving order.
-        if let Some(slot) = rows.iter_mut().find(|(a, _)| a == alias) {
-            slot.1 = canonical.to_string();
-        } else {
-            rows.push((alias.to_string(), canonical.to_string()));
+        match idx.get(alias).copied() {
+            Some(i) => rows[i].1 = canonical.to_string(),
+            None => {
+                idx.insert(alias.to_string(), rows.len());
+                rows.push((alias.to_string(), canonical.to_string()));
+            }
         }
     }
     rows

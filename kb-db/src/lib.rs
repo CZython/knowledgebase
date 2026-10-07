@@ -37,11 +37,20 @@ static TEST_DB_COUNTER: AtomicU64 = AtomicU64::new(0);
 impl Db {
     /// Open or create the SQLite DB at `path`.
     ///
-    /// `:memory:` is a valid path — we use it in tests so they don't
-    /// stomp on `~/.local/share/knowledgebase/kb.db`.
+    /// `:memory:` is a valid path — the connection is opened as an in-memory
+    /// database. Note that `PRAGMA journal_mode=WAL` is **not** meaningful on
+    /// in-memory DBs (SQLite reports `journal_mode="memory"` and refuses
+    /// `WAL`), so it is skipped when the path is `:memory:`.
     pub fn open(path: &Path) -> Result<Self> {
-        let conn = Connection::open(path)?;
-        conn.pragma_update(None, "journal_mode", "WAL")?;
+        let is_memory = path.to_string_lossy() == ":memory:";
+        let conn = if is_memory {
+            Connection::open_in_memory()?
+        } else {
+            Connection::open(path)?
+        };
+        if !is_memory {
+            conn.pragma_update(None, "journal_mode", "WAL")?;
+        }
         Ok(Db { conn, owned_temp_db: None })
     }
 
@@ -168,6 +177,20 @@ impl Db {
     /// the DB has not been migrated yet.
     pub fn schema_version(&self) -> Result<Option<String>> {
         use rusqlite::OptionalExtension;
+        // SECURITY_REPORT 3.15: an *unmigrated* DB has no `meta` table, so the
+        // `SELECT … FROM meta` below would `SqliteFailure("no such
+        // table:meta")` — and `.optional()?` only swallows `NoRows` (an empty
+        // `Ok(None)`), not a table-missing error. Probe the catalog first and
+        // return `None` (the documented "unmigrated" answer) when `meta` is
+        // absent, instead of propagating `Err`.
+        let meta_exists: i64 = self.conn.query_row(
+            "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'meta'",
+            [],
+            |r| r.get(0),
+        )?;
+        if meta_exists == 0 {
+            return Ok(None);
+        }
         let v: Option<String> = self
             .conn
             .query_row("SELECT value FROM meta WHERE key='version'", [], |r| r.get(0))
@@ -206,4 +229,47 @@ fn chrono_now_iso8601() -> String {
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs().to_string())
         .unwrap_or_default()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// SECURITY_REPORT 3.14: `Db::open(":memory:")` used to succeed at
+    /// `Connection::open` but then fail at `pragma_update(None,
+    /// "journal_mode", "WAL")` because an in-memory DB rejects the `WAL`
+    /// value (SQLite reports `journal_mode = memory`). Skip the pragma on
+    /// the `:memory:` path; the rest of the schema still works.
+    #[test]
+    fn open_memory_path_succeeds_and_migrates() {
+        let db = Db::open(std::path::Path::new(":memory:"))
+            .expect("`open(\":memory:\")` should succeed");
+        db.migrate().expect("migrate on :memory: works");
+        assert!(db.schema_version().is_ok());
+    }
+
+    /// SECURITY_REPORT 3.15: `schema_version()` on an *unmigrated* DB (no
+    /// `meta` table) used to `Err` with `SqliteFailure("no such table:
+    /// meta")`; the doc promises `Ok(None)` for "not-yet-migrated".
+    #[test]
+    fn schema_version_is_none_on_fresh_unmigrated_db() {
+        let dir = std::env::temp_dir().join("kbdb_schema_version_3_15");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let db_path = dir.join("fresh.db");
+        let _ = std::fs::remove_file(&db_path);
+        let db = Db::open(&db_path).unwrap();
+        // `open` does NOT migrate automatically.
+        assert_eq!(
+            db.schema_version(),
+            Ok(None),
+            "unmigrated DB → Ok(None) (was Err before the fix)"
+        );
+        // And after `migrate`, it reports the version.
+        db.migrate().unwrap();
+        assert!(
+            db.schema_version().unwrap().is_some(),
+            "post-migrate schema_version should be Some(…)"
+        );
+    }
 }

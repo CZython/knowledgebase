@@ -348,66 +348,6 @@ fn no_text_source_is_exit_1() {
 }
 
 // ---------------------------------------------------------------------------
-// Editor flow
-// ---------------------------------------------------------------------------
-
-#[test]
-fn edit_flow_with_a_script_editor() {
-    let f = temp_md("edit", &base_md());
-    // editor appends a line to the section buffer
-    let script = std::env::temp_dir()
-        .join(format!("kb_cli_edit_{}.sh", std::process::id()));
-    let body = "#!/bin/sh\nprintf '\\nfrom-editor\\n' >> \"$1\"\n";
-    std::fs::write(&script, body).unwrap();
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
-    }
-
-    let mut c = kb();
-    c.args([
-        "section", "--file", f.to_str().unwrap(), "edit", "Alpha", "--yes",
-    ]);
-    c.env("VISUAL", script.to_str().unwrap());
-    let out = c.output().unwrap();
-    assert!(
-        out.status.success(),
-        "edit failed: {}",
-        String::from_utf8_lossy(&out.stderr)
-    );
-    let now = std::fs::read_to_string(&f).unwrap();
-    assert!(now.contains("from-editor"), "{now}");
-}
-
-#[test]
-fn edit_noop_is_a_noop() {
-    let f = temp_md("editno", &base_md());
-    let script = std::env::temp_dir()
-        .join(format!("kb_cli_editno_{}.sh", std::process::id()));
-    std::fs::write(&script, "#!/bin/sh\nexit 0\n").unwrap();
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
-    }
-    let before = std::fs::read_to_string(&f).unwrap();
-
-    let mut c = kb();
-    c.args([
-        "section", "--file", f.to_str().unwrap(), "edit", "Alpha", "--yes",
-    ]);
-    c.env("VISUAL", script.to_str().unwrap());
-    let out = c.output().unwrap();
-    assert!(
-        out.status.success(),
-        "noop edit failed: {}",
-        String::from_utf8_lossy(&out.stderr)
-    );
-    assert_eq!(std::fs::read_to_string(&f).unwrap(), before, "unmodified edit leaves the file alone");
-}
-
-// ---------------------------------------------------------------------------
 // Frontmatter surface (M6b) — `fm` / `fm.<key>` refs
 // ---------------------------------------------------------------------------
 

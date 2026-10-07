@@ -53,6 +53,10 @@ pub enum SectionError {
     /// `replace_in` was called with a scope but the literal was not found
     /// (mirrors `mdtool.py`'s "nothing to replace").
     NotFound { literal: String, scope: String },
+    /// SECURITY_REPORT 3.13: a `Child` insert under a level-6 target would
+    /// need level 7, which isn't a valid heading level — the old `base.min(6)`
+    /// silently clamped it to a *sibling* of the parent instead of erroring.
+    ChildOfLeaf { ref_: String },
 }
 
 impl std::fmt::Display for SectionError {
@@ -69,6 +73,9 @@ impl std::fmt::Display for SectionError {
             }
             SectionError::NotFound { literal, scope } => {
                 write!(f, "nothing to replace: {literal:?} not found ({scope})")
+            }
+            SectionError::ChildOfLeaf { ref_ } => {
+                write!(f, "cannot insert a child of {ref_:?}: it is already at the maximum heading level (6)")
             }
         }
     }
@@ -342,7 +349,18 @@ impl Doc {
             Some(l) => l,
             None => {
                 let base = match (placement, target) {
-                    (SectionPlacement::Child, Some(i)) => self.sections[i].level + 1,
+                    (SectionPlacement::Child, Some(i)) => {
+                        // SECURITY_REPORT 3.13: a Child under a level-6 target
+                        // would need level 7. The old `base.min(6)` clamped it
+                        // back to 6 — silently inserting a *sibling* of the
+                        // parent. Error instead.
+                        if self.sections[i].level >= 6 {
+                            return Err(SectionError::ChildOfLeaf {
+                                ref_: self.sections[i].title.clone(),
+                            });
+                        }
+                        self.sections[i].level + 1
+                    }
                     (_, Some(i)) => self.sections[i].level,
                     (_, None) => 1,
                 };
@@ -517,7 +535,11 @@ impl Doc {
 /// Invariant: `lo <= hi <= data.len()`.
 pub fn splice(data: &[u8], lo: usize, hi: usize, new: &[u8]) -> Vec<u8> {
     debug_assert!(lo <= hi && hi <= data.len(), "splice range out of bounds");
-    let mut out = Vec::with_capacity(data.len() + new.len() - (hi - lo));
+    // SECURITY_REPORT 3.12: `saturating_sub` so a violated invariant (e.g.
+    // `hi - lo > data.len() + new.len()`) can never underflow the capacity
+    // to a usize near 0 in release, where `debug_assert!` is gone.
+    let cap = data.len().saturating_add(new.len()).saturating_sub(hi.saturating_sub(lo));
+    let mut out = Vec::with_capacity(cap);
     out.extend_from_slice(&data[..lo]);
     out.extend_from_slice(new);
     out.extend_from_slice(&data[hi..]);
@@ -902,6 +924,40 @@ mod tests {
     }
 
     // ---- editing ops -----------------------------------------------------
+
+    #[test]
+    fn insert_child_of_level_6_is_an_error() {
+        // SECURITY_REPORT 3.13: a `Child` insert under a level-6 target would
+        // need level 7. The old `base.min(6)` clamped it back to 6 and silently
+        // produced a *sibling* of the parent. Now it is a proper error.
+        let d = Doc::new(
+            b"# A\n\n## B\n\n### C\n\n#### D\n\n##### E\n\n###### F\nbody\n".to_vec(),
+        );
+        let f = d.resolve("1.1.1.1.1.1").expect("level-6 section resolves");
+        assert_eq!(d.sections[f].level, 6, "target is level 6");
+        match d.insert_section(
+            SectionPlacement::Child,
+            Some("1.1.1.1.1.1"),
+            "child body",
+            "Child of F",
+            None,
+        ) {
+            Err(SectionError::ChildOfLeaf { .. }) => {}
+            other => panic!("expected ChildOfLeaf under a level-6 target, got {other:?}"),
+        }
+        // A level-5 target is fine (child would be level 6) — pin the boundary.
+        let d5 = Doc::new(b"# A\n\n## B\n\n### C\n\n#### D\n\n##### E\nbody\n".to_vec());
+        let e = d5.resolve("1.1.1.1.1").expect("level-5 section resolves");
+        assert_eq!(d5.sections[e].level, 5, "target is level 5");
+        d5.insert_section(
+            SectionPlacement::Child,
+            Some("1.1.1.1.1"),
+            "child body",
+            "Child of E",
+            None,
+        )
+        .expect("child of a level-5 target is legal (yields level 6)");
+    }
 
     #[test]
     fn replace_in_whole_file_and_scoped() {

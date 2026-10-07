@@ -32,6 +32,8 @@
 //! The concrete boundary cases (whitespace-only tags, mixed-case alias hits,
 //! empty list → `Vec::new()`) are pinned by the unit tests below.
 
+use std::collections::{BTreeMap, BTreeSet};
+
 /// Store-time normalization (§9 `tags`):
 /// - trim leading/trailing whitespace on each item
 /// - drop empty / whitespace-only items
@@ -44,8 +46,14 @@
 ///
 /// Idempotent: `normalize(normalize(x)) == normalize(x)`.
 pub fn normalize(tags: &[String]) -> Vec<String> {
+    // SECURITY_REPORT 3.16: use a `BTreeSet<String>` for "seen" instead of a
+    // `Vec<String>` with `seen.iter().any(…)` — the old per-element linear
+    // scan is O(n²) for large `tags:` lists, and the `BTreeSet` gives O(n log n).
+    // The emitted `Vec<String>` still preserves first-occurrence order: we
+    // test the membership in the set, and only push to `out` when the
+    // element is new.
+    let mut seen: BTreeSet<String> = BTreeSet::new();
     let mut out: Vec<String> = Vec::new();
-    let mut seen: Vec<String> = Vec::new();
     for t in tags {
         let trimmed = t.trim();
         if trimmed.is_empty() {
@@ -53,8 +61,7 @@ pub fn normalize(tags: &[String]) -> Vec<String> {
         }
         // Dedupe on the *trimmed* value (so `" a"` and `" a "` collapse),
         // keeping first-occurrence order.
-        if !seen.iter().any(|s| *s == trimmed) {
-            seen.push(trimmed.to_string());
+        if seen.insert(trimmed.to_string()) {
             out.push(trimmed.to_string());
         }
     }
@@ -89,21 +96,25 @@ pub fn canonicalize<'a>(
     if want.is_empty() {
         return Vec::new();
     }
-    // canonical of `want` (resolve the chain: an alias whose *value* is the
-    // canonical we end on). We only need the direct map for v1.
+    // SECURITY_REPORT 3.16: `canonical_of` used to re-scan the alias table
+    // (O(A)) for *every* stored tag (O(T·A) total). Pre-build a
+    // `BTreeMap<key, canonical>` once (O(A log A)) so each lookup is
+    // O(log A). The key/value are both the trimmed, lower-cased forms that
+    // the old linear scan compared against.
+    let canon: BTreeMap<String, String> = aliases
+        .iter()
+        .map(|(a, c)| (a.trim().to_lowercase(), c.trim().to_lowercase()))
+        .collect();
     let canonical_of = |s: &str| -> String {
         let sk = s.trim().to_lowercase();
-        for (a, c) in aliases {
-            if a.trim().to_lowercase() == sk {
-                return c.trim().to_lowercase();
-            }
-        }
-        sk
+        canon.get(&sk).cloned().unwrap_or(sk)
     };
     let target = canonical_of(&want);
 
     let mut out: Vec<&'a str> = Vec::new();
-    let mut seen: Vec<String> = Vec::new();
+    // SECURITY_REPORT 3.16: membership set for the output dedupe (was a
+    // `Vec<String>` + per-element `any(…)`).
+    let mut seen: BTreeSet<String> = BTreeSet::new();
     for s in stored {
         let sk = s.trim().to_lowercase();
         if sk.is_empty() {
@@ -114,8 +125,7 @@ pub fn canonicalize<'a>(
         // canonical (this conflates direct, case-fold, and alias paths).
         if sc == target {
             let key = s.as_str();
-            if !seen.iter().any(|x| *x == key) {
-                seen.push(key.to_string());
+            if seen.insert(key.to_string()) {
                 out.push(key);
             }
         }

@@ -259,14 +259,20 @@ fn search_multiword_tag_filter_via_quoted_alias() {
 #[test]
 fn search_not_only_is_a_documented_limited_path() {
     let s = Setup::new("search_notonly");
-    write_page(&s, "a.md", "type: note\ntitle: A\n", "alpha\n");
-    write_page(&s, "b.md", "type: note\ntitle: B\n", "beta\n");
+    write_page(&s, "a.md", "type: note\ntitle: Alpha\n", "alpha\n");
+    write_page(&s, "b.md", "type: note\ntitle: Beta\n", "beta\n");
     add(&s);
     // A leading-`-` (NOT) term alone -> FTS5 can't take a lone NOT, so the
-    // engine falls back to a full-scan MATCH-less query (documented limit).
+    // engine turns it into `NOT EXISTS (SELECT 1 FROM pages_fts WHERE rowid =
+    // pages.rowid AND pages_fts MATCH <term>)` per NOT term. SECURITY_REPORT
+    // 3.5: before that fix, `-beta` alone was a *silent no-op* (returned the
+    // whole corpus up to `LIMIT`). Now the exclusion must actually drop the
+    // page that has "beta" content.
     // `--` stops clap from treating the negative as a flag.
-    let (code, _, err) = run(&s, &["search", "--", "-beta"]);
+    let (code, out, err) = run(&s, &["search", "--", "-beta"]);
     assert_eq!(code, 0, "stderr: {err}");
+    assert!(out.contains("Alpha"), "page Alpha (does not contain beta) must be returned: {out}");
+    assert!(!out.contains("Beta"), "page Beta (contains beta) must be excluded: {out}");
 }
 
 // ---------------------------------------------------------------------------

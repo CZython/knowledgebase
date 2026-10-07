@@ -47,13 +47,17 @@ pub struct RefreshSummary {
     pub gc: usize,
     /// Roots that were walked.
     pub roots_walked: usize,
+    /// GC was skipped because at least one root failed to walk (its pages
+    /// were left in place rather than GC'd against an incomplete candidate
+    /// set — see SECURITY_REPORT 3.3).
+    pub gc_skipped: bool,
     /// A human-readable one-line summary (the CLI shows this verbatim).
     pub note: String,
 }
 
 impl RefreshSummary {
     fn finish(mut self) -> Self {
-        self.note = format!(
+        let base = format!(
             "{} root(s) · {} page(s) indexed · {} skipped (no-type:{} / no-slug:{}) · {} GC'd",
             self.roots_walked,
             self.indexed,
@@ -62,6 +66,11 @@ impl RefreshSummary {
             self.skipped_missing_slug,
             self.gc,
         );
+        self.note = if self.gc_skipped {
+            format!("{base} · GC skipped (a root failed to walk — its pages were left in place)")
+        } else {
+            base
+        };
         self
     }
 }
@@ -88,21 +97,36 @@ fn load_roots(db: &Db) -> Result<Vec<RootRow>> {
 }
 
 /// The *candidate* set of files to index, as the union over all roots of
-/// their `indexed_files`. The dedupe on `abs_path` is implicit (a `BTreeSet`
-/// of canonical paths).
-fn candidate_files(roots: &[RootRow]) -> std::collections::BTreeSet<String> {
+/// their `indexed_files`, together with the roots whose walk *failed*.
+/// The dedupe on `abs_path` is implicit (a `BTreeSet` of canonical paths).
+///
+/// A root whose `build_walk` returns `Err` (a transient `EACCES`, a mid-`rename`
+/// file, a flapping network mount) is reported in the second element and its
+/// files are *absent* from the candidate set. Callers must not GC against that
+/// set (a page under a failed root would look orphaned even though the file is
+/// still on disk) — that is the SECURITY_REPORT 3.3 data-loss window.
+fn candidate_files(
+    roots: &[RootRow],
+) -> (
+    std::collections::BTreeSet<String>,
+    Vec<String>,
+) {
     let mut out: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+    let mut failed: Vec<String> = Vec::new();
     for r in roots {
         let root = Path::new(&r.path);
         let walk = match walk_snapshot::build_walk(root, r.extra_exts.clone()) {
             Ok(w) => w,
-            Err(_) => continue, // root gone — `kb drop-root` surfaces this cleanly later
+            Err(_) => {
+                failed.push(r.path.clone()); // root gone / unreadable — `kb drop-root` surfaces the gone case cleanly later
+                continue;
+            }
         };
         for f in walk_snapshot::indexed_files(&walk, r.include_hidden) {
             out.insert(f);
         }
     }
-    out
+    (out, failed)
 }
 
 /// Read a page's *last-indexed* fingerprint (`mtime_ns`, `content_hash`), if
@@ -152,7 +176,7 @@ pub fn refresh(db: &Db) -> Result<RefreshSummary> {
         return Ok(summ.finish());
     }
 
-    let candidates = candidate_files(&roots);
+    let (candidates, failed_roots) = candidate_files(&roots);
     let mut outcome = IndexOutcome::new();
     let roots_for_pick: Vec<(String, i64)> = roots
         .iter()
@@ -192,7 +216,19 @@ pub fn refresh(db: &Db) -> Result<RefreshSummary> {
 
     // GC: any `pages.abs_path` not in `candidates` is no longer under any
     // root (or the file was deleted but a stale row lingers). Clear it.
-    let gc = gc_orphaned_pages(db, &kept)?;
+    //
+    // SECURITY_REPORT 3.3: if ANY root failed to walk, its files are absent
+    // from `candidates` even though they are still on disk — GC'ing against
+    // that set would delete those pages (silent, partial-index loss). Skip
+    // the GC this run so a transient `EACCES` / mid-rename / flapping mount
+    // never drops a page whose file is still present. The next clean refresh
+    // will reconcile and GC normally.
+    let mut gc = 0usize;
+    if failed_roots.is_empty() {
+        gc = gc_orphaned_pages(db, &kept)?;
+    } else {
+        summ.gc_skipped = true;
+    }
 
     summ.indexed = outcome.upserted;
     summ.skipped_no_type = outcome.skipped_no_type;
@@ -255,7 +291,10 @@ pub fn full_rebuild(db: &Db) -> Result<RefreshSummary> {
     // Only re-index if there are roots to walk; an empty-root DB stays empty
     // (the wipe above is the "full rebuild" of an empty corpus).
     if !roots.is_empty() {
-        candidates_to_records(db, &roots, &mut summ);
+        // SECURITY_REPORT 3.9: a partial wipe + partial re-index must not exit
+        // 0 — a thinner corpus than we started with is a *failure*, so any
+        // per-page upsert error is propagated (non-zero CLI exit).
+        candidates_to_records(db, &roots, &mut summ)?;
     }
     Ok(summ.finish())
 }
@@ -263,24 +302,55 @@ pub fn full_rebuild(db: &Db) -> Result<RefreshSummary> {
 /// Walk every root, build the candidate set, and upsert every candidate.
 /// Used by `full_rebuild` (which wipes `pages` first, so this is a clean
 /// "wipe + rewrite").
-fn candidates_to_records(db: &Db, roots: &[RootRow], summ: &mut RefreshSummary) {
-    let candidates = candidate_files(roots);
+///
+/// SECURITY_REPORT 3.9: returns `Err` if any page failed to upsert (so the
+/// partial-wipe + partial-re-index is surfaced as a non-zero exit rather than
+/// a silent thinner corpus). All per-page errors are collected and reported
+/// together.
+fn candidates_to_records(
+    db: &Db,
+    roots: &[RootRow],
+    summ: &mut RefreshSummary,
+) -> Result<()> {
+    let (candidates, failed_roots) = candidate_files(roots);
+    if !failed_roots.is_empty() {
+        // A root we could not walk contributes no candidates; in a full
+        // rebuild (which wipes first) those pages are simply not re-indexed.
+        // Surface it so the operator knows the rebuild was partial.
+        eprintln!(
+            "kb::full_rebuild: warning — {} root(s) failed to walk (their pages were left un-indexed): {:?}",
+            failed_roots.len(),
+            failed_roots
+        );
+    }
     let mut outcome = IndexOutcome::new();
     let roots_for_pick: Vec<(String, i64)> = roots
         .iter()
         .map(|r| (r.path.clone(), r.seq))
         .collect();
+    let mut errors: Vec<String> = Vec::new();
     for abs in candidates {
         let path = Path::new(&abs);
         if let Some((root, rel)) = walk_snapshot::winning_root(&roots_for_pick, &abs) {
             if let Err(e) = index::upsert_or_skip(db, path, &root, &rel, &mut outcome) {
-                eprintln!("kb::full_rebuild: upsert {abs}: {e}");
+                errors.push(format!("upsert {abs}: {e}"));
             }
         }
     }
     summ.indexed = outcome.upserted;
     summ.skipped_no_type = outcome.skipped_no_type;
     summ.skipped_missing_slug = outcome.skipped_missing_slug;
+    if !errors.is_empty() {
+        return Err(rusqlite::Error::SqliteFailure(
+            rusqlite::ffi::Error::new(-1),
+            Some(format!(
+                "kb::full_rebuild: {} page(s) failed to index: {}",
+                errors.len(),
+                errors.join("; ")
+            )),
+        ));
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -383,6 +453,119 @@ mod tests {
         fs::remove_file(&p).unwrap();
         let s2 = refresh(&db).unwrap();
         assert_eq!(s2.gc, 1, "orphaned page must be GC'd");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn gc_skipped_when_a_root_fails_to_walk() {
+        // SECURITY_REPORT 3.3: with two registered roots, if one becomes
+        // unreadable (its path disappears) mid-session, the GC must be
+        // SKIPPED — not run against a candidate set that is missing that
+        // root's files. Otherwise the surviving root's pages are fine but the
+        // failed root's pages look "orphaned" and get DELETEd even though the
+        // files are still on disk.
+        let base = std::env::temp_dir().join("kbdb_rr_d");
+        let _ = fs::remove_dir_all(&base);
+        let root_a = base.join("rootA");
+        let root_b = base.join("rootB");
+        fs::create_dir_all(&root_a).unwrap();
+        fs::create_dir_all(&root_b).unwrap();
+        fs::write(root_a.join("a.md"), "---\ntype: note\ntitle: A\n---\nbody a\n").unwrap();
+        fs::write(root_b.join("b.md"), "---\ntype: note\ntitle: B\n---\nbody b\n").unwrap();
+
+        let db = fresh_db();
+        db.add_root(
+            &fs::canonicalize(&root_a).unwrap().to_string_lossy(),
+            None, false,
+        ).unwrap();
+        db.add_root(
+            &fs::canonicalize(&root_b).unwrap().to_string_lossy(),
+            None, false,
+        ).unwrap();
+
+        let s1 = refresh(&db).unwrap();
+        assert_eq!(s1.indexed, 2, "both pages indexed");
+        assert!(!s1.gc_skipped);
+
+        // Deterministic "transient walk error": rootB's directory vanishes
+        // (a permission flip / mid-rename / flapping mount). rootB's
+        // `build_walk` now returns Err → it is a failed root.
+        let root_b_renamed = base.join("rootB.away");
+        fs::rename(&root_b, &root_b_renamed).unwrap();
+
+        let s2 = refresh(&db).unwrap();
+        assert!(s2.gc_skipped, "GC must be skipped when a root failed to walk");
+        assert_eq!(s2.gc, 0, "no pages GC'd against an incomplete candidate set");
+
+        // Both pages survive (a.md under the clean root, b.md under the failed
+        // root). b.md's file is still on disk (now at rootB.away), so it must
+        // NOT have been deleted from the index.
+        let b_present: i64 = db.conn
+            .query_row(
+                "SELECT COUNT(*) FROM pages WHERE title = 'B'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(b_present, 1, "the failed root's page must survive a skipped GC");
+        let a_present: i64 = db.conn
+            .query_row(
+                "SELECT COUNT(*) FROM pages WHERE title = 'A'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(a_present, 1);
+
+        let _ = fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn full_rebuild_propagates_per_page_errors() {
+        // SECURITY_REPORT 3.9: a partial wipe + partial re-index (e.g. one
+        // file unreadable mid-run) must return `Err` so the CLI exits
+        // non-zero — not silently succeed with a thinner corpus.
+        let dir = std::env::temp_dir().join("kbdb_rr_e");
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let ok_file = dir.join("ok.md");
+        let bad_file = dir.join("bad.md");
+        fs::write(
+            &ok_file,
+            "---\ntype: note\ntitle: OK\n---\nbody ok\n",
+        ).unwrap();
+        fs::write(
+            &bad_file,
+            "---\ntype: note\ntitle: BAD\n---\nbody bad\n",
+        ).unwrap();
+
+        let db = fresh_db();
+        db.add_root(
+            &fs::canonicalize(&dir).unwrap().to_string_lossy(),
+            None, false,
+        ).unwrap();
+
+        // Make bad_file unreadable (deterministic upsert failure).
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(&bad_file, fs::Permissions::from_mode(0o000)).unwrap();
+        }
+
+        // full_rebuild must now surface the per-page error.
+        let res = full_rebuild(&db);
+        #[cfg(unix)]
+        {
+            let _ = res.expect_err("an unreadable file should make full_rebuild fail");
+        }
+        #[cfg(not(unix))]
+        let _ = res;
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(&bad_file, fs::Permissions::from_mode(0o644)).unwrap();
+        }
         let _ = fs::remove_dir_all(&dir);
     }
 }

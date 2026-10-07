@@ -116,7 +116,7 @@ fn split_type_slug(s: &str) -> Option<(&str, &str)> {
 /// root (so `wiki/attention.md` matches a page at `/root/wiki/attention.md`).
 /// A bare slug or a `type:slug` id is *not* a path (stage 3 is tried only
 /// after stages 1/2 yield nothing, and only compares path-shaped values).
-fn path_matches(query: &str, page: &Page) -> bool {
+fn path_matches(query: &str, page: &Page, suffix: &str) -> bool {
     let q = query.trim();
     if q.is_empty() {
         return false;
@@ -125,8 +125,11 @@ fn path_matches(query: &str, page: &Page) -> bool {
         return true;
     }
     // suffix form: `…/q` — accept a query that is the tail of the stored path
-    // (e.g. `wiki/attention.md` → `/root/wiki/attention.md`).
-    page.abs_path.ends_with(&format!("/{}", q)) || page.rel_path.ends_with(&format!("/{}", q))
+    // (e.g. `wiki/attention.md` → `/root/wiki/attention.md`). `suffix` is the
+    // precomputed `/q` (see stage 3 below) — SECURITY_REPORT 3.16: hoisting
+    // the `format!("/{}", q)` out of the per-page closure removes 2
+    // allocations per page.
+    page.abs_path.ends_with(suffix) || page.rel_path.ends_with(suffix)
 }
 
 /// Resolve a raw reference against a corpus, in §4 priority order.
@@ -154,6 +157,13 @@ pub fn resolve(query: &str, pages: &[Page]) -> Resolution {
     }
 
     // ---- stage 1: `type:slug` (display-id) exact ---------------------------
+    // SECURITY_REPORT 3.6: only return early when stage 1 actually hit
+    // something. Previously the `return finish(hits)` was unconditional, so
+    // `note2:gpt` (no page of type `note2` with slug `gpt`) was resolved as
+    // `Empty` even though a `type:slug`-shaped query with a non-existent type
+    // might still match a page at stage 2 (bare-slug exact), 3 (path), or 4
+    // (substring). Only return `finish` for a non-empty stage 1; otherwise
+    // fall through.
     if let Some((typ, slug)) = split_type_slug(query) {
         let typ_l = typ.to_lowercase();
         let slug_l = slug.to_lowercase();
@@ -161,7 +171,9 @@ pub fn resolve(query: &str, pages: &[Page]) -> Resolution {
             .iter()
             .filter(|p| p.typ.to_lowercase() == typ_l && p.slug.to_lowercase() == slug_l)
             .collect();
-        return finish(hits);
+        if !hits.is_empty() {
+            return finish(hits);
+        }
     }
 
     // ---- stage 2: bare-slug exact, any type -------------------------------
@@ -174,7 +186,14 @@ pub fn resolve(query: &str, pages: &[Page]) -> Resolution {
     }
 
     // ---- stage 3: explicit path ref ---------------------------------------
-    let pathy: Vec<&Page> = pages.iter().filter(|p| path_matches(query, p)).collect();
+    // SECURITY_REPORT 3.16: compute the `/q` suffix *once* (not per page) and
+    // pass it into `path_matches`.
+    //
+    // NOTE: uses `query.trim()` — the *original* (case-sensitive) query —
+    // to keep `path_matches`' documented case-sensitive semantic. `q` from
+    // the stage-0 setup is the lowercased form and would be the wrong key.
+    let stage3_suffix = format!("/{}", query.trim());
+    let pathy: Vec<&Page> = pages.iter().filter(|p| path_matches(query, p, &stage3_suffix)).collect();
     if !pathy.is_empty() {
         return finish(pathy);
     }
@@ -262,6 +281,20 @@ mod tests {
         let t = resolve("wiki:Attention", &corpus());
         assert_eq!(t, Resolution::Unique("/root/wiki/attention.md".into()),
             "wiki:Attention selects the wiki page");
+    }
+
+    #[test]
+    fn colon_slug_falls_through_to_bare_slug_stage() {
+        // SECURITY_REPORT 3.6: a `type:slug`-shaped query whose *type* doesn't
+        // match must not short-circuit the resolver. `split_type_slug("foo:bar")`
+        // is `Some(("foo","bar"))`, so before the fix stage 1 returned
+        // `finish(empty) == Empty` unconditionally and stages 2/3/4 never ran.
+        // A page whose slug is *literally* "foo:bar" is only reachable via the
+        // stage-2 bare-slug exact match — which the old code skipped.
+        let pages = vec![page("/root/x.md", "foo:bar", "note", "x.md")];
+        let r = resolve("foo:bar", &pages);
+        assert_eq!(r, Resolution::Unique("/root/x.md".into()),
+            "stage-1 type miss must fall through to stage-2 bare-slug match");
     }
 
     #[test]

@@ -75,6 +75,13 @@ fn split_lines(s: &str) -> Vec<String> {
 fn opcodes(old: &[String], new: &[String]) -> Vec<Op> {
     let n = old.len();
     let m = new.len();
+    // SECURITY_REPORT 3.16: cap the DP table size. If both sides are large
+    // (n*m > 10M cells ≈ 40 MB of u32), bail to a single Replace op — the
+    // output is still a valid unified diff, just one big hunk.
+    const LCS_CAP: usize = 10_000_000;
+    if n * m > LCS_CAP {
+        return vec![Op::Replace { i1: 0, i2: n, j1: 0, j2: m }];
+    }
     let mut dp = vec![vec![0usize; m + 1]; n + 1];
     for i in (0..n).rev() {
         for j in (0..m).rev() {

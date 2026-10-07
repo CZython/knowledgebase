@@ -403,17 +403,20 @@ fn replace_op_json_roundtrip() {
 }
 
 #[test]
-fn section_edit_json_rejects_gracefully() {
-    let s = Setup::new("edit");
+fn section_edit_removed() {
+    // The `edit` subcommand was dropped at compile time (it spawned $VISUAL/
+    // $EDITOR — the RCE vector, SECURITY_REPORT 3.1). `edit` must no longer be
+    // a recognised section op.
+    let s = Setup::new("editgone");
     let file = s.root.join("doc.md");
     fs::create_dir_all(&s.root).unwrap();
     fs::write(&file, "# Sec\n\nx\n").unwrap();
     let (code,_,err) = run(&s, &["section",
         "--file", file.to_str().unwrap(),
-        "edit", "Sec", "--json",
+        "edit", "Sec", "--yes",
     ]);
-    assert_ne!(code, 0, "section edit --json must reject (interactive flow)");
-    assert!(err.contains("--json"), "the error must name the flag; got: {err}");
+    assert_ne!(code, 0, "`section edit` was removed; clap should reject it");
+    let _ = err; // clap names the unrecognised subcommand on stderr
 }
 
 // =============== the search-namespace --json (already had it) ===============

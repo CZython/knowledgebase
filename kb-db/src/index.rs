@@ -124,14 +124,23 @@ fn extract_language(frontmatter_text: &str) -> Option<String> {
     for line in frontmatter_text.lines() {
         let t = line.trim();
         // Key at start of line, colon-terminated, value rest of line.
+        // SECURITY_REPORT 3.10: require the character *immediately after* an
+        // optional run of whitespace to be `:`. A bare `language` prefix
+        // would otherwise also accept `languages: en, fr` (leaving value `s`)
+        // and `language_x: …` (leaving value `x: …`), polluting the
+        // `language:` search-filter column. The required boundary rejects
+        // both.
         let rest = match t.strip_prefix("language") {
             Some(r) => r,
             None => continue,
         };
         let rest = rest.trim_start();
         let rest = match rest.strip_prefix(':') {
-            Some(v) => v.trim_start(),
-            None => continue,
+            Some(v) => v,
+            None => {
+                // `languages:` / `language_x:` — key boundary not met.
+                continue;
+            }
         };
         let v = rest.trim();
         let v = v
@@ -523,6 +532,34 @@ mod tests {
             "empty value → None"
         );
         assert_eq!(extract_language("type: note\ntitle: x\n"), None);
+    }
+
+    #[test]
+    fn extract_language_requires_key_boundary() {
+        // SECURITY_REPORT 3.10: the `language` prefix must be followed by the
+        // `:` boundary (after optional whitespace). Sibling keys that merely
+        // *share* the prefix must not pollute the `language:` filter column.
+        // Positive forms.
+        assert_eq!(
+            extract_language("type: note\nlanguage: en\n"),
+            Some("en".to_string())
+        );
+        assert_eq!(
+            extract_language("type: note\nlanguage : en\n"),
+            Some("en".to_string()),
+            "a space before the colon is still a valid key boundary"
+        );
+        // Negative forms (sibling keys, not the `language` key).
+        assert_eq!(
+            extract_language("type: note\nlanguages: en, fr\n"),
+            None,
+            "`languages:` is a sibling key, must not set language"
+        );
+        assert_eq!(
+            extract_language("type: note\nlanguage_x: yz\n"),
+            None,
+            "`language_x:` is a sibling key, must not set language"
+        );
     }
 
     #[test]

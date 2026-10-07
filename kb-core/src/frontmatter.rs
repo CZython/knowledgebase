@@ -484,7 +484,13 @@ fn lines_of(data: &[u8]) -> Vec<String> {
     // `split_inclusive('\n')` on a `&str` already preserves newlines. We
     // `to_string()` per line so callers can push/replace freely; the join
     // identity holds on valid UTF-8 (asserted by `fm_tests::roundtrip`).
-    let s = std::str::from_utf8(data).unwrap_or("");
+    // SECURITY_REPORT 3.7: `from_utf8` (strict) + `unwrap_or("")` would drop
+    // the *entire* file's lines on any invalid UTF-8 byte — a CP1252 char
+    // pasted into the body made an otherwise-valid frontmatter frame appear
+    // absent. `from_utf8_lossy` (the documented behaviour above) maps the bad
+    // bytes to U+FFFD and leaves the frame intact, so `find_fm` + the rewrite
+    // helpers still see the lines they operate on.
+    let s = String::from_utf8_lossy(data);
     if s.is_empty() {
         return Vec::new();
     }
@@ -774,7 +780,10 @@ pub fn remove_list_item(data: &[u8], key: &str, value: &str) -> Result<Vec<u8>, 
 /// `end` exclusive) and re-join. Everything outside is preserved exactly.
 fn remove_lines(data: &[u8], start: usize, end: usize) -> Result<Vec<u8>, FmError> {
     debug_assert!(start <= end, "remove_lines range");
-    let s = std::str::from_utf8(data).map_err(|_| FmError::NoFrontmatter)?;
+    // SECURITY_REPORT 3.7: `from_utf8_lossy` so an invalid byte in the body
+    // does not swallow the whole buffer (which `map_err(NoFrontmatter)` would
+    // do today).
+    let s = String::from_utf8_lossy(data);
     let lines: Vec<&str> = s.split_inclusive('\n').collect();
     if start > end || end > lines.len() {
         return Err(FmError::NoFrontmatter);
@@ -792,7 +801,8 @@ fn remove_lines(data: &[u8], start: usize, end: usize) -> Result<Vec<u8>, FmErro
 /// Build a fresh `key: a, b, c` (or `key: v`) line for a *new* field and
 /// splice it in just above the closing `---`.
 fn list_rewrite_new(data: &[u8], key: &str, value: &str) -> Vec<u8> {
-    let s = std::str::from_utf8(data).unwrap_or("");
+    // SECURITY_REPORT 3.7 — same `from_utf8_lossy` fix.
+    let s = String::from_utf8_lossy(data);
     let lines: Vec<String> = s.split_inclusive('\n').map(|l| l.to_string()).collect();
     match find_fm(data) {
         Some(fm) => {
@@ -808,21 +818,23 @@ fn list_rewrite_new(data: &[u8], key: &str, value: &str) -> Vec<u8> {
 
 /// Upgrade a scalar field to an inline 2-element list: `key: scal, val`.
 fn list_rewrite_upgrade(data: &[u8], key: &str, scalar: &str, added: &str) -> Vec<u8> {
-    let s = std::str::from_utf8(data).unwrap_or("");
+    // SECURITY_REPORT 3.7 — same `from_utf8_lossy` fix.
+    let s = String::from_utf8_lossy(data);
     let mut lines: Vec<String> = s.split_inclusive('\n').map(|l| l.to_string()).collect();
     let idx = locate_key_line(data, key)
         .expect("scalar_value found a scalar with this key, so the line must exist");
     let line = lines[idx].clone();
     // Preserve leading indentation (unlikely but keep it faithful).
     let leading = &line[..line.len() - line.trim_start().len()];
-    let nl = if line.ends_with('\n') { "\n" } else { "" };
+    let nl = if line.ends_with("\r\n") { "\r\n" } else if line.ends_with('\n') { "\n" } else { "" };
     lines[idx] = format!("{leading}{}: {scalar}, {added}{nl}", key);
     join_lines(&lines).into_bytes()
 }
 
 /// Extend an existing list (block or inline) by appending `added`.
 fn list_rewrite_add(data: &[u8], key: &str, added: &str) -> Vec<u8> {
-    let s = std::str::from_utf8(data).unwrap_or("");
+    // SECURITY_REPORT 3.7 — same `from_utf8_lossy` fix.
+    let s = String::from_utf8_lossy(data);
     let mut lines: Vec<String> = s.split_inclusive('\n').map(|l| l.to_string()).collect();
     let idx = locate_key_line(data, key)
         .unwrap_or(0); // guarded by caller
@@ -833,7 +845,7 @@ fn list_rewrite_add(data: &[u8], key: &str, added: &str) -> Vec<u8> {
         if after_colon.trim().starts_with('[') {
             // Inline list: append the value before the `]`.
             let leading = &line[..line.len() - line.trim_start().len()];
-            let nl = if line.ends_with('\n') { "\n" } else { "" };
+            let nl = if line.ends_with("\r\n") { "\r\n" } else if line.ends_with('\n') { "\n" } else { "" };
             let (key_part, rest) = trimmed.split_once(':').unwrap_or((trimmed.as_str(), ""));
             let inner = rest
                 .trim()
@@ -853,7 +865,7 @@ fn list_rewrite_add(data: &[u8], key: &str, added: &str) -> Vec<u8> {
     // Block list: append a `- added` line right after the last block item.
     let close = find_fm(data).map(|f| f.close_line).unwrap_or(lines.len());
     let (last, _) = last_block_item_line(lines.as_slice(), idx, close).unwrap_or((idx, false));
-    let nl = if lines[last].ends_with('\n') { "\n" } else { "" };
+    let nl = if lines[last].ends_with("\r\n") { "\r\n" } else if lines[last].ends_with('\n') { "\n" } else { "" };
     let mut new_lines: Vec<String> = lines.clone();
     let line_at_last = new_lines[last].clone();
     let leading = &line_at_last[..line_at_last.len() - line_at_last.trim_start().len()];
@@ -886,7 +898,7 @@ fn list_rewrite_vals(data: &[u8], key: &str, vals: &[String]) -> Vec<u8> {
             }
             let line = lines[idx].clone();
             let leading = &line[..line.len() - line.trim_start().len()];
-            let nl = if line.ends_with('\n') { "\n" } else { "" };
+            let nl = if line.ends_with("\r\n") { "\r\n" } else if line.ends_with('\n') { "\n" } else { "" };
             lines.splice(idx..j, [format!("{leading}{key}: [{joined}]{nl}")]);
             join_lines(&lines).into_bytes()
         }
@@ -918,7 +930,10 @@ fn last_block_item_line(lines: &[String], idx: usize, close: usize) -> Option<(u
 /// The real scalar rewrite: replace the value of an existing `key:` line, or
 /// insert a fresh one just before the closing `---`.
 fn scalar_rewrite(data: &[u8], key: &str, value: &str) -> Result<Vec<u8>, FmError> {
-    let s = std::str::from_utf8(data).map_err(|_| FmError::NoFrontmatter)?;
+    // SECURITY_REPORT 3.7: `from_utf8_lossy` so a single invalid byte in the
+    // body cannot collapse the whole buffer and hide the frontmatter frame
+    // (which `map_err(NoFrontmatter)` did for the entire `set_scalar` op).
+    let s = String::from_utf8_lossy(data);
     let mut lines: Vec<String> = s.split_inclusive('\n').map(|l| l.to_string()).collect();
     let fm = match find_fm(data) {
         Some(f) => f,
@@ -939,7 +954,7 @@ fn scalar_rewrite(data: &[u8], key: &str, value: &str) -> Result<Vec<u8>, FmErro
     let line = lines[idx].clone();
     let leading = &line[..line.len() - line.trim_start().len()];
     let trim = line.trim_start_matches('\u{feff}');
-    let nl = if line.ends_with('\n') { "\n" } else { "" };
+    let nl = if line.ends_with("\r\n") { "\r\n" } else if line.ends_with('\n') { "\n" } else { "" };
     // Preserve the `key:` prefix exactly as written.
     let key_part = &trim[..trim.find(':').map(|p| p + 1).unwrap_or(trim.len())];
     lines[idx] = format!("{leading}{key_part} {value}{nl}");
@@ -1187,6 +1202,45 @@ mod fm_tests {
     #[test]
     fn set_scalar_no_frontmatter_err() {
         assert_eq!(set_scalar(s("# heading").as_slice(), "t", "v"), Err(FmError::NoFrontmatter));
+    }
+
+    #[test]
+    fn set_scalar_tolerates_non_utf8_body() {
+        // SECURITY_REPORT 3.7: a single invalid byte (0x92, CP1252 ') in the
+        // *body* used to make `set_scalar` fail with `NoFrontmatter` because
+        // the rewrite helpers called strict `from_utf8(...).unwrap_or("")`,
+        // which collapsed the whole buffer to "" and hid the frontmatter frame.
+        // With `from_utf8_lossy` the frame is found and the scalar rewrite
+        // succeeds (the bad byte maps to U+FFFD, body otherwise preserved).
+        let mut data = b"---\ntype: wiki\ntitle: Old\n---\nbody with a ".to_vec();
+        data.push(0x92);
+        data.extend_from_slice(b" here\n");
+        let out = set_scalar(data.as_slice(), "title", "New");
+        assert!(out.is_ok(), "non-UTF-8 body must not erase the frontmatter frame: {out:?}");
+        let out = out.unwrap();
+        let title = scalar_value(out.as_slice(), "title").expect("title rewritten");
+        assert_eq!(title, "New");
+    }
+
+    #[test]
+    fn set_scalar_preserves_crlf_terminator() {
+        // SECURITY_REPORT 3.11: on a CRLF file, the edited line used to be
+        // rebuilt with a bare `\n` (the `ends_with('\n') == "\n"` family),
+        // silently dropping the `\r` and leaving one LF-terminated line among
+        // CRLF neighbours. The rewritten `title` line must keep its `\r\n`.
+        let data = b"---\r\ntype: wiki\r\ntitle: Old\r\n---\r\nbody\r\n";
+        let out = set_scalar(data, "title", "New").expect("set_scalar on CRLF file");
+        let title_line = out.windows(b"title: New".len()).position(|w| w == b"title: New");
+        assert!(title_line.is_some(), "rewritten title line present: {:?}", String::from_utf8_lossy(&out));
+        let start = title_line.unwrap();
+        let after = &out[start + b"title: New".len()..];
+        assert!(
+            after.starts_with(b"\r\n"),
+            "rewritten line must keep its CRLF terminator: {:?}",
+            String::from_utf8_lossy(&out)
+        );
+        // CRLF still present in the rest of the file (no mixed endings introduced).
+        assert!(out.windows(2).any(|w| w == b"\r\n"), "CRLF still present");
     }
 
     // ---- append_list_item ------------------------------------------------

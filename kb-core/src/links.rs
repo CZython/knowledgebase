@@ -25,8 +25,10 @@
 //! dropped. Graph invariants (inverse/backlink, no self-loops) live in
 //! `graph.rs` + `spec/graph_spec.rs`.
 
+use std::collections::BTreeSet;
+
 /// How a reference was written (mirrors the `links.style` column).
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub enum LinkStyle {
     /// `[[ … ]]` — a display-id / slug reference.
     Wikilink,
@@ -178,12 +180,15 @@ pub fn extract_links(body: &str) -> Vec<Link> {
 /// constant here; we dedupe on the (target, style) axis. First occurrence
 /// order is preserved.
 pub fn dedup(links: Vec<Link>) -> Vec<Link> {
+    // SECURITY_REPORT 3.16: `seen` was a `Vec` with `seen.iter().any(…)` —
+    // O(L²) for hub/index pages with many outgoing links. A `BTreeSet` keyed
+    // on (target, style) makes each lookup O(log L). First-occurrence order
+    // is preserved by only pushing to `out` on a fresh key.
     let mut out: Vec<Link> = Vec::new();
-    let mut seen: Vec<(String, LinkStyle)> = Vec::new();
+    let mut seen: BTreeSet<(String, LinkStyle)> = BTreeSet::new();
     for l in links {
         let key = (l.target.clone(), l.style);
-        if !seen.iter().any(|(t, s)| *t == l.target && *s == l.style) {
-            seen.push(key);
+        if seen.insert(key) {
             out.push(l);
         }
     }

@@ -124,7 +124,7 @@ enum Cmd {
         #[arg(long)]
         etag: bool,
     },
-    /// Section-level write ops: `set` / `append` / `insert` / `replace` / `edit`.
+    /// Section-level write ops: `set` / `append` / `insert` / `replace`.
     Section {
         /// Target file (required).
         #[arg(short, long, required = true)]
@@ -403,13 +403,6 @@ enum SectionOp {
         #[command(flatten)]
         flags: WriteFlags,
     },
-    /// Edit a section in $VISUAL/$EDITOR (fallback `vi`), then diff + confirm.
-    Edit {
-        #[arg(value_name = "REF")]
-        ref_: String,
-        #[command(flatten)]
-        flags: WriteFlags,
-    },
     /// Remove a frontmatter field entirely (`rm fm.<key>`), or remove one
     /// element from a list field (`rm fm.<key> <value>`). `rm` on a plain
     /// section ref is not yet supported.
@@ -443,7 +436,7 @@ fn main() {
         "drop-root", "refresh", "full-rebuild", "search", "browse", "tag",
         "tag-alias", "links", "resolve", "info", "stats", "cron", "tui",
         // section ops (also reachable bare in principle)
-        "set", "append", "insert", "edit", "rm",
+        "set", "append", "insert", "rm",
     ];
     if non_flag.len() == 1 && !SUBCMDS.contains(&non_flag[0].as_str()) {
         let s = non_flag[0];
@@ -783,28 +776,37 @@ fn cmd_search(dbpath: Option<&Path>, query: &str, json: bool, limit: usize) -> K
     let db = open_db(dbpath)?;
 
     // tag filters need corpus + alias data (loaded outside the main query)
+    // SECURITY_REPORT 3.17: hoist the alias + distinct-tag loads outside the
+    // per-filter loop — N tag filters used to trigger N full table scans of
+    // the same data.
+    let has_tag_filter = parsed.filters.iter().any(|f| f.is_tag());
+    let (aliases, all_tags) = if has_tag_filter {
+        let aliases: Vec<(String, String)> = {
+            let mut stmt = db.conn.prepare("SELECT alias, canonical FROM tag_aliases")
+                .map_err(|e| (format!("prepare aliases: {e}"), EXIT_ERR))?;
+            let rows = stmt.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))
+                .map_err(|e| (format!("aliases: {e}"), EXIT_ERR))?
+                .collect::<Result<_, _>>()
+                .map_err(|e| (format!("aliases rows: {e}"), EXIT_ERR))?;
+            rows
+        };
+        let all_tags: Vec<String> = {
+            let mut stmt = db.conn.prepare("SELECT DISTINCT tag FROM page_tags")
+                .map_err(|e| (format!("prepare tags: {e}"), EXIT_ERR))?;
+            let rows = stmt.query_map([], |r| r.get::<_, String>(0))
+                .map_err(|e| (format!("tags: {e}"), EXIT_ERR))?
+                .collect::<Result<_, _>>()
+                .map_err(|e| (format!("tag rows: {e}"), EXIT_ERR))?;
+            rows
+        };
+        (aliases, all_tags)
+    } else {
+        (Vec::new(), Vec::new())
+    };
     let mut tag_match_sets: Vec<Vec<String>> = Vec::new();
     for f in &parsed.filters {
         if f.is_tag() {
             let tag_val = f.value.clone();
-            let aliases: Vec<(String, String)> = {
-                let mut stmt = db.conn.prepare("SELECT alias, canonical FROM tag_aliases")
-                    .map_err(|e| (format!("prepare aliases: {e}"), EXIT_ERR))?;
-                let rows = stmt.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))
-                    .map_err(|e| (format!("aliases: {e}"), EXIT_ERR))?
-                    .collect::<Result<_, _>>()
-                    .map_err(|e| (format!("aliases rows: {e}"), EXIT_ERR))?;
-                rows
-            };
-            let all_tags: Vec<String> = {
-                let mut stmt = db.conn.prepare("SELECT DISTINCT tag FROM page_tags")
-                    .map_err(|e| (format!("prepare tags: {e}"), EXIT_ERR))?;
-                let rows = stmt.query_map([], |r| r.get::<_, String>(0))
-                    .map_err(|e| (format!("tags: {e}"), EXIT_ERR))?
-                    .collect::<Result<_, _>>()
-                    .map_err(|e| (format!("tag rows: {e}"), EXIT_ERR))?;
-                rows
-            };
             let match_set: Vec<String> = kbtags::canonicalize(&tag_val, &all_tags, &aliases)
                 .into_iter().map(|s: &str| s.to_string()).collect();
             if match_set.is_empty() {
@@ -823,10 +825,32 @@ fn cmd_search(dbpath: Option<&Path>, query: &str, json: bool, limit: usize) -> K
     let mut wheres: Vec<String> = Vec::new();
 
     let fts_render = parsed.render_fts();
-    let fts_active = has_match && !fts_render.is_empty();
-    if fts_active {
+    // A NOT-only query (no AND, no OR) can't be expressed as a single FTS5
+    // MATCH string (leading NOT is rejected). SECURITY_REPORT 3.5: this was
+    // previously a *silent no-op* — the query returned the whole corpus up to
+    // `LIMIT` with a reassuring note. We keep the FTS join active and add one
+    // `NOT (pages_fts MATCH <term>)` clause per NOT term instead, the same
+    // exclusion FTS5's own NOT gives when a positive term is present.
+    let not_only = !has_match && has_not;
+    let fts_active = has_match && !fts_render.is_empty() || not_only;
+    if has_match && !fts_render.is_empty() {
         params_vec.push(fts_render);
         wheres.push(format!("pages_fts MATCH ?{}", params_vec.len()));
+    }
+    if not_only {
+        for t in &parsed.not_terms {
+            // FTS5 `MATCH` must appear as a top-level WHERE predicate of a
+            // SELECT that directly queries the FTS5 table — `NOT (pages_fts
+            // MATCH ?)` in an outer WHERE on a non-FTS5 main table is rejected
+            // ("unable to use function MATCH in the requested context"). The
+            // subquery satisfies the requirement: its FROM is the FTS5 table.
+            params_vec.push(search_term_text(t));
+            wheres.push(format!(
+                "NOT EXISTS (SELECT 1 FROM pages_fts WHERE rowid = pages.rowid \
+                 AND pages_fts MATCH ?{})",
+                params_vec.len()
+            ));
+        }
     }
 
     for f in &parsed.filters {
@@ -840,9 +864,16 @@ fn cmd_search(dbpath: Option<&Path>, query: &str, json: bool, limit: usize) -> K
     }
 
     for match_set in tag_match_sets.iter() {
+        // SECURITY_REPORT 3.4: the left side of the comparison is
+        // `lower(pt.tag)`, so the IN-list must be lowercased too. `canonicalize`
+        // returns the *stored* strings in their original casing (that is how
+        // case/alias folding is decided), but a stored mixed-case tag like
+        // `Czech` would then fail `lower('Czech') IN ('Czech',…)` → `'czech'
+        // IN ('Czech',…)` → no match. Folding the IN-list to lowercase makes
+        // both sides of the comparison the same case-fold.
         let in_list: Vec<String> = match_set
             .iter()
-            .map(|t| format!("'{}'", t.replace('\'', "''")))
+            .map(|t| format!("'{}'", t.to_lowercase().replace('\'', "''")))
             .collect();
         wheres.push(format!(
             "EXISTS (SELECT 1 FROM page_tags pt WHERE pt.abs_path = pages.abs_path\nAND lower(pt.tag) IN ({}))",
@@ -864,23 +895,16 @@ fn cmd_search(dbpath: Option<&Path>, query: &str, json: bool, limit: usize) -> K
         ));
     }
 
-    // NOT-only case (no AND, no OR, only NOT): no MATCH clause possible
-    // (FTS5 rejects leading NOT). Fall back to a full scan with column
-    // exclusion — a documented v1 limitation.
-    if !has_match && has_not {
-        println!("note: NOT-only queries use a full scan (no FTS match) — v1");
-    }
-
     let mut sql = String::new();
     if fts_active {
         sql.push_str(
             "SELECT pages.abs_path, pages.id, pages.type,\n\
-             pages.title, pages.description, pages.root, pages.rel_path,\n\
-             pages.search_terms, bm25(pages_fts) AS score\n"
+              pages.title, pages.description, pages.root, pages.rel_path,\n\
+              pages.search_terms, bm25(pages_fts) AS score\n"
         );
         sql.push_str(
             "FROM pages\n\
-             JOIN pages_fts ON pages.rowid = pages_fts.rowid\n"
+              JOIN pages_fts ON pages.rowid = pages_fts.rowid\n"
         );
     } else {
         sql.push_str(
@@ -1424,22 +1448,31 @@ fn cmd_tag_alias(dbpath: Option<&Path>, o: &TagAliasOpts, json: bool) -> Kb {
                 }
             }
         }
-        db.conn
-            .execute_batch("BEGIN")
+        // SECURITY_REPORT 3.8: raw `BEGIN` / `COMMIT` via `execute_batch`
+        // leaves the transaction *open* if any step in between returns `Err`
+        // (e.g. `prepare` or mid-batch `upsert.execute`). `rusqlite` then
+        // keeps that open transaction on the reused `Connection`, so any
+        // subsequent command (or a process death in the gap) sees / loses the
+        // still-uncommitted batch. `unchecked_transaction()` is a checked
+        // guard whose `Drop` issues `ROLLBACK` on error paths.
+        let tx = db
+            .conn
+            .unchecked_transaction()
             .map_err(|e| (format!("begin import: {e}"), EXIT_ERR))?;
-        let mut upsert = db.conn
-            .prepare(
-                "INSERT INTO tag_aliases(alias, canonical) VALUES (?1, ?2)\n\
-                 ON CONFLICT(alias) DO UPDATE SET canonical = excluded.canonical",
-            )
-            .map_err(|e| (format!("prepare import: {e}"), EXIT_ERR))?;
-        for (a, c) in &rows {
-            upsert
-                .execute(rusqlite::params![a, c])
-                .map_err(|e| (format!("upsert import: {e}"), EXIT_ERR))?;
+        {
+            let mut upsert = tx
+                .prepare(
+                    "INSERT INTO tag_aliases(alias, canonical) VALUES (?1, ?2)\n\
+                      ON CONFLICT(alias) DO UPDATE SET canonical = excluded.canonical",
+                )
+                .map_err(|e| (format!("prepare import: {e}"), EXIT_ERR))?;
+            for (a, c) in &rows {
+                upsert
+                    .execute(rusqlite::params![a, c])
+                    .map_err(|e| (format!("upsert import: {e}"), EXIT_ERR))?;
+            }
         }
-        db.conn
-            .execute_batch("COMMIT")
+        tx.commit()
             .map_err(|e| (format!("commit import: {e}"), EXIT_ERR))?;
         if json {
             println!(
@@ -1598,31 +1631,41 @@ fn cmd_links(dbpath: Option<&Path>, target: &str, json: bool) -> Kb {
     // abs_path. A raw target text that fails to resolve is a *dead* link and
     // does NOT contribute a backlink (§4 collision is legal; §8 says the
     // indexer leaves to_path as a pending ref).
+    // SECURITY_REPORT 3.17: load ALL forward edges once (one `prepare` + one
+    // full-scan) into a `BTreeMap<from_path, Vec<to_path>>` instead of
+    // re-preparing the statement per corpus page (N prepares for N pages).
+    let edges_by_from: std::collections::BTreeMap<String, Vec<String>> = {
+        let mut e = db.conn
+            .prepare("SELECT from_path, to_path FROM links")
+            .map_err(|e| (format!("prepare back-edge: {e}"), EXIT_ERR))?;
+        let rows = e.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))
+            .map_err(|e| (format!("back-edge query: {e}"), EXIT_ERR))?;
+        let mut map: std::collections::BTreeMap<String, Vec<String>> = std::collections::BTreeMap::new();
+        for row in rows {
+            let (from, to) = row.map_err(|e| (format!("back-edge rows: {e}"), EXIT_ERR))?;
+            map.entry(from).or_default().push(to);
+        }
+        map
+    };
     let mut back: Vec<String> = Vec::new();
     for (from_abs, _p) in corpus_pages
         .iter()
         .map(|p| (p.abs_path.clone(), p))
         .filter(|(src,_)| *src != abs_path)
     {
-        // look up this page's forward edges and check if any resolve to abs_path.
-        let edges: Vec<String> = {
-            let mut e = db.conn
-                .prepare("SELECT to_path FROM links WHERE from_path = ?1")
-                .map_err(|e| (format!("prepare back-edge: {e}"), EXIT_ERR))?;
-            let rows = e.query_map(rusqlite::params![from_abs], |r| r.get::<_,String>(0))
-                .map_err(|e| (format!("back-edge query: {e}"), EXIT_ERR))?
-                .collect::<Result<Vec<_>, _>>()
-                .map_err(|e| (format!("back-edge rows: {e}"), EXIT_ERR))?;
-            rows
-        };
+        // look up this page's forward edges (already loaded) and check if any
+        // resolve to abs_path.
+        let edges = edges_by_from.get(&from_abs);
         let mut hit = false;
-        for target_text in &edges {
-            if resolve_target(&corpus_pages, target_text).as_deref() == Some(abs_path.as_str()) {
-                hit = true;
-                break;
+        if let Some(targets) = edges {
+            for target_text in targets {
+                if resolve_target(&corpus_pages, target_text).as_deref() == Some(abs_path.as_str()) {
+                    hit = true;
+                    break;
+                }
             }
         }
-        if hit { back.push(from_abs); }
+        if hit { back.push(from_abs.clone()); }
     }
     back.sort();
     back.dedup();
@@ -2339,31 +2382,6 @@ fn cmd_section(file: &Path, op: &SectionOp) -> Kb {
                 .map_err(|e| (e.to_string(), EXIT_SECTION))?;
             commit(file, orig, new, flags.dry_run, flags.yes, flags.json)
         }
-        SectionOp::Edit { ref_: r, flags } => {
-            if flags.json {
-                return Err((
-                    "`section edit --json` is unsupported — `--edit` is an editor flow, not JSON (use `set --json` over a text source instead)".into(),
-                    EXIT_SECTION,
-                ));
-            }
-            let orig = read_file(file)?;
-            let doc = Doc::new(orig.clone());
-            check_etag(&doc, Some(r.as_str()), flags)?;
-            let old_full = doc.full_bytes(r).map_err(|e| (e.to_string(), EXIT_SECTION))?;
-            let edited = run_editor(old_full)?;
-            if edited.as_slice() == old_full {
-                println!("{}: no changes (section unchanged in editor)", file.display());
-                return Ok(EXIT_OK);
-            }
-            let new_text = String::from_utf8_lossy(&edited).into_owned();
-            // The editor had the complete section (heading + body + subsections);
-            // hand the whole thing back to `set_section` (keep_heading = false)
-            // so the full span is replaced exactly as edited.
-            let new = doc
-                .set_section(r, &new_text, false)
-                .map_err(|e| (e.to_string(), EXIT_SECTION))?;
-            commit(file, orig, new, flags.dry_run, flags.yes, flags.json)
-        }
         SectionOp::Rm { ref_: r, value, flags } => {
             if is_fm_ref(r) {
                 let key: &str = fm_key(r).ok_or_else(|| (format!("`rm` on whole-frontmatter ref {r:?} needs a key (fm.<key>)"), EXIT_SECTION))?;
@@ -2593,34 +2611,6 @@ fn parse_placement(s: &str) -> Result<SectionPlacement, (String, i32)> {
             ))
         }
     })
-}
-
-/// Open `initial` in the user's editor ($VISUAL, then $EDITOR, then `vi`) in
-/// a temp file; return the post-edit bytes.
-fn run_editor(initial: &[u8]) -> Result<Vec<u8>, (String, i32)> {
-    let tmp = std::env::temp_dir().join(format!("kb-edit-{}.md", std::process::id()));
-    std::fs::write(&tmp, initial).map_err(|e| (format!("write temp edit buffer: {e}"), EXIT_ERR))?;
-    let editor = pick_editor();
-    let st = std::process::Command::new(&editor)
-        .arg(&tmp)
-        .status()
-        .map_err(|e| (format!("launch {editor}: {e}"), EXIT_ERR))?;
-    if !st.success() {
-        let _ = std::fs::remove_file(&tmp);
-        return Err((format!("editor {editor} exited with {st}"), EXIT_ERR));
-    }
-    let bytes = std::fs::read(&tmp).unwrap_or_default();
-    let _ = std::fs::remove_file(&tmp);
-    Ok(bytes)
-}
-
-fn pick_editor() -> String {
-    for k in ["VISUAL", "EDITOR"] {
-        if let Some(v) = std::env::var(k).ok().filter(|v| !v.trim().is_empty()) {
-            return v.split_whitespace().next().unwrap_or("vi").to_string();
-        }
-    }
-    "vi".to_string()
 }
 
 /// Interactive `y/N` prompt. Non-interactive stdin (piped / no TTY) never
