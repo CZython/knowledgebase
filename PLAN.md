@@ -365,7 +365,7 @@ knowledgebase/    (Cargo workspace)
 │   ├── Cargo.toml
 │   └── src/
 │       ├── main.rs               # clap dispatch; --db default+override global flag
-│       ├── multi/                # DB-backed: add, roots, drop-root, refresh,
+│       ├── multi/                # DB-backed: create, add, roots, drop-root, refresh,
 │       │         full-rebuild, search, browse, tag, tag-alias, links, resolve,
 │       │         stats, cron
     │       └── file/                 # mdtool surface: info, section, replace, set-section,
@@ -395,6 +395,8 @@ kb roots                             # list registered roots
 kb drop-root <path>                  # unroot — but the page survives if it's still registered under another (nested/overlapping) root; only removes if this was its last root. Note: this *also* drops that root's walk options (extra_exts / include_hidden, §8 `roots`) — re-`kb add` with the same flags to restore
 kb refresh [--full]                  # reconcile all roots by (mtime_ns, content_hash); --full = rebuild. Walk options (`--ext`/`--include-hidden`) are read from each root's stored `roots` row (§8) — not re-passed here — so a refreshed root uses the same rules it was added with
 kb full-rebuild                      # alias for refresh --full
+kb create <name> [--path <dir>] [--type wiki|note|label] [-e] [--dry-run] [--yes] [--json]
+    # scaffold a new `.md` page — full frontmatter frame (`type:` `title:` `description:` `tags:` `search_terms:`) + matching H1 — then index it with the *same* `build_page`/`upsert_page` pair `refresh` uses, so the row reconciles byte-identically later. `.md` is appended when `<name>` has no extension; `--path` is the target directory (created if missing) and only a `.md` target is accepted (§3 Extensions); an existing file is never clobbered. `-e/--edit` opens the *written* page in `$VISUAL`/`$EDITOR` (fallback `vi`) and indexes the saved bytes — a non-zero editor exit leaves the scaffold on disk, unindexed. Indexing is skipped **with a stderr note, never an error** when no roots are registered, when the page is outside every registered root, or when the final bytes aren't indexable (the §3/§4 no-`type:` warning contract). `-e --json` is rejected (an editor flow is not JSON — §13p), matching `section edit --json`.
 kb search <query> [--json] [--limit N]
 kb browse [path]                     # numbered per-page list under [path]: location, title, tags, search_terms, link count; `description` shown when present; label pages expand to their referenced files/folder
 kb tag <tag>                         # expand tag (incl. aliasing) → tagged pages; label pages render as their referenced files/folder

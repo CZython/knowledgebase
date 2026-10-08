@@ -26,6 +26,7 @@ use clap::{Args, Parser, Subcommand};
 use kb_core::aliases as kbalias;
 use kb_core::frontmatter as fm;
 use kb_core::labels;
+use kb_core::meta::NoteType;
 use kb_core::resolve as resolver;
 use kb_core::search_grammar;
 use kb_core::section::{splice, Doc, SectionPlacement};
@@ -77,6 +78,33 @@ struct WriteFlags {
     /// JSON object on stdout. Forcing `--json` also suppresses the
     /// interactive diff-to-stdout and the "apply?" prompt (a JSON result must
     /// be the only thing on stdout, and there is no confirm to auto-approve).
+    #[arg(long)]
+    json: bool,
+}
+
+/// Flags for `kb create` (PLAN §11).
+#[derive(Args, Clone)]
+struct CreateArgs {
+    /// Directory to create the page in (default: the cwd). Missing
+    /// parent directories are created.
+    #[arg(long, value_name = "PATH")]
+    path: Option<PathBuf>,
+    /// Page type (default: `wiki`). Case-insensitive; one of
+    /// wiki | note | label (PLAN §4).
+    #[arg(long = "type", value_name = "TYPE", default_value = "wiki")]
+    type_: String,
+    /// Open the new page in $VISUAL/$EDITOR (fallback `vi`) after it is
+    /// written; the saved bytes are what gets indexed.
+    #[arg(short = 'e', long)]
+    edit: bool,
+    /// Show the new-file diff, then stop: nothing is written, nothing
+    /// is indexed.
+    #[arg(long)]
+    dry_run: bool,
+    /// Skip the confirmation prompt.
+    #[arg(long)]
+    yes: bool,
+    /// Emit the result as a single JSON object on stdout.
     #[arg(long)]
     json: bool,
 }
@@ -176,6 +204,15 @@ enum Cmd {
         patch_text: Option<String>,
         #[command(flatten)]
         flags: WriteFlags,
+    },
+    /// Scaffold a new page (frontmatter + H1) and index it.
+    Create {
+        /// Page name. `.md` is appended when no extension is given; only a
+        /// `.md` target is accepted (PLAN §3 Extensions).
+        #[arg(value_name = "NAME")]
+        filename: String,
+        #[command(flatten)]
+        args: CreateArgs,
     },
 
     // ==================== multi-file namespace (M7) ====================
@@ -442,6 +479,7 @@ fn main() {
         "toc", "show", "section", "replace", "patch", "add", "roots",
         "drop-root", "refresh", "full-rebuild", "search", "browse", "tag",
         "tag-alias", "links", "resolve", "info", "stats", "cron", "tui",
+        "create",
         // section ops (also reachable bare in principle)
         "set", "append", "insert", "edit", "rm",
     ];
@@ -502,6 +540,7 @@ fn run(cli: &Cli) -> i32 {
             patch_text,
             flags,
         } => cmd_patch(file, patch_file.as_deref(), *patch_stdin, patch_text.as_deref(), flags),
+        Cmd::Create { filename, args } => cmd_create(cli.db.as_deref(), filename, args),
         // ---- multi-file namespace (M7) ----
         Cmd::Add { path, ext, include_hidden, json } =>
             cmd_add(cli.db.as_deref(), path, ext, *include_hidden, *json),
@@ -633,6 +672,262 @@ fn cmd_add(dbpath: Option<&Path>, path: &Path, ext: &[String], include_hidden: b
     }
     println!("root registered: {}", canonical.display());
     refresh_all(&db, false, false)
+}
+
+/// `kb create <NAME>` — scaffold a new `.md` page and index it (PLAN §11).
+///
+/// Disk stays authoritative: the scaffold (plus whatever `-e` leaves behind)
+/// is the source of truth, and the DB row is written with the *same*
+/// `build_page`/`upsert_page` pair `kb refresh` uses, so a page created here
+/// reconciles byte-identically on the next refresh. Indexing is **skipped
+/// with a note, never an error** when: no roots are registered, the new page
+/// sits outside every registered root, or the final bytes are not indexable
+/// (§3/§4 `type:` warning contract).
+fn cmd_create(dbpath: Option<&Path>, filename: &str, a: &CreateArgs) -> Kb {
+    let dir = a.path.as_deref();
+    let type_arg = &a.type_;
+    let edit = a.edit;
+    let dry_run = a.dry_run;
+    let yes = a.yes;
+    let json = a.json;
+    // The editor inherits our stdio, so it could pollute stdout — same
+    // contract as `section edit --json` (§13p): an editor flow is not JSON.
+    if edit && json {
+        return Err((
+            "`create --edit --json` is unsupported — `--edit` is an editor flow, not JSON (drop one of the two flags)".into(),
+            EXIT_ERR,
+        ));
+    }
+    let kind = match NoteType::parse(type_arg) {
+        Some(NoteType::Wiki) => "wiki",
+        Some(NoteType::Note) => "note",
+        Some(NoteType::Label) => "label",
+        None => {
+            return Err((
+                format!("--type must be wiki|note|label (got {type_arg:?})"),
+                EXIT_ERR,
+            ))
+        }
+    };
+
+    // ---- target path: [--path DIR] + NAME, `.md` appended when absent ----
+    let name = filename.trim();
+    if name.is_empty() {
+        return Err(("create: NAME must not be empty".into(), EXIT_ERR));
+    }
+    if name.chars().any(|c| c == '\0' || c == '\n' || c == '\r') {
+        return Err(("create: NAME must not contain newlines or NUL bytes".into(), EXIT_ERR));
+    }
+    let mut target = match dir {
+        Some(d) => d.join(name),
+        None => PathBuf::from(name),
+    };
+    match target.extension().and_then(|e| e.to_str()) {
+        Some("md") => {}
+        Some("") | None => {
+            let mut os = target.clone().into_os_string();
+            os.push(".md");
+            target = PathBuf::from(os);
+        }
+        Some(other) => {
+            return Err((
+                format!(
+                    "create: {name:?} is not a .md page (extension {other:?}) — PLAN §3 indexes `.md` only"
+                ),
+                EXIT_ERR,
+            ));
+        }
+    }
+    let title = target
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or("")
+        .trim()
+        .to_string();
+    if title.is_empty() {
+        return Err(("create: NAME must yield a non-empty page title".into(), EXIT_ERR));
+    }
+    // Work in absolute terms from here on: the diff label, the JSON `file`
+    // and the `pages.abs_path` key all want the same string, and an agent
+    // reading a relative `file` would have to re-anchor it on the cwd.
+    if !target.is_absolute() {
+        let cwd = std::env::current_dir()
+            .map_err(|e| (format!("current dir: {e}"), EXIT_ERR))?;
+        target = cwd.join(&target);
+    }
+    if target.exists() {
+        return Err((format!("create: {} already exists", target.display()), EXIT_ERR));
+    }
+
+    // ---- the scaffold (PLAN §4: `type:` + `title:`, no H1 required) -------
+    let scaffold = format!(
+        "---\ntype: {kind}\ntitle: {title}\ndescription:\ntags: []\nsearch_terms: []\n---\n\n# {title}\n\n"
+    );
+    let d = diff::unified_diff("", &scaffold, "/dev/null", &target.display().to_string());
+
+    // Human render of the new-file diff: stdout normally, stderr under
+    // `--json` (stdout must carry exactly one JSON document — §13p).
+    if !d.is_empty() {
+        if json {
+            eprint!("{d}");
+        } else {
+            print!("{d}");
+        }
+    }
+
+    if dry_run {
+        if json {
+            let r = CreateReport {
+                target: target.as_path(),
+                kind,
+                title: title.as_str(),
+                id: None,
+                created: false,
+                edited: false,
+                indexed: false,
+                dry_run: true,
+                bytes: scaffold.len(),
+                diff: d.as_str(),
+            };
+            println!("{}", r.to_json());
+        } else {
+            eprintln!("kb: dry-run — {} not created", target.display());
+        }
+        return Ok(EXIT_OK);
+    }
+
+    if !confirm("create?", yes || json) {
+        return Err(("aborted (not confirmed)".into(), EXIT_ERR));
+    }
+
+    // ---- write (atomic: same-dir temp + rename) ---------------------------
+    if let Some(parent) = target.parent() {
+        if !parent.as_os_str().is_empty() {
+            std::fs::create_dir_all(parent)
+                .map_err(|e| (format!("create {}: {e}", parent.display()), EXIT_ERR))?;
+        }
+    }
+    atomic_write(&target, scaffold.as_bytes())
+        .map_err(|e| (format!("write {}: {e}", target.display()), EXIT_ERR))?;
+    if !json {
+        println!("kb: created {} ({} bytes)", target.display(), scaffold.len());
+    }
+
+    // ---- optional in-place edit: the saved bytes are what we index --------
+    let mut edited = false;
+    if edit {
+        edit_in_place(&target)?;
+        edited = true;
+    }
+
+    // ---- index (best-effort; disk is authoritative, `kb refresh` repairs) --
+    let db = open_db(dbpath)?;
+    let roots = roots_with_seq(&db)?;
+    let mut indexed = false;
+    let mut id: Option<String> = None;
+    let mut note: Option<String> = None;
+    if roots.is_empty() {
+        note = Some(
+            "no roots registered — skipped indexing (run `kb add <dir>` first)".to_string(),
+        );
+    } else {
+        let abs = std::fs::canonicalize(&target)
+            .map_err(|e| (format!("resolve {}: {e}", target.display()), EXIT_ERR))?;
+        let abs_s = abs.to_string_lossy().to_string();
+        match kb_db::walk_snapshot::winning_root(&roots, &abs_s) {
+            None => {
+                note = Some(format!(
+                    "{} is not under any registered root — skipped indexing (run `kb add <dir>`)",
+                    abs.display()
+                ));
+            }
+            Some((root, rel)) => match kb_db::index::build_page(&abs, &root, &rel, true) {
+                Ok(rec) => match kb_db::index::upsert_page(&db, &rec) {
+                    Ok(_) => {
+                        id = Some(rec.id.clone());
+                        indexed = true;
+                    }
+                    Err(e) => note = Some(format!("indexed skipped (DB upsert: {e})")),
+                },
+                Err(e) => note = Some(format!(
+                    "not indexed ({e}) — fix the frontmatter, then `kb refresh`"
+                )),
+            },
+        }
+    }
+
+    if json {
+        let r = CreateReport {
+            target: target.as_path(),
+            kind,
+            title: title.as_str(),
+            id: id.as_deref(),
+            created: true,
+            edited,
+            indexed,
+            dry_run: false,
+            bytes: scaffold.len(),
+            diff: d.as_str(),
+        };
+        println!("{}", r.to_json());
+    } else if indexed {
+        if let Some(i) = &id {
+            println!("kb: indexed as {i}");
+        }
+    }
+    if let Some(n) = note {
+        eprintln!("kb: {n}");
+    }
+    Ok(EXIT_OK)
+}
+
+/// The `create` result envelope — one JSON object on stdout (§13p), keys
+/// stable across the dry-run / write paths so an agent can branch on
+/// `indexed` / `dry_run` without parsing prose.
+struct CreateReport<'a> {
+    target: &'a Path,
+    kind: &'a str,
+    title: &'a str,
+    id: Option<&'a str>,
+    created: bool,
+    edited: bool,
+    indexed: bool,
+    dry_run: bool,
+    bytes: usize,
+    diff: &'a str,
+}
+
+impl CreateReport<'_> {
+    fn to_json(&self) -> String {
+        format!(
+            "{{\n  \"file\": {},\n  \"type\": {},\n  \"title\": {},\n  \"id\": {},\n  \"created\": {},\n  \"edited\": {},\n  \"indexed\": {},\n  \"dry_run\": {},\n  \"bytes\": {},\n  \"diff\": {}\n}}",
+            jstr(&self.target.display().to_string()),
+            jstr(self.kind),
+            jstr(self.title),
+            self.id.map(jstr).unwrap_or_else(|| "null".to_string()),
+            jbool(self.created),
+            jbool(self.edited),
+            jbool(self.indexed),
+            jbool(self.dry_run),
+            self.bytes,
+            jstr(self.diff),
+        )
+    }
+}
+
+/// `(path, seq)` for every registered root — the `winning_root` pick set
+/// (PLAN §4: innermost, then most-recent, wins).
+fn roots_with_seq(db: &Db) -> Result<Vec<(String, i64)>, (String, i32)> {
+    let mut stmt = db
+        .conn
+        .prepare("SELECT path, seq FROM roots ORDER BY seq")
+        .map_err(|e| (format!("prepare roots: {e}"), EXIT_ERR))?;
+    let rows = stmt
+        .query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?)))
+        .map_err(|e| (format!("query roots: {e}"), EXIT_ERR))?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|e| (format!("read roots: {e}"), EXIT_ERR))?;
+    Ok(rows)
 }
 
 fn cmd_roots(dbpath: Option<&Path>, json: bool) -> Kb {
@@ -2621,6 +2916,30 @@ fn pick_editor() -> String {
         }
     }
     "vi".to_string()
+}
+
+/// Open an already-written file in the user's editor **in place** ($VISUAL,
+/// then $EDITOR, then `vi`). Used by `kb create -e`, where the scaffold on
+/// disk *is* the buffer (unlike `section edit`, which splices a temp copy
+/// back through the section ops). A non-zero editor exit is an error — the
+/// scaffold is left on disk, so nothing is lost, but nothing is indexed
+/// either (the caller unwinds before the DB write).
+fn edit_in_place(path: &Path) -> Result<(), (String, i32)> {
+    let editor = pick_editor();
+    let st = std::process::Command::new(&editor)
+        .arg(path)
+        .status()
+        .map_err(|e| (format!("launch {editor}: {e}"), EXIT_ERR))?;
+    if !st.success() {
+        return Err((
+            format!(
+                "editor {editor} exited with {st} — {} was left with the scaffold (fix it by hand, or delete it and re-run `kb create`)",
+                path.display()
+            ),
+            EXIT_ERR,
+        ));
+    }
+    Ok(())
 }
 
 /// Interactive `y/N` prompt. Non-interactive stdin (piped / no TTY) never
