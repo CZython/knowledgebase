@@ -403,6 +403,17 @@ enum SectionOp {
         #[command(flatten)]
         flags: WriteFlags,
     },
+    /// Edit a section in $VISUAL/$EDITOR (fallback `vi`), then diff + confirm.
+    /// SECURITY_REPORT 3.1 mitigation: gated behind the `editor` feature
+    /// (default on). A hardened build compiles without this verb:
+    /// `cargo build --no-default-features`.
+    #[cfg(feature = "editor")]
+    Edit {
+        #[arg(value_name = "REF")]
+        ref_: String,
+        #[command(flatten)]
+        flags: WriteFlags,
+    },
     /// Remove a frontmatter field entirely (`rm fm.<key>`), or remove one
     /// element from a list field (`rm fm.<key> <value>`). `rm` on a plain
     /// section ref is not yet supported.
@@ -436,7 +447,12 @@ fn main() {
         "drop-root", "refresh", "full-rebuild", "search", "browse", "tag",
         "tag-alias", "links", "resolve", "info", "stats", "cron", "tui",
         // section ops (also reachable bare in principle)
-        "set", "append", "insert", "rm",
+        "set", "append", "insert",
+        // `edit` is only a sub-command when the `editor` feature is on
+        // (SECURITY_REPORT 3.1) — gate the bare-verb list to match.
+        #[cfg(feature = "editor")]
+        "edit",
+        "rm",
     ];
     if non_flag.len() == 1 && !SUBCMDS.contains(&non_flag[0].as_str()) {
         let s = non_flag[0];
@@ -2382,6 +2398,32 @@ fn cmd_section(file: &Path, op: &SectionOp) -> Kb {
                 .map_err(|e| (e.to_string(), EXIT_SECTION))?;
             commit(file, orig, new, flags.dry_run, flags.yes, flags.json)
         }
+        #[cfg(feature = "editor")]
+        SectionOp::Edit { ref_: r, flags } => {
+            if flags.json {
+                return Err((
+                    "`section edit --json` is unsupported — `--edit` is an editor flow, not JSON (use `set --json` over a text source instead)".into(),
+                    EXIT_SECTION,
+                ));
+            }
+            let orig = read_file(file)?;
+            let doc = Doc::new(orig.clone());
+            check_etag(&doc, Some(r.as_str()), flags)?;
+            let old_full = doc.full_bytes(r).map_err(|e| (e.to_string(), EXIT_SECTION))?;
+            let edited = run_editor(old_full)?;
+            if edited.as_slice() == old_full {
+                println!("{}: no changes (section unchanged in editor)", file.display());
+                return Ok(EXIT_OK);
+            }
+            let new_text = String::from_utf8_lossy(&edited).into_owned();
+            // The editor had the complete section (heading + body + subsections);
+            // hand the whole thing back to `set_section` (keep_heading = false)
+            // so the full span is replaced exactly as edited.
+            let new = doc
+                .set_section(r, &new_text, false)
+                .map_err(|e| (e.to_string(), EXIT_SECTION))?;
+            commit(file, orig, new, flags.dry_run, flags.yes, flags.json)
+        }
         SectionOp::Rm { ref_: r, value, flags } => {
             if is_fm_ref(r) {
                 let key: &str = fm_key(r).ok_or_else(|| (format!("`rm` on whole-frontmatter ref {r:?} needs a key (fm.<key>)"), EXIT_SECTION))?;
@@ -2611,6 +2653,42 @@ fn parse_placement(s: &str) -> Result<SectionPlacement, (String, i32)> {
             ))
         }
     })
+}
+
+// SECURITY_REPORT 3.1 mitigation: the two helpers below are the entire
+// $VISUAL/$EDITOR forking attack surface (an env var names an executable
+// we then fork). They are compiled in only when the `editor` feature is on;
+// a hardened build strips them at compile time:
+//   cargo build -p kb --no-default-features   → binary with no editor calls
+
+#[cfg(feature = "editor")]
+fn run_editor(initial: &[u8]) -> Result<Vec<u8>, (String, i32)> {
+    // Open `initial` in $VISUAL, then $EDITOR, then `vi`, in a temp file;
+    // return the post-edit bytes.
+    let tmp = std::env::temp_dir().join(format!("kb-edit-{}.md", std::process::id()));
+    std::fs::write(&tmp, initial).map_err(|e| (format!("write temp edit buffer: {e}"), EXIT_ERR))?;
+    let editor = pick_editor();
+    let st = std::process::Command::new(&editor)
+        .arg(&tmp)
+        .status()
+        .map_err(|e| (format!("launch {editor}: {e}"), EXIT_ERR))?;
+    if !st.success() {
+        let _ = std::fs::remove_file(&tmp);
+        return Err((format!("editor {editor} exited with {st}"), EXIT_ERR));
+    }
+    let bytes = std::fs::read(&tmp).unwrap_or_default();
+    let _ = std::fs::remove_file(&tmp);
+    Ok(bytes)
+}
+
+#[cfg(feature = "editor")]
+fn pick_editor() -> String {
+    for k in ["VISUAL", "EDITOR"] {
+        if let Some(v) = std::env::var(k).ok().filter(|v| !v.trim().is_empty()) {
+            return v.split_whitespace().next().unwrap_or("vi").to_string();
+        }
+    }
+    "vi".to_string()
 }
 
 /// Interactive `y/N` prompt. Non-interactive stdin (piped / no TTY) never

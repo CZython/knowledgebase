@@ -4,6 +4,18 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 
+# SECURITY_REPORT 3.1 mitigation (agreed): the `$VISUAL`/`$EDITOR`-forking
+# verbs (`section edit`, and later `create -e`) are compiled in only when the
+# `editor` feature is enabled. `editor` is on by default so day-to-day
+# builds behave as they always have; a hardened build strips the entire
+# editor attack surface at compile time:
+#
+#   cargo build -p kb --no-default-features    # no editor
+#   cargo build -p kb --features editor        # editor (explicit)
+[features]
+default = ["editor"]
+editor = []
+
 [[bin]]
 name = "kb"
 path = "src/main.rs"

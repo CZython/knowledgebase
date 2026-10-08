@@ -403,10 +403,11 @@ fn replace_op_json_roundtrip() {
 }
 
 #[test]
+#[cfg(not(feature = "editor"))]
 fn section_edit_removed() {
-    // The `edit` subcommand was dropped at compile time (it spawned $VISUAL/
-    // $EDITOR — the RCE vector, SECURITY_REPORT 3.1). `edit` must no longer be
-    // a recognised section op.
+    // SECURITY_REPORT 3.1 — the `editor` feature is OFF for this test build,
+    // so the `edit` subcommand (which spawned $VISUAL/$EDITOR) does not
+    // exist. Clap must reject it as an unknown bare verb.
     let s = Setup::new("editgone");
     let file = s.root.join("doc.md");
     fs::create_dir_all(&s.root).unwrap();
@@ -415,7 +416,7 @@ fn section_edit_removed() {
         "--file", file.to_str().unwrap(),
         "edit", "Sec", "--yes",
     ]);
-    assert_ne!(code, 0, "`section edit` was removed; clap should reject it");
+    assert_ne!(code, 0, "`section edit` is not compiled in; clap should reject it");
     let _ = err; // clap names the unrecognised subcommand on stderr
 }
 
