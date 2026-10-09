@@ -328,6 +328,25 @@ fn tag_lists_tagged_pages_and_expands_labels() {
 }
 
 #[test]
+fn tag_matches_mixed_case_tag_in_any_query_case() {
+    // SECURITY_REPORT 3.4: the `kb tag` IN-list used to keep the *stored*
+    // casing, so a stored mixed-case tag like `Czech` failed
+    // `lower('Czech') IN ('Czech',…)` → no match, in any query case.
+    let s = Setup::new("tag_case");
+    write_page(&s, "a.md", "type: note\ntitle: A\ntags: [Czech, llm]\n", "x\n");
+    add(&s);
+    for q in ["Czech", "czech", "CZECH"] {
+        let (code, out, err) = run_bare(&s, &["tag", q]);
+        assert_eq!(code, 0, "stderr: {err}");
+        assert!(out.contains("A"), "tag {q:?} must match the stored `Czech`: {out}");
+    }
+    // A different tag must still not match.
+    let (code, out, err) = run_bare(&s, &["tag", "llm"]);
+    assert_eq!(code, 0, "stderr: {err}");
+    assert!(out.contains("A"), "llm also stored: {out}");
+}
+
+#[test]
 fn tag_alias_round_trip() {
     let s = Setup::new("tagalias");
     write_page(&s, "a.md", "type: note\ntitle: A\ntags:\n  - czech\n", "x\n");

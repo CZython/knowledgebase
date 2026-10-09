@@ -568,4 +568,60 @@ mod tests {
         }
         let _ = fs::remove_dir_all(&dir);
     }
+
+    #[test]
+    fn full_rebuild_surviving_root_reindexed_failed_root_surfaced() {
+        // SECURITY_REPORT 3.3 (full_rebuild half): `full_rebuild` wipes *all*
+        // pages up-front and then re-indexes, so a root that fails to walk
+        // has its pages wiped and simply not re-indexed — the rebuild is
+        // partial. The contract: (a) full_rebuild still returns Ok (a walk
+        // failure is surfaced as a warning, not a per-page `Err`), (b) the
+        // surviving root's page is present, (c) the failed root's page is
+        // absent (wiped, not re-indexed). This pins the asymmetry so a future
+        // change can't silently let a partial rebuild exit as if it were whole.
+        let base = std::env::temp_dir().join("kbdb_rr_f");
+        let _ = fs::remove_dir_all(&base);
+        let root_a = base.join("rootA");
+        let root_b = base.join("rootB");
+        fs::create_dir_all(&root_a).unwrap();
+        fs::create_dir_all(&root_b).unwrap();
+        fs::write(root_a.join("a.md"), "---\ntype: note\ntitle: A\n---\nbody a\n").unwrap();
+        fs::write(root_b.join("b.md"), "---\ntype: note\ntitle: B\n---\nbody b\n").unwrap();
+
+        let db = fresh_db();
+        db.add_root(
+            &fs::canonicalize(&root_a).unwrap().to_string_lossy(),
+            None, false,
+        ).unwrap();
+        db.add_root(
+            &fs::canonicalize(&root_b).unwrap().to_string_lossy(),
+            None, false,
+        ).unwrap();
+
+        let s1 = full_rebuild(&db).unwrap();
+        assert_eq!(s1.indexed, 2, "both pages indexed on a clean rebuild");
+
+        // Turn rootB into a failed root (path vanishes → `build_walk` Err).
+        let root_b_renamed = base.join("rootB.away");
+        fs::rename(&root_b, &root_b_renamed).unwrap();
+
+        let s2 = full_rebuild(&db).unwrap();
+        // The surviving root re-indexed exactly one page…
+        assert_eq!(s2.indexed, 1, "surviving root re-indexed");
+        let a_present: i64 = db.conn
+            .query_row("SELECT COUNT(*) FROM pages WHERE title = 'A'", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(a_present, 1, "surviving root's page present");
+        // …while the failed root's page was wiped and not re-indexed.
+        let b_present: i64 = db.conn
+            .query_row("SELECT COUNT(*) FROM pages WHERE title = 'B'", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(
+            b_present,
+            0,
+            "full_rebuild wipes first, so the failed root's page is absent (partial rebuild)"
+        );
+
+        let _ = fs::remove_dir_all(&base);
+    }
 }

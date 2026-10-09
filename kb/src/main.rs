@@ -1603,9 +1603,14 @@ fn cmd_tag(dbpath: Option<&Path>, tag: &str, json: bool) -> Kb {
         return Ok(EXIT_OK);
     }
 
+    // SECURITY_REPORT 3.4: the left side of the comparison is
+    // `lower(pt.tag)`, so the IN-list must be lowercased too. `canonicalize`
+    // returns the *stored* strings in their original casing, so a stored
+    // mixed-case tag like `Czech` would otherwise fail `lower('Czech')
+    // IN ('Czech',…)` → no match. Folding to lowercase matches both sides.
     let in_list: Vec<String> = match_set
         .iter()
-        .map(|t| format!("'{}'", t.replace('\'', "''")))
+        .map(|t| format!("'{}'", t.to_lowercase().replace('\'', "''")))
         .collect();
 
     let sql = format!(

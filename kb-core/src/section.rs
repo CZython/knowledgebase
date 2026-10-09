@@ -923,6 +923,27 @@ mod tests {
         assert_eq!(String::from_utf8(whole).unwrap(), "X");
     }
 
+    #[test]
+    #[cfg(not(debug_assertions))]
+    fn splice_capacity_does_not_underflow_when_lo_gt_hi() {
+        // SECURITY_REPORT 3.12: in a release build (where `debug_assert!` is
+        // compiled out) a caller passing `lo > hi` used to compute
+        // `data.len() + new.len() - (hi - lo)` where `(hi - lo)` underflowed
+        // to a huge usize → `Vec::with_capacity` OOM-panicked. With the
+        // saturating capacity math the bound stays sane, so this must not
+        // panic. Gated to release because in debug the `debug_assert!` guard
+        // fires first (correctly).
+        let data = b"hello world"; // len 11
+        let new = splice(data, 8, 3, b"X"); // lo=8 > hi=3, both in-bounds
+        // out = data[..8] ++ "X" ++ data[3..]
+        let expected = format!(
+            "{}X{}",
+            String::from_utf8(data[..8].to_vec()).unwrap(),
+            String::from_utf8(data[3..].to_vec()).unwrap()
+        );
+        assert_eq!(String::from_utf8_lossy(&new).as_ref(), expected);
+    }
+
     // ---- editing ops -----------------------------------------------------
 
     #[test]
