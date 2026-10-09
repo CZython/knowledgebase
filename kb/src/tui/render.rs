@@ -93,7 +93,11 @@ fn draw_browse(f: &mut Frame, app: &App, area: ratatui::layout::Rect) {
         format!(" {} page(s) of {} match '{}' — / to edit filter · Esc to clear",
                 app.view.len(), app.rows.len(), app.filter_text)
     };
-    let widget = RatList::new(items).block(Block::default().borders(Borders::ALL).title(title));
+    // REVERSED flips the selected row's fg/bg so it stands out (the default
+    // list has no highlight, so the selection was only implied by scroll).
+    let widget = RatList::new(items)
+        .block(Block::default().borders(Borders::ALL).title(title))
+        .highlight_style(Style::default().add_modifier(Modifier::REVERSED));
 
     let mut list_state = ListState::default();
     if !app.view.is_empty() {
