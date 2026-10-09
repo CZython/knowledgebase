@@ -31,6 +31,11 @@ use kb_core::resolve as resolver;
 use kb_core::search_grammar;
 use kb_core::section::{splice, Doc, SectionPlacement};
 use kb_core::tags as kbtags;
+// The TUI is an assumed, interactive-only shell (M8). Agents drive the plain
+// CLI verbs instead, so the whole module is behind the `tui` feature (default
+// on) — a hardened build compiles without it and its deps:
+// `cargo build -p kb --no-default-features` (mirrors the `editor` gate).
+#[cfg(feature = "tui")]
 mod tui;
 use rusqlite::{params, OptionalExtension};
 use kb_db::refresh as kb_refresh;
@@ -378,6 +383,10 @@ enum Cmd {
     ///
     /// The user faces this when interactive navigation is needed; agents
     /// keep using the plain CLI verbs (which are scriptable and pipe-able).
+    ///
+    /// Gated behind the `tui` feature (default on): a hardened build omits
+    /// this subcommand entirely and rejects `kb tui` as an unknown command.
+    #[cfg(feature = "tui")]
     Tui,
 }
 
@@ -486,7 +495,10 @@ fn main() {
     static SUBCMDS: &[&str] = &[
         "toc", "show", "section", "replace", "patch", "add", "roots",
         "drop-root", "refresh", "full-rebuild", "search", "browse", "tag",
-        "tag-alias", "links", "resolve", "info", "stats", "cron", "tui",
+        "tag-alias", "links", "resolve", "info", "stats", "cron",
+        // `tui` routes to the TUI module — only when the `tui` feature is on.
+        #[cfg(feature = "tui")]
+        "tui",
         "create",
         // section ops (also reachable bare in principle)
         "set", "append", "insert",
@@ -582,6 +594,9 @@ fn run(cli: &Cli) -> i32 {
         Cmd::Resolve { query, json } => cmd_resolve(cli.db.as_deref(), query, *json),
         Cmd::Info { path, json } => cmd_info(cli.db.as_deref(), path, *json),
         Cmd::Stats { json } => cmd_stats(cli.db.as_deref(), *json),
+        // `tui` only exists when the `tui` feature is on (a hardened build
+        // rejects the subcommand at parse time, so this arm is unreachable).
+        #[cfg(feature = "tui")]
         Cmd::Tui => {
             let code = tui::run_tui(cli.db.as_deref());
             match code {
