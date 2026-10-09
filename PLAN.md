@@ -361,20 +361,36 @@ knowledgebase/    (Cargo workspace)
     │       ├── index.rs              # upsert pages/page_tags/page_gates/links; skip (warn) `.md` with no `type:` (per §4); tag_aliases is user-managed, not derived from disk
 │       ├── refresh.rs            # incremental (mtime_ns,hash) diff + full-rebuild
 │       └── query.rs              # SQL build: filters + MATCH + gate; run + shape rows
-├── kb/                           # single CLI binary (clap), flat subcommands
-│   ├── Cargo.toml
-│   └── src/
-│       ├── main.rs               # clap dispatch; --db default+override global flag
-│       ├── multi/                # DB-backed: create, add, roots, drop-root, refresh,
-│       │         full-rebuild, search, browse, tag, tag-alias, links, resolve,
-│       │         stats, cron
-    │       └── file/                 # mdtool surface: info, section, replace, set-section,
-    │                 append-section, insert-section, diff
-├── kb-tui/                       # M8 (deferred) — ratatui over shared core
+├── kb/                           # shared CLI source body (NOT a package — see below)
+│   ├── main.rs                   # clap dispatch (one real body, `include!`d twice)
+│   ├── diff.rs                   # unified-diff renderer + parser
+│   ├── tui/                      # M8 (ratatui shell) — gated behind `tui` feature
+│   │   ├── mod.rs
+│   │   ├── input.rs
+│   │   └── render.rs
+│   └── testdata/                 # golden fixtures for the diff parser
+├── user/                         # package `user` → bin `kb-user` (full: TUI + editor)
+│   ├── Cargo.toml                # default features = ["editor", "tui"]
+│   ├── src/main.rs               # one line: `include!("../../kb/main.rs");`
+│   └── tests/                    # the CLI integration suites (drive kb-user)
+│       ├── create_cli.rs
+│       ├── m7_multifile.rs
+│       ├── m9_agent_surface.rs
+│       ├── m9_json_fidelity.rs
+│       └── section_cli.rs
+├── hardened/                     # package `hardened` → bin `kb-hardened` (headless)
+│   ├── Cargo.toml                # default features = [] (no TUI, no editor)
+│   └── src/main.rs               # one line: `include!("../../kb/main.rs");`
+├── .cargo/config.toml            # aliases: `cargo user`, `cargo hardened`
 └── tests/
     ├── fixtures/                 # golden deep multi-root MD trees (each type)
     └── integration/              # end-to-end: add/refresh/search/edit on fixtures
 ```
+
+The two-package design (one shared body, two thin wrappers) lets a hardened
+build drop `ratatui`/`crossterm` from the dependency tree entirely — see
+`HARDENED_BUILD.md` for the locked requirements, why it can't be done with
+`required-features`, and the current gate checklist.
 
 ## 11. CLI reference (flat `kb <cmd>`; `--db <path>` defaults to `~/.local/share/kb/kb.db`)
 

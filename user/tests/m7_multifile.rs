@@ -7,14 +7,14 @@
 //! `tag` / `tag-alias` / `links` / `resolve` / `info` / `stats` / `cron`, plus
 //! the bare-string dispatch ergonomics shortcut (PLAN §11).
 //!
-//! Run: `cargo test -p kb --test m7_multifile`
+//! Run: `cargo test -p user --test m7_multifile`
 
 use std::fs;
 use std::path::PathBuf;
 use std::process::Command;
 
 fn kb() -> Command {
-    Command::new(env!("CARGO_BIN_EXE_kb"))
+    Command::new(std::env::var("CARGO_BIN_EXE_kb-user").expect("CARGO_BIN_EXE_kb-user unset"))
 }
 
 /// A throwaway root + DB. `Db` default is `~/.local/share/...`; we override

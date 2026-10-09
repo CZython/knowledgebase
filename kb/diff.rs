@@ -485,7 +485,9 @@ mod tests {
     // consume a real tool's output.
 
     fn fixture(name: &str) -> String {
-        let path = format!("{}/testdata/{}", env!("CARGO_MANIFEST_DIR"), name);
+        // The fixture lives in the shared source dir (`kb/testdata`); this
+        // crate (the package that compiles it, e.g. `user`) sits a level up.
+        let path = format!("{}/../kb/testdata/{}", env!("CARGO_MANIFEST_DIR"), name);
         std::fs::read_to_string(path).expect("fixture missing")
     }
 

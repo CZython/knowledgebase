@@ -1,0 +1,44 @@
+# kb-hardened — the headless CLI (agent build)
+#
+# The *same* shared CLI body as `kb-user` (via `include!("../kb/main.rs")`),
+# but compiled with both the `tui` and `editor` features **off** by default,
+# so in the standard hardened build:
+#   - the `kb tui` subcommand never exists → clap rejects `kb-hardened tui` as
+#     `unrecognized subcommand: 'tui'` (stderr, exit 2);
+#   - the `-e` / `--edit` / `section edit` surface is compiled out
+#     (`#[cfg(feature = "editor")]` in the shared body);
+#   - ratatui + crossterm do not appear in the dependency tree at all
+#     (`cargo tree -p hardened`);
+#   - `--version` prints `0.0.0 [hardened]` (see `kb/main.rs`).
+#
+# Everything else (search/browse/tag/create/section/...) is unchanged and
+# available for script-driven agents (pipe-able, deterministic).
+# See HARDENED_BUILD.md for the full design + why two packages.
+[package]
+name = "hardened"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[features]
+default = []
+# Both surfaces exist but are OFF by default. Toggling them on is allowed
+# (e.g. `cargo build -p hardened --features tui`) — the shared body then
+# compiles in the same way as `user` does.
+editor = []
+tui = ["dep:ratatui", "dep:crossterm"]
+
+[[bin]]
+name = "kb-hardened"
+path = "src/main.rs"
+
+[dependencies]
+clap = { workspace = true }
+kb-core = { path = "../kb-core" }
+kb-db   = { path = "../kb-db" }
+dirs    = { workspace = true }
+rusqlite = { workspace = true }
+# TUI-only, optional, pulled in only if a caller enables `--features tui`.
+# With the default (headless) build they stay out of the dependency tree.
+ratatui   = { workspace = true, optional = true }
+crossterm = { workspace = true, optional = true }

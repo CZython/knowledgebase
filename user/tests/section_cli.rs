@@ -10,7 +10,9 @@ use std::process::Command;
 use std::path::PathBuf;
 
 fn kb() -> Command {
-    Command::new(env!("CARGO_BIN_EXE_kb"))
+    Command::new(
+        std::env::var("CARGO_BIN_EXE_kb-user").expect("CARGO_BIN_EXE_kb-user unset — run under cargo test"),
+    )
 }
 
 /// Write `text` to a fresh temp file in the test's scratch dir and return its
@@ -530,7 +532,9 @@ fn fm_dry_run_writes_nothing() {
 /// unit tests, so here we can trust the input and only need to check that
 /// the *CLI plumbing* — arg parsing, byte-preservation, `commit()` — works.
 fn fixture(name: &str) -> String {
-    let path = format!("{}/testdata/{}", env!("CARGO_MANIFEST_DIR"), name);
+    // The fixture lives in the shared source dir (`kb/testdata`); the `user`
+    // package that compiles the test sits a level up from it.
+    let path = format!("{}/../kb/testdata/{}", env!("CARGO_MANIFEST_DIR"), name);
     std::fs::read_to_string(path).expect("fixture present")
 }
 
@@ -542,7 +546,7 @@ fn patch_applies_a_real_external_diff_byte_identical() {
     std::fs::write(&f, &base_s).unwrap();
     let (code, _, err) = run(&[
         "patch", f.to_str().unwrap(),
-        "--patch-file", format!("{}/testdata/standard.diff", env!("CARGO_MANIFEST_DIR")).as_str(),
+        "--patch-file", format!("{}/../kb/testdata/standard.diff", env!("CARGO_MANIFEST_DIR")).as_str(),
         "--yes",
     ]);
     assert_eq!(code, 0, "patch failed: {err}");
@@ -595,7 +599,7 @@ fn patch_dry_run_prints_diff_but_writes_nothing() {
     std::fs::write(&f, &base_s).unwrap();
     let (code, out, _) = run(&[
         "patch", f.to_str().unwrap(),
-        "--patch-file", format!("{}/testdata/standard.diff", env!("CARGO_MANIFEST_DIR")).as_str(),
+        "--patch-file", format!("{}/../kb/testdata/standard.diff", env!("CARGO_MANIFEST_DIR")).as_str(),
         "--dry-run",
     ]);
     assert_eq!(code, 0);
@@ -610,7 +614,7 @@ fn patch_json_is_well_formed_envelope() {
     std::fs::write(&f, fixture("section_old.md")).unwrap();
     let (code, out, _) = run(&[
         "patch", f.to_str().unwrap(),
-        "--patch-file", format!("{}/testdata/standard.diff", env!("CARGO_MANIFEST_DIR")).as_str(),
+        "--patch-file", format!("{}/../kb/testdata/standard.diff", env!("CARGO_MANIFEST_DIR")).as_str(),
         "--yes", "--json",
     ]);
     assert_eq!(code, 0);
@@ -638,7 +642,7 @@ fn patch_no_source_is_exit_1() {
 fn patch_two_sources_is_exit_1() {
     let f = std::env::temp_dir().join(format!("kb_patch_g_{}.md", std::process::id()));
     std::fs::write(&f, fixture("section_old.md")).unwrap();
-    let pf = format!("{}/testdata/standard.diff", env!("CARGO_MANIFEST_DIR"));
+    let pf = format!("{}/../kb/testdata/standard.diff", env!("CARGO_MANIFEST_DIR"));
     let (code, _, err) = run(&[
         "patch", f.to_str().unwrap(),
         "--patch-file", pf.as_str(), "--patch-text", "x", "--yes",

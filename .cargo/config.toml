@@ -1,0 +1,19 @@
+# Cargo package-selection aliases for the two build variants.
+#
+# Requirement (HARDENED_BUILD.md):
+#   1. `cargo build`            -> build both kb-user and kb-hardened
+#   2. build kb-user only       -> cargo build -p user   (alias: cargo user)
+#   3. build kb-hardened only   -> cargo build -p hardened (alias: cargo hardened)
+#
+# Note: cargo's built-in `build` command does not accept a *positional*
+# package name (it only knows `-p`/`--package`). So the one-package build is
+# either of:
+#   cargo build -p <pkg>     # the canonical cargo form, works out of the box
+#   cargo <pkg>              # a thin alias that adds the `-p <pkg>` flag
+# `cargo build <pkg>` does NOT work (cargo parses `<pkg>` as an unknown
+# argument, and aliases cannot shadow built-in subcommands) — see the
+# HARDENED_BUILD.md "why" note. All other forms below are verified.
+
+[alias]
+user     = "build -p user"
+hardened = "build -p hardened"

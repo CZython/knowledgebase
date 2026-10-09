@@ -1,31 +1,27 @@
+# kb-user — the full CLI (default build)
+#
+# A thin wrapper around the shared CLI body at `../kb/main.rs`:
+#   - enables both `editor` and `tui` features;
+#   - depends on ratatui + crossterm (the TUI-only crates);
+#   - exposes binary `kb-user`.
+#
+# The shared body is NOT a package of its own (no Cargo.toml in `kb/`);
+# it is included via `include!` from this one-line `src/main.rs`. Because
+# features are package-global, both variants (user / hardened) need to live
+# in separate packages that share the same body file. See HARDENED_BUILD.md.
 [package]
-name = "kb"
+name = "user"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 
-# SECURITY_REPORT 3.1 mitigation (agreed): the `$VISUAL`/`$EDITOR`-forking
-# verbs (`section edit`, and later `create -e`) are compiled in only when the
-# `editor` feature is enabled. `editor` is on by default so day-to-day
-# builds behave as they always have; a hardened build strips the entire
-# editor attack surface at compile time:
-#
-#   cargo build -p kb --no-default-features    # no editor, no TUI
-#   cargo build -p kb --features editor        # editor (explicit)
-#
-# Likewise `tui` (default on) compiles the interactive shell. It pulls the two
-# TUI-only deps (ratatui/crossterm) via the `dep:` prefix so they stay hidden
-# behind the feature; a hardened agent build (`--no-default-features`) drops
-# the entire `kb tui` surface AND its deps from the dependency tree:
-#
-#   cargo build -p kb --features editor,tui    # everything (default)
 [features]
 default = ["editor", "tui"]
 editor = []
 tui = ["dep:ratatui", "dep:crossterm"]
 
 [[bin]]
-name = "kb"
+name = "kb-user"
 path = "src/main.rs"
 
 [dependencies]

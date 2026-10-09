@@ -1,15 +1,18 @@
 [workspace]
 # Three crates — one verified core, one DB shell, one CLI:
 #
-#   kb-core   pure Rust + Verus (no std IO) — the *proven* logic
-#   kb-db     rusqlite + FTS5 — the *assumed* shell (FFI/SQL)
-#   kb        single CLI binary — the *assumed* shell (clap)
+#   kb-core     pure Rust + Verus (no std IO) — the *proven* logic
+#   kb-db       rusqlite + FTS5 — the *assumed* shell (FFI/SQL)
+#   user        full CLI binary `kb-user` (clap) — TUI + editor + all verbs
+#   hardened    headless CLI binary `kb-hardened` — same body, tui+editor off
 #
-# We intentionally separate these three so that the boundary between
-# "proven" and "assumed" is visible in the crate graph. See PLAN.md §9
-# (Verification — proven vs assumed) and §10 (Workspace layout).
+# `kb/` is the *shared CLI source* (the one real body: main.rs/diff.rs/tui),
+# compiled into both the `user` and `hardened` packages via `include!`. It is
+# NOT a workspace member (no Cargo.toml). We deliberately separate "proven"
+# (kb-core) and "assumed" (kb-db + the shell) so that boundary is visible in
+# the crate graph. See PLAN.md §9/§10 and HARDENED_BUILD.md.
 resolver = "2"
-members = ["kb-core", "kb-db", "kb"]
+members = ["kb-core", "kb-db", "user", "hardened"]
 
 [workspace.package]
 version = "0.0.0"

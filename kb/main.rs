@@ -1,24 +1,29 @@
-//! # kb — the CLI (single binary). See PLAN.md §11 / §13f.
-//!
-//! M6 lands the **single-file namespace**: section-aware read / edit of one
-//! markdown file, backed by the pure, verified core (`kb-core::section`), with
-//! a zero-dependency standard-`diff -u` renderer + parser (no `diff` / `git`
-//! fork-exec), optimistic concurrency via an etag, atomic writes, and an
-//! editor flow.
-//!
-//! The **multi-file namespace** (DB-backed: `add` / `drop-root` / `search` /
-//! `browse` / `tag` / `link` / …) lands in M5/M7 — these commands are
-//! declared (so `kb --help` is complete) but return a not-implemented message.
-//!
-//! ## Agent contract (locked, PLAN §13f)
-//! * **Read** is scoped + minimal: `kb toc <file>` (outline only),
-//!   `kb show <file> <ref> [--body|--full] [--json] [--etag]`.
-//! * **Write** takes the *complete new section text* (3 sources:
-//!   `--text | --from-file | --stdin`), never a patch. Diff is **output for
-//!   review** (standard `diff -u` shape, parseable by any tool), never input.
-//! * **Concurrency**: `--if-unchanged <etag>` = FNV-1a 64-bit (16 hex) over the
-//!   target section's bytes; mismatch → exit code 3.
-//! * **Exit codes**: `0` ok · `1` generic · `2` section/resolve · `3` etag.
+// # kb — the shared CLI body. See PLAN.md §11 / §13f.
+//
+// NOTE: this file is the single shared body included into two crates
+// (`user` and `hardened`). It must not begin with `//!` crate-level doc
+// comments — those are only allowed at the start of the *crate*, and each
+// crate's real `src/main.rs` provides its own leading doc block.
+//
+// M6 lands the **single-file namespace**: section-aware read / edit of one
+// markdown file, backed by the pure, verified core (`kb-core::section`), with
+// a zero-dependency standard-`diff -u` renderer + parser (no `diff` / `git`
+// fork-exec), optimistic concurrency via an etag, atomic writes, and an
+// editor flow.
+//
+// The **multi-file namespace** (DB-backed: `add` / `drop-root` / `search` /
+// `browse` / `tag` / `link` / …) lands in M5/M7 — these commands are
+// declared (so `kb --help` is complete) but return a not-implemented message.
+//
+// ## Agent contract (locked, PLAN §13f)
+// * **Read** is scoped + minimal: `kb toc <file>` (outline only),
+//   `kb show <file> <ref> [--body|--full] [--json] [--etag]`.
+// * **Write** takes the *complete new section text* (3 sources:
+//   `--text | --from-file | --stdin`), never a patch. Diff is **output for
+//   review** (standard `diff -u` shape, parseable by any tool), never input.
+// * **Concurrency**: `--if-unchanged <etag>` = FNV-1a 64-bit (16 hex) over the
+//   target section's bytes; mismatch → exit code 3.
+// * **Exit codes**: `0` ok · `1` generic · `2` section/resolve · `3` etag.
 
 mod diff;
 
@@ -34,7 +39,8 @@ use kb_core::tags as kbtags;
 // The TUI is an assumed, interactive-only shell (M8). Agents drive the plain
 // CLI verbs instead, so the whole module is behind the `tui` feature (default
 // on) — a hardened build compiles without it and its deps:
-// `cargo build -p kb --no-default-features` (mirrors the `editor` gate).
+// `cargo build -p hardened` (that package turns the `tui` feature off; the
+// `user` package — the full build — keeps it on, mirroring the `editor` gate).
 #[cfg(feature = "tui")]
 mod tui;
 use rusqlite::{params, OptionalExtension};
@@ -54,8 +60,26 @@ const EXIT_ETAG: i32 = 3;
 /// right exit code, so fallible steps compose cleanly.
 type Kb = Result<i32, (String, i32)>;
 
+/// The shared CLI body is compiled into two packages (`user`, `hardened`),
+/// each producing a separate binary (`kb-user`, `kb-hardened`). The `editor`
+/// feature is the single proxy for "which package is this?": it is ON for
+/// `user` (default) and OFF for `hardened` (default), so we pick name +
+/// version + about via `cfg!(feature = "editor")` at compile time — both
+/// packages compile the same file, get the right identity, and share all
+/// the other verbs verbatim.
+///
+/// `user`      — `kb-user 0.0.0`            — `editor` + `tui` ON by default
+/// `hardened`  — `kb-hardened 0.0.0 [hardened]` — neither ON by default
 #[derive(Parser)]
-#[command(name = "kb", version, about = "knowledgebase — single Rust CLI over embedded SQLite+FTS5")]
+#[command(
+    name = if cfg!(feature = "editor") { "kb-user" } else { "kb-hardened" },
+    version = if cfg!(feature = "editor") {
+        env!("CARGO_PKG_VERSION")
+    } else {
+        concat!(env!("CARGO_PKG_VERSION"), " [hardened]")
+    },
+    about = "knowledgebase — single Rust CLI over embedded SQLite+FTS5"
+)]
 struct Cli {
     /// Path to the SQLite DB (default: `~/.local/share/knowledgebase/kb.db`).
     #[arg(long, value_name = "PATH", global = true)]
@@ -492,19 +516,22 @@ fn main() {
         .collect();
     // A bare search/info arg is a single non-flag token that is *not* itself a
     // known subcommand (those route normally, e.g. `kb roots`, `kb stats`).
+    //
+    // This list is a *name detector* only — it answers "is this token a real
+    // subcommand (route to clap) or a bare string (route to info/search)?".
+    // `tui` and `edit` are listed **unconditionally**: in the `user` build both
+    // parse and run as normal; in the `hardened` build their `Cmd` variants
+    // are `#[cfg(feature = ...)]`-compiled out, so clap rejects them itself
+    // with `unrecognized subcommand` (stderr, exit 2) — rather than letting
+    // this shortcut fall through to a stray "0 results" search.
     static SUBCMDS: &[&str] = &[
         "toc", "show", "section", "replace", "patch", "add", "roots",
         "drop-root", "refresh", "full-rebuild", "search", "browse", "tag",
         "tag-alias", "links", "resolve", "info", "stats", "cron",
-        // `tui` routes to the TUI module — only when the `tui` feature is on.
-        #[cfg(feature = "tui")]
         "tui",
         "create",
         // section ops (also reachable bare in principle)
         "set", "append", "insert",
-        // `edit` is only a sub-command when the `editor` feature is on
-        // (SECURITY_REPORT 3.1) — gate the bare-verb list to match.
-        #[cfg(feature = "editor")]
         "edit",
         "rm",
     ];
@@ -2993,7 +3020,7 @@ fn parse_placement(s: &str) -> Result<SectionPlacement, (String, i32)> {
 // $VISUAL/$EDITOR forking attack surface (an env var names an executable
 // we then fork). They are compiled in only when the `editor` feature is on;
 // a hardened build strips them at compile time:
-//   cargo build -p kb --no-default-features   → binary with no editor calls
+//   cargo build -p hardened   → binary with no editor calls
 
 #[cfg(feature = "editor")]
 fn run_editor(initial: &[u8]) -> Result<Vec<u8>, (String, i32)> {

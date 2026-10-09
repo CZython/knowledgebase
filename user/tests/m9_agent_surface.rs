@@ -10,14 +10,18 @@
 //! Drives the real `kb` binary as a subprocess against a throwaway root +
 //! DB, mirroring `m7_multifile.rs` so the surface is asserted end-to-end.
 //!
-//! Run: `cargo test -p kb --test m9_agent_surface`
+//! Run: `cargo test -p user --test m9_agent_surface`
 
 use std::fs;
 use std::path::PathBuf;
 use std::process::Command;
 
 fn kb() -> Command {
-    Command::new(env!("CARGO_BIN_EXE_kb"))
+    // `kb-user` is a *hyphenated* bin name; cargo exposes it to tests as
+    // `CARGO_BIN_EXE_kb-user` at **runtime** (and only for valid identifiers
+    // at compile time — hyphens are not valid Rust identifiers, so the
+    // `env!` macro can't be used).
+    Command::new(std::env::var("CARGO_BIN_EXE_kb-user").expect("CARGO_BIN_EXE_kb-user unset"))
 }
 
 struct Setup {

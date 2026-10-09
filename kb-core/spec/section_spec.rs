@@ -254,12 +254,12 @@ verus! {
     // (R1) the resolution OUTCOME is a clean 3-way partition: exactly one
     //      of unique / ambiguous / not-found (the three are total +
     //      pairwise disjoint — a reference never resolves to two outcomes).
-    pub const n_unique: u8 = 0;
-    pub const n_ambig:  u8 = 1;
-    pub const n_absent: u8 = 2;
-    pub open spec fn outcome_unique (r: u8) -> bool { r == n_unique }
-    pub open spec fn outcome_ambiguous(r: u8) -> bool { r == n_ambig }
-    pub open spec fn outcome_absent (r: u8) -> bool { r == n_absent }
+    pub const N_UNIQUE: u8 = 0;
+    pub const N_AMBIG:  u8 = 1;
+    pub const N_ABSENT: u8 = 2;
+    pub open spec fn outcome_unique (r: u8) -> bool { r == N_UNIQUE }
+    pub open spec fn outcome_ambiguous(r: u8) -> bool { r == N_AMBIG }
+    pub open spec fn outcome_absent (r: u8) -> bool { r == N_ABSENT }
     pub open spec fn is_outcome(r: u8) -> bool
         { outcome_unique(r) || outcome_ambiguous(r) || outcome_absent(r) }
     #[verifier::proof]
@@ -284,29 +284,29 @@ verus! {
     //      resolved reference is not silently BOTH unique and ambiguous).
     #[verifier::proof]
     fn outcome_tags_distinct()
-        ensures n_unique != n_ambig
-             && n_ambig != n_absent
-             && n_unique != n_absent {}
+        ensures N_UNIQUE != N_AMBIG
+             && N_AMBIG != N_ABSENT
+             && N_UNIQUE != N_ABSENT {}
 
     // (R3) the 4-stage *waterfall* terminates in exactly one stage. Model
     //      the stages as an ordered set with at most one "accepting" stage:
     //      the first stage that matches a section is the one that resolves
     //      the reference (stages are tried in strict order; a later stage
     //      never overrides an earlier match).
-    pub const stage_dotted: u8 = 0;
-    pub const stage_title:  u8 = 1;
-    pub const stage_exact:  u8 = 2;
-    pub const stage_substr: u8 = 3;
+    pub const STAGE_DOTTED: u8 = 0;
+    pub const STAGE_TITLE:  u8 = 1;
+    pub const STAGE_EXACT:  u8 = 2;
+    pub const STAGE_SUBSTR: u8 = 3;
     pub open spec fn is_stage(s: u8) -> bool
-        { s == stage_dotted || s == stage_title || s == stage_exact || s == stage_substr }
+        { s == STAGE_DOTTED || s == STAGE_TITLE || s == STAGE_EXACT || s == STAGE_SUBSTR }
     #[verifier::proof]
     fn stage_is_4way(s: u8)
         ensures is_stage(s) || !is_stage(s) {}
     #[verifier::proof]
     fn stages_are_ordered_distinct()
-        ensures stage_dotted != stage_title
-             && stage_title != stage_exact
-             && stage_exact != stage_substr {}
+        ensures STAGE_DOTTED != STAGE_TITLE
+             && STAGE_TITLE != STAGE_EXACT
+             && STAGE_EXACT != STAGE_SUBSTR {}
 
     // (R4) *exactness* of a stage's match predicate: a dotted reference
     //      matches a section iff the dotted number equals that section's

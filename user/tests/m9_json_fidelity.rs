@@ -6,15 +6,15 @@
 ///
 /// (Frontmatter *parsing* — quote/backslash handling — is M1's business and
 /// is identical on both surfaces; JSON escaping of the special chars is pinned
-/// byte-for-byte by the `PageJson::render` unit test in `kb/src/main.rs`, so
+/// byte-for-byte by the `PageJson::render` unit test in `kb/main.rs`, so
 /// it need not be re-derived through the parser here.)
 ///
-/// Run: `cargo test -p kb --test m9_json_fidelity`
+/// Run: `cargo test -p user --test m9_json_fidelity`
 use std::fs;
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
 
-fn kb() -> Command { Command::new(env!("CARGO_BIN_EXE_kb")) }
+fn kb() -> Command { Command::new(std::env::var("CARGO_BIN_EXE_kb-user").unwrap()) }
 
 struct S { root: PathBuf, db: PathBuf }
 impl S {
