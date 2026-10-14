@@ -426,13 +426,23 @@ fn handle_alias(app: &mut App, ev: KeyEvent) -> bool {
             false
         }
 
-        // `↑`/`↓`/`j`/`k` move the list selection (no-op when the form is
-        // focused or the list is empty).
-        KeyCode::Up | KeyCode::Char('k') => {
+        // `↑`/`↓` always move the list selection (no-op when the form is
+        // focused or the list is empty). `j`/`k` move *only* while the list
+        // is active — with the form active they fall through to the `Char(c)`
+        // arm and are *typed* (aliases can legitimately contain `j`/`k`).
+        KeyCode::Up => {
             app.alias_move(-1);
             false
         }
-        KeyCode::Down | KeyCode::Char('j') => {
+        KeyCode::Down => {
+            app.alias_move(1);
+            false
+        }
+        KeyCode::Char('k') if matches!(&app.mode, crate::tui::Mode::Alias(a) if a.focused) => {
+            app.alias_move(-1);
+            false
+        }
+        KeyCode::Char('j') if matches!(&app.mode, crate::tui::Mode::Alias(a) if a.focused) => {
             app.alias_move(1);
             false
         }
@@ -451,16 +461,12 @@ fn handle_alias(app: &mut App, ev: KeyEvent) -> bool {
             false
         }
 
-        // `x` removes the selected alias (no-op when the form is focused or
-        // the list is empty).
-        KeyCode::Char('x') => {
-            let in_list = matches!(&app.mode, crate::tui::Mode::Alias(a) if a.focused);
-            if in_list {
-                if let Err((msg, _)) = app.remove_alias() {
-                    app.set_error(msg);
-                }
-            } else {
-                app.set_info("alias list — Tab to the list to remove one (or type a new one)");
+        // `x` removes the selected alias — but *only* while the list is
+        // active; with the form active it is just a typed character
+        // (aliases may legitimately contain `x`).
+        KeyCode::Char('x') if matches!(&app.mode, crate::tui::Mode::Alias(a) if a.focused) => {
+            if let Err((msg, _)) = app.remove_alias() {
+                app.set_error(msg);
             }
             false
         }
@@ -493,11 +499,19 @@ fn handle_roots(app: &mut App, ev: KeyEvent) -> bool {
             app.roots_toggle_focus();
             false
         }
-        KeyCode::Up | KeyCode::Char('k') => {
+        KeyCode::Up => {
             app.roots_move(-1);
             false
         }
-        KeyCode::Down | KeyCode::Char('j') => {
+        KeyCode::Down => {
+            app.roots_move(1);
+            false
+        }
+        KeyCode::Char('k') if matches!(&app.mode, crate::tui::Mode::Roots(r) if r.focused) => {
+            app.roots_move(-1);
+            false
+        }
+        KeyCode::Char('j') if matches!(&app.mode, crate::tui::Mode::Roots(r) if r.focused) => {
             app.roots_move(1);
             false
         }
@@ -510,14 +524,12 @@ fn handle_roots(app: &mut App, ev: KeyEvent) -> bool {
             }
             false
         }
-        KeyCode::Char('x') => {
-            let in_list = matches!(&app.mode, crate::tui::Mode::Roots(r) if r.focused);
-            if in_list {
-                if let Err((msg, _)) = app.drop_root_tui() {
-                    app.set_error(msg);
-                }
-            } else {
-                app.set_info("roots list — Tab to the list to drop one (or type a new one)");
+        // `x` drops the selected root — but *only* while the list is
+        // active; with the form active it is just a typed character
+        // (paths may legitimately contain `x`).
+        KeyCode::Char('x') if matches!(&app.mode, crate::tui::Mode::Roots(r) if r.focused) => {
+            if let Err((msg, _)) = app.drop_root_tui() {
+                app.set_error(msg);
             }
             false
         }
@@ -544,5 +556,74 @@ fn filter_edit_note(app: &App) -> String {
             app.filter_text,
             app.view.len()
         )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn key(c: char) -> KeyEvent {
+        KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE)
+    }
+
+    /// The alias add form must accept `j`/`k` as *typed* characters (they
+    /// are reserved for list navigation only while the list is focused).
+    /// Regression: `"k8"` used to land as `"8"`.
+    #[test]
+    fn form_chars_jk_are_typed_not_swallowed() {
+        let db = crate::tui::Db::open_in_memory_test().unwrap();
+        db.migrate().unwrap();
+        db.conn
+            .execute(
+                "INSERT INTO tag_aliases(alias, canonical) VALUES ('a', 'A'), ('b', 'B')",
+                [],
+            )
+            .unwrap();
+        let mut app = App::new(db).unwrap();
+        app.open_alias().unwrap();
+        assert!(!matches!(&app.mode, crate::tui::Mode::Alias(a) if a.focused), "form focused by default");
+        for c in "jk".chars() {
+            assert!(!handle_event(&mut app, key(c)));
+        }
+        let text = match &app.mode {
+            crate::tui::Mode::Alias(a) => a.input.clone(),
+            _ => String::new(),
+        };
+        assert_eq!(text, "jk", "'j'/'k' must be typed into the form, not consumed");
+
+        // …but while the LIST is focused the same keys still navigate.
+        app.alias_toggle_focus();
+        let before = match &app.mode {
+            crate::tui::Mode::Alias(a) => a.selected,
+            _ => usize::MAX,
+        };
+        assert!(!handle_event(&mut app, key('j')));
+        let after = match &app.mode {
+            crate::tui::Mode::Alias(a) => a.selected,
+            _ => usize::MAX,
+        };
+        assert_eq!(after, (before + 1).min(1), "'j' navigates the list when the list is focused");
+    }
+
+    /// The roots add form is a *path* input — `j`/`k` are common in paths
+    /// and must be typed when the form is focused (regression: `"/tmp/xjk-root"`
+    /// used to land as `"/tmp/x-root"`).
+    #[test]
+    fn roots_form_types_jk_in_path() {
+        let db = crate::tui::Db::open_in_memory_test().unwrap();
+        db.migrate().unwrap();
+        let path = "/tmp/xjk-root";
+        std::fs::create_dir_all(path).unwrap();
+        let mut app = App::new(db).unwrap();
+        app.open_roots().unwrap();
+        for c in path.chars() {
+            assert!(!handle_event(&mut app, key(c)));
+        }
+        let text = match &app.mode {
+            crate::tui::Mode::Roots(r) => r.input.clone(),
+            _ => String::new(),
+        };
+        assert_eq!(text, path, "every char of the path, including 'j' and 'k', must be typed");
     }
 }
