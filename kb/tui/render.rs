@@ -42,8 +42,9 @@ use ratatui::Frame;
 use ratatui::layout::{Constraint, Direction, Layout};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::widgets::{Block, Borders, List as RatList, ListItem, ListState, Paragraph};
+use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
-use crate::tui::{App, Mode, ReadState, StatusKind};
+use crate::tui::{App, Mode, PageRow, ReadState, StatusKind};
 
 /// Draw the whole screen for `app`. Called once per event-loop tick.
 pub fn draw(f: &mut Frame, app: &App) {
@@ -72,19 +73,14 @@ fn draw_browse(f: &mut Frame, app: &App, area: ratatui::layout::Rect) {
         .style(Style::default().fg(Color::Gray).add_modifier(Modifier::BOLD));
     f.render_widget(header_widget, chunks[0]);
 
+    // Each row is `<id>  <rel_path>` fitted to the pane's inner width (the
+    // ALL-side borders eat one cell per side) so the locator stays visible
+    // and the id ellipsizes to what fits — no clipping-without-marker.
+    let row_width = chunks[1].width.saturating_sub(2) as usize;
     let items: Vec<ListItem> = app
         .view
         .iter()
-        .map(|r| {
-            let mut line = String::from(r.id.as_str());
-            if !r.title.is_empty() {
-                line.push(' ');
-                line.push_str(&truncate(r.title.as_str(), 40));
-            }
-            line.push(' ');
-            line.push_str(&r.rel_path);
-            ListItem::new(line)
-        })
+        .map(|r| ListItem::new(browse_row(r, row_width)))
         .collect();
 
     let title = if app.filter_text.is_empty() {
@@ -529,4 +525,192 @@ fn truncate(s: &str, max: usize) -> String {
         out.push('…');
     }
     out
+}
+
+/// Truncate `s` to at most `max` **display cells** (width-aware, so CJK /
+/// fullwidth titles never push a row past the edge) + one trailing `…`
+/// when anything was dropped. Pure + total; `…` itself counts as one cell.
+fn ellipsize_cells(s: &str, max: usize) -> String {
+    if max == 0 {
+        return String::new();
+    }
+    if s.width() <= max {
+        return s.to_string();
+    }
+    // Walk chars, stopping when adding the next would exceed `max - 1`
+    // cells, leaving one cell for the ellipsis marker.
+    let budget = max - 1;
+    let mut out = String::new();
+    let mut used = 0usize;
+    for c in s.chars() {
+        let w = c.width().unwrap_or(c.len_utf8());
+        if used + w > budget {
+            break;
+        }
+        out.push(c);
+        used += w;
+    }
+    out.push('…');
+    out
+}
+
+/// The text of one Browse list row, fitted to `width` display cells.
+///
+/// The row is `<id>  <rel_path>` — there is **no separate title column**,
+/// because `id` is `type:<slug>` and the slug is derived *from* the title
+/// (title-wins identity), so the title is already inside the `id`. The old
+/// code printed the title a second time and — with a fixed 40-*char* cap —
+/// let `rel_path` (the *where the file is* field the user acts on) get
+/// clipped off the right edge with no marker. Here `rel_path` (kept whole,
+/// it's the locator) is guaranteed visible and `id` is ellipsized to what
+/// fits, so every row is exactly `width` cells. Pure + total.
+fn browse_row(row: &PageRow, width: usize) -> String {
+    if width == 0 {
+        return String::new();
+    }
+    // `rel_path` is the part we refuse to cut. Reserve its width, then fit
+    // the id into the remaining cells (minus one space separator).
+    let rel_w = row.rel_path.width();
+    let sep = 1usize;
+    if rel_w >= width {
+        // Even the relative path alone doesn't fit — show it (truncated)
+        // rather than losing the locator to the id.
+        return ellipsize_cells(&row.rel_path, width);
+    }
+    let id_budget = width - rel_w - sep;
+    let id = ellipsize_cells(&row.id, id_budget);
+    format!("{id} {}", row.rel_path)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn row(id: &str, rel: &str) -> PageRow {
+        PageRow {
+            abs_path: String::new(),
+            id: id.to_string(),
+            pt: String::new(),
+            title: String::new(),
+            rel_path: rel.to_string(),
+            root: String::new(),
+        }
+    }
+
+    /// `…` is drawn in one cell by a terminal; measure a string in *cells*
+    /// (width-aware) so CJK/fullwidth chars count as two, matching what the
+    /// user actually sees on screen.
+    fn cells(s: &str) -> usize {
+        s.width()
+    }
+
+    /// The whole point of the fix: a row must **never overflow** its pane
+    /// (that was what pushed `rel_path` off the right edge with no marker),
+    /// and the **locator must stay visible**. "Fills exactly" is *not* a
+    /// real guarantee — a CJK cut can leave a 1-cell gap that ratatui pads
+    /// with a trailing space — so we assert `<= width`, never `== width`.
+    #[test]
+    fn browse_row_never_overflows_and_keeps_rel_path() {
+        let long_id = "note:Realistic Document Title with a lot of words";
+        for w in [1usize, 5, 20, 38, 40, 50, 78, 100, 200] {
+            let out = browse_row(&row(long_id, "real60.md"), w);
+            let got = cells(&out);
+            assert!(got <= w, "row ({out:?}) is {got} cells, must be <= {w}");
+            assert!(
+                out.ends_with("real60.md") || cells(&out) < cells("real60.md"),
+                "locator (rel_path) never pushed off the edge: {out:?}"
+            );
+        }
+    }
+
+    /// When the id alone is longer than the whole pane, the row still
+    /// keeps the locator and marks the drop with `…` — never a bare clip.
+    #[test]
+    fn browse_row_ellipsizes_the_id_not_the_locator() {
+        let id = "note:".to_string() + &"a".repeat(120);
+        let out = browse_row(&row(&id, "dir/a/b/c.md"), 40);
+        assert!(cells(&out) <= 40);
+        assert!(out.ends_with("dir/a/b/c.md"), "locator wins over the id: {out:?}");
+        assert!(out.contains('…'), "the cut id must carry an ellipsis: {out:?}");
+    }
+
+    /// A CJK id must be measured in *cells* (each fullwidth char = 2, not
+    /// 1), never split mid-char, and never push the row past the pane.
+    /// Whether it's cut depends on the width: if the id fits, it's shown
+    /// whole (no marker); if it must shrink, a `…` marks the drop and the
+    /// loss is at most the one cell a 2-wide char can leave. We branch on
+    /// which case applies rather than assuming the row always nearly fills.
+    #[test]
+    fn browse_row_is_width_aware_for_cjk() {
+        // "note:" (5 cells) + 30 x 量 (60 cells) = 65 cells of id; "cjk.md"
+        // = 6 cells of locator.
+        let id = "note:".to_string() + &"量".repeat(30);
+        let id_cells = id.width(); // 65
+        let rel = "cjk.md";
+        let rel_cells = rel.width(); // 6
+        for w in [10usize, 20, 30, 40, 70, 80, 100] {
+            let out = browse_row(&row(&id, rel), w);
+            let got = out.width();
+            assert!(got <= w, "row ({out:?}) = {got} cells must be <= {w}");
+            assert!(out.ends_with(rel), "locator stays visible: {out:?}");
+            let budget = w.saturating_sub(rel_cells + 1);
+            if id_cells <= budget {
+                // The id fits: shown whole, no marker, exact width.
+                assert!(
+                    !out.contains('…'),
+                    "a fitting id must not carry a marker: {out:?}"
+                );
+                assert!(
+                    got == id_cells + 1 + rel_cells,
+                    "fitting id fills exactly: {got} vs {expected}",
+                    expected = id_cells + 1 + rel_cells
+                );
+            } else {
+                // The id is cut: marked, and the loss is <= one cell (a 2-wide
+                // char can straddle the budget boundary — no half-char).
+                assert!(out.contains('…'), "a cut id must carry a marker: {out:?}");
+                assert!(
+                    got >= w.saturating_sub(1),
+                    "no half-char truncation: {out:?}"
+                );
+            }
+        }
+    }
+
+    /// `ellipsize_cells` is total + bounded: short input passes through
+    /// unchanged; long input is capped to at most `max` cells with a `…`,
+    /// and (when truncating) always ends in the marker.
+    #[test]
+    fn ellipsize_cells_is_bounded_and_total() {
+        assert_eq!(ellipsize_cells("abc", 5), "abc", "short input unchanged");
+        assert_eq!(ellipsize_cells("abc", 3), "abc", "exact fit unchanged");
+        assert_eq!(ellipsize_cells("abc", 0), "", "zero width → empty");
+        assert_eq!(ellipsize_cells("", 7), "", "empty input → empty");
+
+        let out = ellipsize_cells(&"x".repeat(50), 10);
+        assert!(cells(&out) <= 10, "bounded by max: {out:?}");
+        assert!(out.ends_with('…'), "truncate carries a marker: {out:?}");
+
+        // 10 CJK chars = 20 cells; a 10-cell budget keeps some full chars +
+        // the marker, never a half char, and never exceeds the budget.
+        let cjk = "量".repeat(10);
+        let out2 = ellipsize_cells(&cjk, 10);
+        assert!(cells(&out2) <= 10, "CJK bounded by max: {out2:?}");
+        assert!(out2.ends_with('…'));
+        let body = out2.strip_suffix('…').unwrap();
+        assert!(body.chars().all(|c| c == '量'), "no half-width fragment: {body:?}");
+    }
+
+    /// The rel_path-only fallback: if even the locator alone overflows the
+    /// pane, the row still shows the locator (marked) — never empty for a
+    /// positive width.
+    #[test]
+    fn browse_row_falls_back_to_rel_path_when_it_overflows() {
+        let id = "note:short";
+        let rel = format!("/{}", "a-very-long-absolute-ish-relative-path".repeat(4));
+        let out = browse_row(&row(id, &rel), 20);
+        assert!(!out.is_empty(), "positive width never yields an empty row");
+        assert!(cells(&out) <= 20, "fallback still bounded: {out:?}");
+        assert!(out.contains('…'), "an overflowed locator is still marked: {out:?}");
+    }
 }

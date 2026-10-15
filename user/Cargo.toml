@@ -18,7 +18,7 @@ license.workspace = true
 [features]
 default = ["editor", "tui"]
 editor = []
-tui = ["dep:ratatui", "dep:crossterm"]
+tui = ["dep:ratatui", "dep:crossterm", "dep:unicode-width"]
 
 [[bin]]
 name = "kb-user"
@@ -41,3 +41,6 @@ rusqlite = { workspace = true }
 # build strips the whole TUI surface and these deps from the tree.
 ratatui   = { workspace = true, optional = true }
 crossterm = { workspace = true, optional = true }
+# Display-width measurement for the TUI's bounded browse rows — used only
+# when the `tui` feature is on (render.rs), so a hardened build never links it.
+unicode-width = { workspace = true, optional = true }
