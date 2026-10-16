@@ -15,9 +15,22 @@ resolver = "2"
 members = ["kb-core", "kb-db", "kb-user", "kb-hardened"]
 
 [workspace.package]
-version = "0.0.0"
+version = "0.1.0"
 edition = "2021"
 license = "MIT"
+
+[profile.release]
+# For a CLI we ship as a single binary (`cargo install` + the prebuilt
+# per-platform artifacts), the release build is the product. Fat LTO +
+# single codegen unit inlines across the whole crate graph (kb-core/kb-db/
+# shell) and strips the bulk of what a default `-O3` leaves behind;
+# `panic = "abort"` drops the unwind tables (we never unwind out of `main`;
+# the TUI restores the terminal on a panic before unwinding). Smaller and
+# faster, at the cost of a one-time full relink on every change — fine since
+# release builds are deliberate.
+lto = "fat"
+codegen-units = 1
+panic = "abort"
 
 [workspace.dependencies]
 # --- Verus core ---

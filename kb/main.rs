@@ -78,7 +78,8 @@ type Kb = Result<i32, (String, i32)>;
     } else {
         concat!(env!("CARGO_PKG_VERSION"), " [hardened]")
     },
-    about = "knowledgebase — single Rust CLI over embedded SQLite+FTS5"
+    about = "A single-binary Markdown knowledge base over embedded SQLite + FTS5 —\nindex a tree of notes, search them, and edit them by section.",
+    long_about = "kb is a single-binary Markdown knowledge base backed by an embedded\nSQLite + FTS5 index. Register roots of note files, search them (with\n`type:`/`tag:` filters, OR/NOT, phrases, and tag-alias expansion), and\ncorrectly-shaped edits that take a whole new section's bytes in place of\na diff, or apply external `diff -u` / `git diff` patches. All of the\nedit / resolve / alias / index logic is in a Verus-verified pure-Rust\ncrate; the DB shell is an assumed boundary. The full build ships a TUI\nplus an in-editor flow; the hardened build is headless for agents.",
 )]
 struct Cli {
     /// Path to the SQLite DB (default: `~/.local/share/knowledgebase/kb.db`).

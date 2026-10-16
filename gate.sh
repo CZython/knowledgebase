@@ -58,10 +58,10 @@ run "6/7 behavior — binary identity + hardened gating"
 USER_BIN="$HERE/target/debug/kb"
 HARD_BIN="$HERE/target/debug/kb-hardened"
 
-[ "$($USER_BIN --version)"  = "kb 0.0.0" ]        || { echo "kb --version mismatch"; exit 1; }
-pass "kb --version  == 'kb 0.0.0'"
-[ "$($HARD_BIN --version)"  = "kb-hardened 0.0.0 [hardened]" ] || { echo "kb-hardened --version mismatch"; exit 1; }
-pass "kb-hardened --version == 'kb-hardened 0.0.0 [hardened]'"
+[ "$($USER_BIN --version)"  = "kb 0.1.0" ]        || { echo "kb --version mismatch"; exit 1; }
+pass "kb --version  == 'kb 0.1.0'"
+[ "$($HARD_BIN --version)"  = "kb-hardened 0.1.0 [hardened]" ] || { echo "kb-hardened --version mismatch"; exit 1; }
+pass "kb-hardened --version == 'kb-hardened 0.1.0 [hardened]'"
 
 # the `kb` binary (package `kb-user`) must still show both gated verbs (req 7)
 $USER_BIN --help 2>&1 | grep -qE '^\s+tui'      || { echo "kb missing 'tui'"; exit 1; }

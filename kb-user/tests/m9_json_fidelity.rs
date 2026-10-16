@@ -14,7 +14,7 @@ use std::fs;
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
 
-fn kb() -> Command { Command::new(std::env::var("CARGO_BIN_EXE_kb-user").unwrap()) }
+fn kb() -> Command { Command::new(std::env::var("CARGO_BIN_EXE_kb").unwrap()) }
 
 struct S { root: PathBuf, db: PathBuf }
 impl S {

@@ -39,12 +39,26 @@ case "$("$Z3" --version 2>&1)" in
 esac
 
 # ---- verus ----
-VX="${HOME}/programming/Rust/Verus/verus-x86-linux"
-if [ -d "$VX" ]; then
-  export PATH="$VX:$HOME/.local/bin:$PATH"
+# Look for Verus in (in order of preference):
+#   1. already on PATH (e.g. a system / `cargo install` / `~/.local/bin` verus);
+#   2. $VERUS_DIR (user override) — either a dir holding a `verus` binary, or
+#      the `verus-x86-linux` install dir (whose `verus` sits one level down);
+#   3. two well-known development-machine locations under $HOME (last resort
+#      — kept so the original author's box works without any env setup).
+have_verus() { command -v verus >/dev/null 2>&1; }
+if ! have_verus && [ -n "${VERUS_DIR:-}" ]; then
+  [ -x "$VERUS_DIR/verus" ] && export PATH="$VERUS_DIR:$PATH"
+  [ -x "$VERUS_DIR" ]       && export PATH="${VERUS_DIR%/}:$PATH"
 fi
-command -v verus >/dev/null 2>&1 || {
-  echo "verify.sh: verus not found — is Verus installed under \$HOME/programming/Rust/Verus?" >&2
+KNOWN_VERUS_DIRS="$HOME/.local/lib/Verus/verus-x86-linux
+$HOME/programming/Rust/Verus/verus-x86-linux"
+if ! have_verus; then
+  for d in $KNOWN_VERUS_DIRS; do
+    [ -x "$d/verus" ] && export PATH="$d:$HOME/.local/bin:$PATH" && break
+  done
+fi
+have_verus || {
+  echo "verify.sh: verus not found. Install it, or set VERUS_DIR=<dir> containing a 'verus' binary." >&2
   exit 1
 }
 

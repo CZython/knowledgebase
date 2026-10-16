@@ -14,7 +14,7 @@ use std::path::PathBuf;
 use std::process::Command;
 
 fn kb() -> Command {
-    Command::new(std::env::var("CARGO_BIN_EXE_kb-user").expect("CARGO_BIN_EXE_kb-user unset"))
+    Command::new(std::env::var("CARGO_BIN_EXE_kb").expect("CARGO_BIN_EXE_kb unset"))
 }
 
 /// A throwaway root + DB. `Db` default is `~/.local/share/...`; we override

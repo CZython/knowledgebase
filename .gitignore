@@ -1,7 +1,16 @@
 # Rust / Cargo (workspace)
+# NOTE: for this *binary* workspace, Cargo.lock is checked IN (reproducibility
+# guarantee for `cargo install` and the release artifacts). Keep it tracked.
 target/
 **/*.rs.bk
-Cargo.lock
+
+# Build artifacts produced by dist/build-*.sh (keep the .sh scripts tracked).
+dist/*.AppImage
+dist/kb-*
+dist/*.tar.zst
+dist/*.tar.gz
+dist/*.zip
+dist/*.sha256
 
 # Verus
 verus-cache/

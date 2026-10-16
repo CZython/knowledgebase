@@ -1,6 +1,15 @@
 #!/usr/bin/env python3
 """mdtool: parse and edit large Markdown files by section.
 
+STATUS
+------
+This is the **origin prototype** of the section model: the scan / resolve /
+splice / edit logic that `kb-core/src/section.rs` (the Verus-verified Rust
+port) was transcribed from. It is NOT built, packaged, or shipped as part of
+`kb` — it lives here for provenance, and its edge-case decisions remain the
+reference the Rust tests are checked against. `kb` runs on pure Rust; this
+file is only read by humans and `kb-core`'s tests.
+
 Design
 ------
 * ATX headings (# .. ######) define the section tree; headings inside

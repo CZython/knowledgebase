@@ -489,7 +489,7 @@ The following reproduces 3.1 on a stock build (before the `edit` removal). The "
 # --- set up a victim markdown file with a section to 'edit'
 mkdir -p /tmp/kbsec && cd /tmp/kbsec
 printf '# Title\n\nintro\n\n## S1\n\nhello body\n' > victim.md
-KB=/home/jakub/programming/Rust/kb-verif/target/release/kb
+KB="$PWD/target/release/kb"   # path to the release build under test
 
 # --- the attacker's 'editor': any program they can point VISUAL at
 cat > attacker.sh <<'EOF'
