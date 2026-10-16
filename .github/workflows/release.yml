@@ -1,0 +1,118 @@
+# Release — on tag push, build every platform's artifact and publish it as
+# GitHub Release assets. Each job builds *natively* on its own OS (the bundled
+# SQLite C ABI must be compiled against that platform's libc), so:
+#   linux   → static musl single binary (distro-agnostic, no FUSE, no libs)
+#   windows → native -pc-windows-gnu .exe
+#   macos   → native aarch64/x86_64-apple-darwin Mach-O
+name: release
+
+on:
+  push:
+    tags: [ 'v*' ]
+  # Allow a manual run from the Actions tab:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    strategy:
+      # Each build is independent — don't fail the whole run if one platform
+      # has a toolchain hiccup (e.g. an Apple SDK bump). Per-platform we'll
+      # still verify + upload independently.
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            name: x86_64-linux-musl
+            script: ./dist/build-linux.sh
+          - os: windows-latest
+            name: x86_64-pc-windows
+            script: ./dist/build-windows.sh
+          - os: macos-latest        # Apple Silicon (aarch64)
+            name: aarch64-apple-darwin
+            script: ./dist/build-macos.sh
+          - os: macos-14           # Intel (x86_64)
+            name: x86_64-apple-darwin
+            script: ./dist/build-macos.sh
+    runs-on: ${{ matrix.os }}
+    env:
+      CARGO_TERM_COLOR: always
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          toolchain: stable
+
+      - name: Linux prereqs (musl target + C compiler)
+        if: matrix.os == 'ubuntu-latest'
+        run: |
+          rustup target add x86_64-unknown-linux-musl
+          sudo apt-get update && sudo apt-get install -y musl-tools
+
+      - name: Windows prereqs (mingw target)
+        if: matrix.os == 'windows-latest'
+        run: rustup target add x86_64-pc-windows-gnu
+
+      - name: macOS prereqs (apple target)
+        if: startsWith(matrix.os, 'macos')
+        run: |
+          rustup target add aarch64-apple-darwin x86_64-apple-darwin
+
+      - name: Build
+        shell: bash
+        run: ${{ matrix.script }}
+
+      - name: Normalize artifact naming
+        shell: bash
+        run: |
+          # The binary produced by cargo build for the `kb-user` package is
+          # named `kb` (see `kb-user/Cargo.toml` [[bin]]). Stage it into dist/
+          # with the canonical name `kb-<triple>` so the upload + README
+          # examples match.
+          set -eu
+          case "${{ matrix.name }}" in
+            x86_64-linux-musl)
+              # dist/build-linux.sh already staged it as dist/kb-<triple> +
+              # .tar.zst + .sha256, but the fallback here is direct copy:
+              [ -e "dist/kb-${{ matrix.name }}" ] \
+                || cp "target/x86_64-unknown-linux-musl/release/kb" "dist/kb-${{ matrix.name }}"
+              ;;
+            x86_64-pc-windows)
+              cp "target/x86_64-pc-windows-gnu/release/kb.exe" "dist/kb-${{ matrix.name}}.exe"
+              ;;
+            aarch64-apple-darwin)
+              cp "target/aarch64-apple-darwin/release/kb" "dist/kb-${{ matrix.name }}"
+              ;;
+            x86_64-apple-darwin)
+              cp "target/x86_64-apple-darwin/release/kb" "dist/kb-${{ matrix.name }}"
+              ;;
+          esac
+          ls -la dist/
+
+      - name: Smoke test (version + a tiny search)
+        shell: bash
+        run: |
+          set -eu
+          case "${{ matrix.name }}" in
+            *.exe) BIN="dist/kb-${{ matrix.name}}.exe" ;;
+            *)     BIN="dist/kb-${{ matrix.name}}" ;;
+          esac
+          "$BIN" --version
+          # Prove it's functional, not just linked: index a note + search.
+          D="$(mktemp -d)"
+          printf -- '---\ntype: note\ntitle: CI Check\n---\nhello from ci\n' > "$D/a.md"
+          "$BIN" add "$D" --db "$D/kb.db"
+          "$BIN" search ci --db "$D/kb.db"
+
+      - name: Upload to release
+        uses: softprops/action-gh-release@v2
+        with:
+          generate_notes: true
+          # One glob covers every artifact for this platform. The linux job's
+          # build-linux.sh also emits a .tar.zst + .sha256 next to the binary;
+          # the other OS jobs upload just the binary.
+          files: dist/kb-${{ matrix.name }}*

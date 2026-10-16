@@ -1,0 +1,70 @@
+# CI — runs on every push/PR. Gate 7/7 minus the Verus stage (which needs a
+# machine-local Verus + z3 4.16.0), plus a static-musl Linux build so the
+# release artifact is exercised on every PR, not just at release time.
+name: ci
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+
+env:
+  CARGO_TERM_COLOR: always
+  RUSTUP_TOOLCHAIN: stable
+
+jobs:
+  build-and-test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          toolchain: stable
+          components: rustfmt, clippy
+
+      # `gate.sh`'s stages 1-4 (build, one-pkg, clippy -D warnings, tests).
+      # Stage 5 (Verus) is NOT run here: it needs a machine-local Verus +
+      # z3 4.16.0 install, which CI runners don't carry by default. The
+      # Verus stage is the "proven core" guarantee — see gate.sh for how to
+      # run it on a dev box.
+      - name: Stage 1 — build both binaries
+        run: cargo build
+
+      - name: Stage 2 — single-package builds
+        run: |
+          cargo build -p kb-user
+          cargo build -p kb-hardened
+
+      - name: Stage 3 — clippy -D warnings (all targets)
+        run: cargo clippy --workspace --all-targets -- -D warnings
+
+      - name: Stage 4 — test
+        run: cargo test --workspace
+
+      - name: Stage 7 — dep tree check (hardened is TUI-free)
+        run: |
+          set -e
+          ! cargo tree -p kb-hardened | grep -qiE 'ratatui|crossterm' \
+            || { echo "kb-hardened still links ratatui/crossterm" >&2; exit 1; }
+          cargo tree -p kb-user | grep -qiE 'ratatui' \
+            || { echo "kb-user is missing ratatui (should have it)" >&2; exit 1; }
+          echo "dep-tree OK"
+
+  # Linux release artifact must be buildable on every PR so a musl/SQLite
+  # C-ABI drift is caught early rather than at release time.
+  linux-musl:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install toolchains
+        uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          toolchain: stable
+      - name: musl target
+        run: rustup target add x86_64-unknown-linux-musl
+      - name: musl C compiler
+        run: sudo apt-get update && sudo apt-get install -y musl-tools
+      - name: build (static musl)
+        run: ./dist/build-linux.sh
