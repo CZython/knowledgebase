@@ -83,8 +83,8 @@ C sources.
 # 1. Create the DB in the default location (or pass --db PATH).
 kb --help
 
-# 2. Scaffold a first note.
-kb create "first note" --type note --title "First Note"
+# 2. Scaffold a first note (the <NAME> is used for both filename and H1).
+kb create "first-note" --type note
 
 # 3. Or register a whole tree of notes.
 kb add /path/to/notes/
@@ -98,13 +98,15 @@ kb search "\"exact phrase\""               # phrase
 
 # 5. Inspect one page.
 kb toc notes.md                            # outline only (agent-friendly)
-kb show notes.md 3.2 --body                # the body of section 3.2
+kb show notes.md 3.2 --body                # body of section 3.2 (up to first subsection)
+kb show notes.md 3.2 --full                # body + all subsections
+kb show notes.md 3.2 --etag                # FNV-1a 64 etag (16 hex chars)
 kb info /path/to/note.md                   # the DB record
 
 # 6. Edit by section — the write surface.
-kb section notes.md set 3.2 --text "new body"
-kb section notes.md append 3.2 --text "more"
-kb section notes.md replace 3.2 --find x --new y
+kb section --file notes.md set      3.2 --text "new body"
+kb section --file notes.md append   3.2 --text "more"
+kb section --file notes.md replace  3.2 --text "replacement"
 kb replace notes.md --find x --new y       # substring across the file
 kb patch notes.md --patch-file diff.patch  # external diff -u applied
 
@@ -112,8 +114,8 @@ kb patch notes.md --patch-file diff.patch  # external diff -u applied
 # --if-unchanged <etag> (FNV-1a 64 over the target section's bytes).
 
 # 7. Agent / automation surface.
-kb --json search query                    # one clean JSON document
-kb cron --json                            # paste-ready cron line
+kb search "rust async" --json           # one clean JSON document
+kb cron --json                          # paste-ready cron line
 kb add /root --json
 kb tag-alias --add "rust async" --canonical "async"
 
@@ -135,10 +137,10 @@ contract. The one-paragraph version:
 * **Read** is scoped + minimal: `toc <file>` (outline only);
   `show <file> <ref> [--body|--full] [--json] [--etag]`.
 * **Write** takes the *complete new text* (never a patch as input):
-  `section <file> {set|append|insert|replace} <ref> --text/--from-file/--stdin`.
-  `patch` is the explicit exception: it *takes* a patch (as file / stdin /
-  string) and *applies* it — the same write-path contract as the
-  verb-adjacent ones.
+  `section --file <file> {set|append|insert|replace} <ref> --text / --from-file / --stdin`.
+  `patch --patch-file | --patch-stdin | --patch-text` is the explicit
+  exception: it *takes* a patch (as file / stdin / string) and *applies* it —
+  the same write-path contract as the section-level ones.
 * **Diff is output for review, never input**, except via the explicit
   `patch` verb.
 * **Concurrency**: `--if-unchanged <etag>` = FNV-1a 64-bit hex over the
