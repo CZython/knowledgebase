@@ -2,8 +2,8 @@
 #
 # Requirement (HARDENED_BUILD.md):
 #   1. `cargo build`            -> build both kb-user and kb-hardened
-#   2. build kb-user only       -> cargo build -p user   (alias: cargo user)
-#   3. build kb-hardened only   -> cargo build -p hardened (alias: cargo hardened)
+#   2. build kb-user only       -> cargo build -p kb-user   (alias: cargo user)
+#   3. build kb-hardened only   -> cargo build -p kb-hardened (alias: cargo hardened)
 #
 # Note: cargo's built-in `build` command does not accept a *positional*
 # package name (it only knows `-p`/`--package`). So the one-package build is
@@ -15,5 +15,9 @@
 # HARDENED_BUILD.md "why" note. All other forms below are verified.
 
 [alias]
-user     = "build -p user"
-hardened = "build -p hardened"
+# Short forms (the packages are named `kb-user` / `kb-hardened`):
+user     = "build -p kb-user"
+hardened = "build -p kb-hardened"
+# Full-name forms, so `cargo kb-user` / `cargo kb-hardened` also work:
+kb-user     = "build -p kb-user"
+kb-hardened = "build -p kb-hardened"

@@ -11,7 +11,7 @@ use std::path::PathBuf;
 
 fn kb() -> Command {
     Command::new(
-        std::env::var("CARGO_BIN_EXE_kb-user").expect("CARGO_BIN_EXE_kb-user unset — run under cargo test"),
+        std::env::var("CARGO_BIN_EXE_kb").expect("CARGO_BIN_EXE_kb unset — run under cargo test"),
     )
 }
 

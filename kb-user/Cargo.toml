@@ -3,14 +3,19 @@
 # A thin wrapper around the shared CLI body at `../kb/main.rs`:
 #   - enables both `editor` and `tui` features;
 #   - depends on ratatui + crossterm (the TUI-only crates);
-#   - exposes binary `kb-user`.
+#   - exposes binary `kb`.
+#
+# The *package* is `kb-user` (matches its directory and is the unit of
+# `cargo build -p / cargo install`), but the *binary* is `kb` — the short,
+# mnemonic name a person actually types. This is the same separation as
+# `fd-find` (package) vs `fd` (binary), or `ripgrep` vs `rg`.
 #
 # The shared body is NOT a package of its own (no Cargo.toml in `kb/`);
 # it is included via `include!` from this one-line `src/main.rs`. Because
 # features are package-global, both variants (user / hardened) need to live
 # in separate packages that share the same body file. See HARDENED_BUILD.md.
 [package]
-name = "user"
+name = "kb-user"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -21,7 +26,7 @@ editor = []
 tui = ["dep:ratatui", "dep:crossterm", "dep:unicode-width"]
 
 [[bin]]
-name = "kb-user"
+name = "kb"
 path = "src/main.rs"
 
 [dependencies]

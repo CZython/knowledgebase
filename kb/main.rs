@@ -60,19 +60,19 @@ const EXIT_ETAG: i32 = 3;
 /// right exit code, so fallible steps compose cleanly.
 type Kb = Result<i32, (String, i32)>;
 
-/// The shared CLI body is compiled into two packages (`user`, `hardened`),
-/// each producing a separate binary (`kb-user`, `kb-hardened`). The `editor`
-/// feature is the single proxy for "which package is this?": it is ON for
-/// `user` (default) and OFF for `hardened` (default), so we pick name +
-/// version + about via `cfg!(feature = "editor")` at compile time — both
-/// packages compile the same file, get the right identity, and share all
-/// the other verbs verbatim.
+/// The shared CLI body is compiled into two packages (`kb-user`,
+/// `kb-hardened`), each producing a separate binary (`kb`, `kb-hardened`).
+/// The `editor` feature is the single proxy for "which package is this?": it
+/// is ON for `kb-user` (default) and OFF for `kb-hardened` (default), so we
+/// pick name + version + about via `cfg!(feature = "editor")` at compile
+/// time — both packages compile the same file, get the right identity, and
+/// share all the other verbs verbatim.
 ///
-/// `user`      — `kb-user 0.0.0`            — `editor` + `tui` ON by default
-/// `hardened`  — `kb-hardened 0.0.0 [hardened]` — neither ON by default
+/// `kb`          — the full build: `editor` + `tui` ON by default
+/// `kb-hardened` — the agent build: neither ON by default, ` [hardened]` suffix
 #[derive(Parser)]
 #[command(
-    name = if cfg!(feature = "editor") { "kb-user" } else { "kb-hardened" },
+    name = if cfg!(feature = "editor") { "kb" } else { "kb-hardened" },
     version = if cfg!(feature = "editor") {
         env!("CARGO_PKG_VERSION")
     } else {

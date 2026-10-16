@@ -15,7 +15,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 fn kb() -> Command {
-    Command::new(std::env::var("CARGO_BIN_EXE_kb-user").expect("CARGO_BIN_EXE_kb-user unset — run under cargo test"))
+    Command::new(std::env::var("CARGO_BIN_EXE_kb").expect("CARGO_BIN_EXE_kb unset — run under cargo test"))
 }
 
 struct Setup {

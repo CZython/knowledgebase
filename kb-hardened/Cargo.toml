@@ -15,7 +15,7 @@
 # available for script-driven agents (pipe-able, deterministic).
 # See HARDENED_BUILD.md for the full design + why two packages.
 [package]
-name = "hardened"
+name = "kb-hardened"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -26,7 +26,7 @@ default = []
 # (e.g. `cargo build -p hardened --features tui`) — the shared body then
 # compiles in the same way as `user` does.
 editor = []
-tui = ["dep:ratatui", "dep:crossterm"]
+tui = ["dep:ratatui", "dep:crossterm", "dep:unicode-width"]
 
 [[bin]]
 name = "kb-hardened"
@@ -42,3 +42,6 @@ rusqlite = { workspace = true }
 # With the default (headless) build they stay out of the dependency tree.
 ratatui   = { workspace = true, optional = true }
 crossterm = { workspace = true, optional = true }
+# Render.rs (shared with the `user` build) measures rows in display cells;
+# needs this only when `tui` is on — the default hardened build never links it.
+unicode-width = { workspace = true, optional = true }

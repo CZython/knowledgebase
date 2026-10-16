@@ -33,10 +33,10 @@ pass "cargo build"
 
 # ---- (2) one-package builds (HARDENED_BUILD.md req 2 & 3) -----------------
 run "2/7 single-package builds (-p selection)"
-cargo build -p user
-pass "cargo build -p user   -> kb-user"
-cargo build -p hardened
-pass "cargo build -p hardened -> kb-hardened"
+cargo build -p kb-user
+pass "cargo build -p kb-user   -> kb"
+cargo build -p kb-hardened
+pass "cargo build -p kb-hardened -> kb-hardened"
 
 # ---- (3) clippy: all targets, all members, -D warnings --------------------
 run "3/7 clippy --workspace --all-targets -- -D warnings"
@@ -55,19 +55,19 @@ pass "verify.sh (spec verified, 0 errors)"
 
 # ---- (6) behavior: identity + hardened gating (locked reqs 4-7) -----------
 run "6/7 behavior — binary identity + hardened gating"
-USER_BIN="$HERE/target/debug/kb-user"
+USER_BIN="$HERE/target/debug/kb"
 HARD_BIN="$HERE/target/debug/kb-hardened"
 
-[ "$($USER_BIN --version)"  = "kb-user 0.0.0" ]        || { echo "kb-user --version mismatch"; exit 1; }
-pass "kb-user --version  == 'kb-user 0.0.0'"
+[ "$($USER_BIN --version)"  = "kb 0.0.0" ]        || { echo "kb --version mismatch"; exit 1; }
+pass "kb --version  == 'kb 0.0.0'"
 [ "$($HARD_BIN --version)"  = "kb-hardened 0.0.0 [hardened]" ] || { echo "kb-hardened --version mismatch"; exit 1; }
 pass "kb-hardened --version == 'kb-hardened 0.0.0 [hardened]'"
 
-# kb-user must still show both gated verbs (req 7)
-$USER_BIN --help 2>&1 | grep -qE '^\s+tui'      || { echo "kb-user missing 'tui'"; exit 1; }
-pass "kb-user --help shows 'tui'"
-$USER_BIN --help 2>&1 | grep -qE '^\s+section'  || { echo "kb-user missing 'section' (edit path)"; exit 1; }
-pass "kb-user --help shows 'section'"
+# the `kb` binary (package `kb-user`) must still show both gated verbs (req 7)
+$USER_BIN --help 2>&1 | grep -qE '^\s+tui'      || { echo "kb missing 'tui'"; exit 1; }
+pass "kb --help shows 'tui'"
+$USER_BIN --help 2>&1 | grep -qE '^\s+section'  || { echo "kb missing 'section' (edit path)"; exit 1; }
+pass "kb --help shows 'section'"
 
 # kb-hardened must reject the gated verbs with clap's 'unrecognized subcommand' (req 4)
 msg_tui=$($HARD_BIN tui 2>&1 | head -1); rc_tui=0; $HARD_BIN tui >/dev/null 2>&1 || rc_tui=$?
@@ -82,12 +82,12 @@ pass "kb-hardened edit  -> 'error: unrecognized subcommand', rc 2"
 
 # ---- (7) dep tree: hardened strips ratatui/crossterm (req 8) ---------------
 run "7/7 dep tree — hardened smaller (no ratatui/crossterm)"
-if cargo tree -p hardened 2>&1 | grep -qiE 'ratatui|crossterm'; then
-  echo "hardened still links ratatui/crossterm" >&2; exit 1
+if cargo tree -p kb-hardened 2>&1 | grep -qiE 'ratatui|crossterm'; then
+  echo "hardened still links ratatui/crossterm" >&2; exit 1;
 fi
 pass "hardened: ratatui + crossterm absent"
-if ! cargo tree -p user 2>&1 | grep -qiE 'ratatui|crossterm'; then
-  echo "user is missing ratatui/crossterm (should have them)" >&2; exit 1
+if ! cargo tree -p kb-user 2>&1 | grep -qiE 'ratatui|crossterm'; then
+  echo "user is missing ratatui/crossterm (should have them)" >&2; exit 1;
 fi
 pass "user: ratatui + crossterm present"
 

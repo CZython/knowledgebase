@@ -17,11 +17,9 @@ use std::path::PathBuf;
 use std::process::Command;
 
 fn kb() -> Command {
-    // `kb-user` is a *hyphenated* bin name; cargo exposes it to tests as
-    // `CARGO_BIN_EXE_kb-user` at **runtime** (and only for valid identifiers
-    // at compile time — hyphens are not valid Rust identifiers, so the
-    // `env!` macro can't be used).
-    Command::new(std::env::var("CARGO_BIN_EXE_kb-user").expect("CARGO_BIN_EXE_kb-user unset"))
+    // `kb` is the bin name (the *package* is `kb-user`); cargo exposes it to
+    // tests as `CARGO_BIN_EXE_kb` at runtime.
+    Command::new(std::env::var("CARGO_BIN_EXE_kb").expect("CARGO_BIN_EXE_kb unset"))
 }
 
 struct Setup {
