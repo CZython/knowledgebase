@@ -9,7 +9,7 @@
 /// byte-for-byte by the `PageJson::render` unit test in `kb/main.rs`, so
 /// it need not be re-derived through the parser here.)
 ///
-/// Run: `cargo test -p user --test m9_json_fidelity`
+/// Run: `cargo test -p kb-user --test m9_json_fidelity`
 use std::fs;
 use std::path::PathBuf;
 use std::process::{Command, Stdio};

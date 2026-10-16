@@ -8,7 +8,7 @@
 //! when the page is outside every root, or when the final bytes are not
 //! indexable — never an error).
 //!
-//! Run: `cargo test -p user --test create_cli`
+//! Run: `cargo test -p kb-user --test create_cli`
 
 use std::fs;
 use std::path::{Path, PathBuf};

@@ -7,7 +7,7 @@
 //! `tag` / `tag-alias` / `links` / `resolve` / `info` / `stats` / `cron`, plus
 //! the bare-string dispatch ergonomics shortcut (PLAN §11).
 //!
-//! Run: `cargo test -p user --test m7_multifile`
+//! Run: `cargo test -p kb-user --test m7_multifile`
 
 use std::fs;
 use std::path::PathBuf;

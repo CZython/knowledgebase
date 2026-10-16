@@ -10,7 +10,7 @@
 //! Drives the real `kb` binary as a subprocess against a throwaway root +
 //! DB, mirroring `m7_multifile.rs` so the surface is asserted end-to-end.
 //!
-//! Run: `cargo test -p user --test m9_agent_surface`
+//! Run: `cargo test -p kb-user --test m9_agent_surface`
 
 use std::fs;
 use std::path::PathBuf;

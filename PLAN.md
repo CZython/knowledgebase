@@ -369,16 +369,16 @@ knowledgebase/    (Cargo workspace)
 │   │   ├── input.rs
 │   │   └── render.rs
 │   └── testdata/                 # golden fixtures for the diff parser
-├── user/                         # package `user` → bin `kb-user` (full: TUI + editor)
+├── kb-user/                      # package `kb-user` → bin `kb` (full: TUI + editor)
 │   ├── Cargo.toml                # default features = ["editor", "tui"]
 │   ├── src/main.rs               # one line: `include!("../../kb/main.rs");`
-│   └── tests/                    # the CLI integration suites (drive kb-user)
+│   └── tests/                    # the CLI integration suites (drive kb)
 │       ├── create_cli.rs
 │       ├── m7_multifile.rs
 │       ├── m9_agent_surface.rs
 │       ├── m9_json_fidelity.rs
 │       └── section_cli.rs
-├── hardened/                     # package `hardened` → bin `kb-hardened` (headless)
+├── kb-hardened/                  # package `kb-hardened` → bin `kb-hardened` (headless)
 │   ├── Cargo.toml                # default features = [] (no TUI, no editor)
 │   └── src/main.rs               # one line: `include!("../../kb/main.rs");`
 ├── .cargo/config.toml            # aliases: `cargo user`, `cargo hardened`

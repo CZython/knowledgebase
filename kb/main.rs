@@ -39,8 +39,8 @@ use kb_core::tags as kbtags;
 // The TUI is an assumed, interactive-only shell (M8). Agents drive the plain
 // CLI verbs instead, so the whole module is behind the `tui` feature (default
 // on) — a hardened build compiles without it and its deps:
-// `cargo build -p hardened` (that package turns the `tui` feature off; the
-// `user` package — the full build — keeps it on, mirroring the `editor` gate).
+// `cargo build -p kb-hardened` (that package turns the `tui` feature off; the
+// `kb-user` package — the full build — keeps it on, mirroring the `editor` gate).
 #[cfg(feature = "tui")]
 mod tui;
 use rusqlite::{params, OptionalExtension};
@@ -3021,7 +3021,7 @@ fn parse_placement(s: &str) -> Result<SectionPlacement, (String, i32)> {
 // $VISUAL/$EDITOR forking attack surface (an env var names an executable
 // we then fork). They are compiled in only when the `editor` feature is on;
 // a hardened build strips them at compile time:
-//   cargo build -p hardened   → binary with no editor calls
+//   cargo build -p kb-hardened   → binary with no editor calls
 
 #[cfg(feature = "editor")]
 fn run_editor(initial: &[u8]) -> Result<Vec<u8>, (String, i32)> {

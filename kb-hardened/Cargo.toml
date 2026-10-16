@@ -7,9 +7,9 @@
 #     `unrecognized subcommand: 'tui'` (stderr, exit 2);
 #   - the `-e` / `--edit` / `section edit` surface is compiled out
 #     (`#[cfg(feature = "editor")]` in the shared body);
-#   - ratatui + crossterm do not appear in the dependency tree at all
-#     (`cargo tree -p hardened`);
-#   - `--version` prints `0.0.0 [hardened]` (see `kb/main.rs`).
+#   - ratatui + crossterm + unicode-width do not appear in the dependency
+#     tree at all (`cargo tree -p kb-hardened`);
+#   - `--version` prints `0.1.0 [hardened]` (see `kb/main.rs`).
 #
 # Everything else (search/browse/tag/create/section/...) is unchanged and
 # available for script-driven agents (pipe-able, deterministic).
@@ -23,8 +23,8 @@ license.workspace = true
 [features]
 default = []
 # Both surfaces exist but are OFF by default. Toggling them on is allowed
-# (e.g. `cargo build -p hardened --features tui`) — the shared body then
-# compiles in the same way as `user` does.
+# (e.g. `cargo build -p kb-hardened --features tui`) — the shared body then
+# compiles in the same way as `kb-user` does.
 editor = []
 tui = ["dep:ratatui", "dep:crossterm", "dep:unicode-width"]
 
@@ -42,6 +42,6 @@ rusqlite = { workspace = true }
 # With the default (headless) build they stay out of the dependency tree.
 ratatui   = { workspace = true, optional = true }
 crossterm = { workspace = true, optional = true }
-# Render.rs (shared with the `user` build) measures rows in display cells;
+# Render.rs (shared with the `kb-user` build) measures rows in display cells;
 # needs this only when `tui` is on — the default hardened build never links it.
 unicode-width = { workspace = true, optional = true }
