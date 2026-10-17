@@ -150,7 +150,9 @@ impl Walk {
 
     /// The kind of a node if known.
     pub fn kind_of(&self, path: &str) -> Option<NodeKind> {
-        self.kinds.iter().find_map(|(p, k)| if p == path { Some(*k) } else { None })
+        self.kinds
+            .iter()
+            .find_map(|(p, k)| if p == path { Some(*k) } else { None })
     }
 
     /// The *extension* of a file *name* (lower-cased, no dot), or `None` if
@@ -175,7 +177,9 @@ impl Walk {
 
     /// The children (names) of a dir.
     fn children_of(&self, dir_path: &str) -> Option<&Vec<String>> {
-        self.children.iter().find_map(|(p, names)| if p == dir_path { Some(names) } else { None })
+        self.children
+            .iter()
+            .find_map(|(p, names)| if p == dir_path { Some(names) } else { None })
     }
 
     fn walk_dir(&self, dir_path: &str, opts: &Options, out: &mut BTreeSet<String>) {
@@ -271,14 +275,18 @@ mod tests {
     #[test]
     fn default_walk_skips_symlink_dot_dir_no_ext_outside_ext() {
         let w = twalk();
-        let out = w.enumerate(&Options { include_hidden: false });
+        let out = w.enumerate(&Options {
+            include_hidden: false,
+        });
         assert_eq!(out, expected_default());
     }
 
     #[test]
     fn include_hidden_walks_dot_dir_but_ext_rule_still_applies() {
         let w = twalk();
-        let out = w.enumerate(&Options { include_hidden: true });
+        let out = w.enumerate(&Options {
+            include_hidden: true,
+        });
         // /.git/config has no ext → still skipped even after the dot-dir is
         // walked (the extension rule is independent of the dot-dir rule).
         assert!(!out.contains("/t/.git/config"));
@@ -287,7 +295,9 @@ mod tests {
         let mut w2 = twalk();
         w2.add_node("/t/.git/hidden.md".into(), NodeKind::File);
         w2.add_children("/t/.git".into(), vec!["config".into(), "hidden.md".into()]);
-        let out2 = w2.enumerate(&Options { include_hidden: true });
+        let out2 = w2.enumerate(&Options {
+            include_hidden: true,
+        });
         assert!(out2.contains("/t/.git/hidden.md"));
     }
 
@@ -295,10 +305,14 @@ mod tests {
     fn symlink_never_followed_even_with_include_hidden() {
         let w = twalk();
         assert!(!w
-            .enumerate(&Options { include_hidden: false })
+            .enumerate(&Options {
+                include_hidden: false
+            })
             .contains("/t/symlink.md"));
         assert!(!w
-            .enumerate(&Options { include_hidden: true })
+            .enumerate(&Options {
+                include_hidden: true
+            })
             .contains("/t/symlink.md"));
     }
 
@@ -309,7 +323,9 @@ mod tests {
         w.add_node("/t/book.epub".into(), NodeKind::File);
         w.add_node("/t/book.pdf".into(), NodeKind::File);
         w.add_children("/t".into(), vec!["book.epub".into(), "book.pdf".into()]);
-        let out = w.enumerate(&Options { include_hidden: false });
+        let out = w.enumerate(&Options {
+            include_hidden: false,
+        });
         assert!(out.contains("/t/book.epub"));
         assert!(!out.contains("/t/book.pdf"), "pdf not in the allow-list");
     }
@@ -318,7 +334,11 @@ mod tests {
     fn empty_dir_walks_to_empty_set() {
         let mut w = Walk::new("/empty".to_string(), vec![]);
         w.add_node("/empty".into(), NodeKind::Dir);
-        assert!(w.enumerate(&Options { include_hidden: false }).is_empty());
+        assert!(w
+            .enumerate(&Options {
+                include_hidden: false
+            })
+            .is_empty());
     }
 
     #[test]
@@ -334,7 +354,9 @@ mod tests {
     #[test]
     fn enumeration_is_deterministic_and_read_only() {
         let w = twalk();
-        let opts = Options { include_hidden: true };
+        let opts = Options {
+            include_hidden: true,
+        };
         let a = w.enumerate(&opts);
         let b = w.enumerate(&opts);
         assert_eq!(a, b, "same snapshot + same opts ⇒ same enumeration");

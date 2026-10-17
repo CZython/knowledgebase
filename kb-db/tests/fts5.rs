@@ -88,7 +88,8 @@ fn bm25_orders_matches_best_first() {
     // note. 'attention' does NOT appear in the tokio note. So the
     // transformer note must be the only (and hence the top) hit — and its
     // bm25 must be a real (finite) number.
-    let mut st = db.conn
+    let mut st = db
+        .conn
         .prepare(
             "SELECT p.id, bm25(pages_fts)
              FROM pages_fts JOIN pages p ON p.rowid = pages_fts.rowid
@@ -97,16 +98,24 @@ fn bm25_orders_matches_best_first() {
         )
         .unwrap();
     let hits: Vec<(String, f64)> = st
-        .query_map([ "attention".to_string() ], |r| {
+        .query_map(["attention".to_string()], |r| {
             Ok((r.get::<_, String>(0)?, r.get::<_, f64>(1)?))
         })
         .unwrap()
         .collect::<SqlResult<Vec<_>>>()
         .unwrap();
 
-    assert_eq!(hits.len(), 1, "exactly the transformer note matches 'attention'");
+    assert_eq!(
+        hits.len(),
+        1,
+        "exactly the transformer note matches 'attention'"
+    );
     assert_eq!(hits[0].0, "label:Transformers (architecture)");
-    assert!(hits[0].1.is_finite(), "bm25 produced a finite score: {}", hits[0].1);
+    assert!(
+        hits[0].1.is_finite(),
+        "bm25 produced a finite score: {}",
+        hits[0].1
+    );
 
     // A two-row query where ranking must actually *order*: 'rust' is in the
     // tokio note's body (1x) and description. 'attention' is in transformer
@@ -127,7 +136,11 @@ fn bm25_orders_matches_best_first() {
         .unwrap()
         .collect::<SqlResult<Vec<_>>>()
         .unwrap();
-    assert_eq!(kinds, vec!["note".to_string()], "only the tokio note matches 'rust'");
+    assert_eq!(
+        kinds,
+        vec!["note".to_string()],
+        "only the tokio note matches 'rust'"
+    );
 }
 
 /// Probe 2: `snippet(pages_fts, col, open, close, ellipsis, maxtok)` — the
@@ -235,7 +248,10 @@ fn wal_allows_write_during_read_transaction() {
     let held: i64 = reader
         .query_row("SELECT count(*) FROM pages", [], |r| r.get(0))
         .unwrap();
-    assert_eq!(held, 2, "held read transaction keeps its snapshot (still 2)");
+    assert_eq!(
+        held, 2,
+        "held read transaction keeps its snapshot (still 2)"
+    );
     reader.execute_batch("ROLLBACK").unwrap();
 
     // A fresh reader now sees the new row.
@@ -243,7 +259,10 @@ fn wal_allows_write_during_read_transaction() {
     let after: i64 = fresh
         .query_row("SELECT count(*) FROM pages", [], |r| r.get(0))
         .unwrap();
-    assert_eq!(after, 3, "fresh read after the writer commits sees the new row");
+    assert_eq!(
+        after, 3,
+        "fresh read after the writer commits sees the new row"
+    );
 }
 
 /// Confirm the `Db` wrapper reports WAL as the active journal mode (so the
@@ -277,8 +296,13 @@ fn shared_db_across_separate_connections() {
     .unwrap();
 
     let b = rusqlite::Connection::open(&path).unwrap();
-    let cb: i64 = b.query_row("SELECT count(*) FROM pages", [], |r| r.get::<_, i64>(0)).unwrap();
-    assert_eq!(cb, 1, "second connection to the same file sees the inserted row");
+    let cb: i64 = b
+        .query_row("SELECT count(*) FROM pages", [], |r| r.get::<_, i64>(0))
+        .unwrap();
+    assert_eq!(
+        cb, 1,
+        "second connection to the same file sees the inserted row"
+    );
 }
 
 // =============================================================================
@@ -366,7 +390,13 @@ fn canonical_fts_render_means_what_the_grammar_intends() {
     //     the *rendered FTS portion* is only the bare term — so a filter-only
     //     part never leaks an FTS clause (empty MATCH ⇒ the M7 layer omits it).
     let q = parse("tag:llm attention").render_fts();
-    assert_eq!(q, "attention", "the `tag:llm` filter must not appear in the FTS string");
+    assert_eq!(
+        q, "attention",
+        "the `tag:llm` filter must not appear in the FTS string"
+    );
     let filter_only = parse("tag:llm").render_fts();
-    assert_eq!(filter_only, "", "a filter-only query renders no FTS content (empty MATCH)");
+    assert_eq!(
+        filter_only, "",
+        "a filter-only query renders no FTS content (empty MATCH)"
+    );
 }

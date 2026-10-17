@@ -80,17 +80,16 @@
 //!   (case-1 beats case-2), well-formed-ref / relative-ref partition
 //!   (M2).
 
-pub mod meta;
-pub mod frontmatter;
-pub mod identity;
-pub mod tags;
-pub mod links;
-pub mod graph;
-pub mod labels;
-pub mod search_grammar;
-pub mod semantics;
-pub mod fs_snapshot;
-pub mod section;
-pub mod resolve;
 pub mod aliases;
-
+pub mod frontmatter;
+pub mod fs_snapshot;
+pub mod graph;
+pub mod identity;
+pub mod labels;
+pub mod links;
+pub mod meta;
+pub mod resolve;
+pub mod search_grammar;
+pub mod section;
+pub mod semantics;
+pub mod tags;

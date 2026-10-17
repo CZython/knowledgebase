@@ -332,8 +332,7 @@ fn apply_key(fm: &mut Frontmatter, key: &str, kind: KeyKind, items: Vec<String>)
 fn unquote(s: &str) -> String {
     let b = s.as_bytes();
     if b.len() >= 2
-        && ((b[0] == b'"' && b[b.len() - 1] == b'"')
-            || (b[0] == b'\'' && b[b.len() - 1] == b'\''))
+        && ((b[0] == b'"' && b[b.len() - 1] == b'"') || (b[0] == b'\'' && b[b.len() - 1] == b'\''))
     {
         s[1..s.len() - 1].to_string()
     } else {
@@ -355,8 +354,9 @@ fn strip_trailing_comment(s: &str) -> String {
         match *c {
             b'"' if !in_single => in_double = !in_double,
             b'\'' if !in_double => in_single = !in_single,
-            b'#'
-                if !in_double && !in_single && (i == 0 || bytes[i - 1] == b' ' || bytes[i - 1] == b'\t') =>
+            b'#' if !in_double
+                && !in_single
+                && (i == 0 || bytes[i - 1] == b' ' || bytes[i - 1] == b'\t') =>
             {
                 break;
             }
@@ -517,7 +517,10 @@ pub fn find_fm(data: &[u8]) -> Option<Fm> {
         .find(|(i, l)| *i > open && l.trim().trim_start_matches('\u{feff}') == "---")
         .map(|(i, _)| i)
         .filter(|i| *i > open)?;
-    Some(Fm { open_line: open, close_line: close })
+    Some(Fm {
+        open_line: open,
+        close_line: close,
+    })
 }
 
 /// The list values of a top-level list field, in source order. `None` if no
@@ -608,8 +611,7 @@ fn clean_scalar(t: &str) -> String {
     let t = t.trim();
     let b = t.as_bytes();
     if b.len() >= 2
-        && ((b[0] == b'"' && b[b.len() - 1] == b'"')
-            || (b[0] == b'\'' && b[b.len() - 1] == b'\''))
+        && ((b[0] == b'"' && b[b.len() - 1] == b'"') || (b[0] == b'\'' && b[b.len() - 1] == b'\''))
     {
         t[1..t.len() - 1].trim().to_string()
     } else {
@@ -826,7 +828,13 @@ fn list_rewrite_upgrade(data: &[u8], key: &str, scalar: &str, added: &str) -> Ve
     let line = lines[idx].clone();
     // Preserve leading indentation (unlikely but keep it faithful).
     let leading = &line[..line.len() - line.trim_start().len()];
-    let nl = if line.ends_with("\r\n") { "\r\n" } else if line.ends_with('\n') { "\n" } else { "" };
+    let nl = if line.ends_with("\r\n") {
+        "\r\n"
+    } else if line.ends_with('\n') {
+        "\n"
+    } else {
+        ""
+    };
     lines[idx] = format!("{leading}{}: {scalar}, {added}{nl}", key);
     join_lines(&lines).into_bytes()
 }
@@ -836,8 +844,7 @@ fn list_rewrite_add(data: &[u8], key: &str, added: &str) -> Vec<u8> {
     // SECURITY_REPORT 3.7 — same `from_utf8_lossy` fix.
     let s = String::from_utf8_lossy(data);
     let mut lines: Vec<String> = s.split_inclusive('\n').map(|l| l.to_string()).collect();
-    let idx = locate_key_line(data, key)
-        .unwrap_or(0); // guarded by caller
+    let idx = locate_key_line(data, key).unwrap_or(0); // guarded by caller
     let line = lines[idx].clone();
     let trimmed = line.trim_start_matches('\u{feff}').trim().to_string();
     if trimmed.contains(':') {
@@ -845,12 +852,15 @@ fn list_rewrite_add(data: &[u8], key: &str, added: &str) -> Vec<u8> {
         if after_colon.trim().starts_with('[') {
             // Inline list: append the value before the `]`.
             let leading = &line[..line.len() - line.trim_start().len()];
-            let nl = if line.ends_with("\r\n") { "\r\n" } else if line.ends_with('\n') { "\n" } else { "" };
+            let nl = if line.ends_with("\r\n") {
+                "\r\n"
+            } else if line.ends_with('\n') {
+                "\n"
+            } else {
+                ""
+            };
             let (key_part, rest) = trimmed.split_once(':').unwrap_or((trimmed.as_str(), ""));
-            let inner = rest
-                .trim()
-                .trim_start_matches('[')
-                .trim_end_matches(']');
+            let inner = rest.trim().trim_start_matches('[').trim_end_matches(']');
             let mut parts: Vec<String> = inner
                 .split(',')
                 .map(|p| p.trim().to_string())
@@ -865,7 +875,13 @@ fn list_rewrite_add(data: &[u8], key: &str, added: &str) -> Vec<u8> {
     // Block list: append a `- added` line right after the last block item.
     let close = find_fm(data).map(|f| f.close_line).unwrap_or(lines.len());
     let (last, _) = last_block_item_line(lines.as_slice(), idx, close).unwrap_or((idx, false));
-    let nl = if lines[last].ends_with("\r\n") { "\r\n" } else if lines[last].ends_with('\n') { "\n" } else { "" };
+    let nl = if lines[last].ends_with("\r\n") {
+        "\r\n"
+    } else if lines[last].ends_with('\n') {
+        "\n"
+    } else {
+        ""
+    };
     let mut new_lines: Vec<String> = lines.clone();
     let line_at_last = new_lines[last].clone();
     let leading = &line_at_last[..line_at_last.len() - line_at_last.trim_start().len()];
@@ -898,7 +914,13 @@ fn list_rewrite_vals(data: &[u8], key: &str, vals: &[String]) -> Vec<u8> {
             }
             let line = lines[idx].clone();
             let leading = &line[..line.len() - line.trim_start().len()];
-            let nl = if line.ends_with("\r\n") { "\r\n" } else if line.ends_with('\n') { "\n" } else { "" };
+            let nl = if line.ends_with("\r\n") {
+                "\r\n"
+            } else if line.ends_with('\n') {
+                "\n"
+            } else {
+                ""
+            };
             lines.splice(idx..j, [format!("{leading}{key}: [{joined}]{nl}")]);
             join_lines(&lines).into_bytes()
         }
@@ -910,7 +932,14 @@ fn list_rewrite_vals(data: &[u8], key: &str, vals: &[String]) -> Vec<u8> {
 /// the field at `idx`, or `(idx, true)` if the field is an inline-list line.
 fn last_block_item_line(lines: &[String], idx: usize, close: usize) -> Option<(usize, bool)> {
     let first = lines.get(idx)?.trim_start();
-    if first.starts_with('[') || (first.contains(':') && first.split_once(':').map(|x| x.1).map(|v| v.trim().starts_with('[')).unwrap_or(false)) {
+    if first.starts_with('[')
+        || (first.contains(':')
+            && first
+                .split_once(':')
+                .map(|x| x.1)
+                .map(|v| v.trim().starts_with('['))
+                .unwrap_or(false))
+    {
         return Some((idx, true));
     }
     let mut j = idx + 1;
@@ -954,7 +983,13 @@ fn scalar_rewrite(data: &[u8], key: &str, value: &str) -> Result<Vec<u8>, FmErro
     let line = lines[idx].clone();
     let leading = &line[..line.len() - line.trim_start().len()];
     let trim = line.trim_start_matches('\u{feff}');
-    let nl = if line.ends_with("\r\n") { "\r\n" } else if line.ends_with('\n') { "\n" } else { "" };
+    let nl = if line.ends_with("\r\n") {
+        "\r\n"
+    } else if line.ends_with('\n') {
+        "\n"
+    } else {
+        ""
+    };
     // Preserve the `key:` prefix exactly as written.
     let key_part = &trim[..trim.find(':').map(|p| p + 1).unwrap_or(trim.len())];
     lines[idx] = format!("{leading}{key_part} {value}{nl}");
@@ -1113,8 +1148,12 @@ mod tests {
 mod fm_tests {
     use super::*;
 
-    fn s(t: &str) -> Vec<u8> { t.as_bytes().to_vec() }
-    fn r(v: Vec<u8>) -> String { String::from_utf8(v).unwrap() }
+    fn s(t: &str) -> Vec<u8> {
+        t.as_bytes().to_vec()
+    }
+    fn r(v: Vec<u8>) -> String {
+        String::from_utf8(v).unwrap()
+    }
 
     // ---- find_fm ---------------------------------------------------------
     #[test]
@@ -1142,15 +1181,19 @@ mod fm_tests {
     #[test]
     fn list_values_inline() {
         let d = s("---\ntype: wiki\ntags: [a, b, c]\n---\nbody");
-        assert_eq!(list_values(d.as_slice(), "tags"),
-            Some(vec!["a".into(), "b".into(), "c".into()]));
+        assert_eq!(
+            list_values(d.as_slice(), "tags"),
+            Some(vec!["a".into(), "b".into(), "c".into()])
+        );
     }
 
     #[test]
     fn list_values_block() {
         let d = s("---\ntype: wiki\ntags:\n  - rust\n  - http\n---\nbody");
-        assert_eq!(list_values(d.as_slice(), "tags"),
-            Some(vec!["rust".into(), "http".into()]));
+        assert_eq!(
+            list_values(d.as_slice(), "tags"),
+            Some(vec!["rust".into(), "http".into()])
+        );
     }
 
     #[test]
@@ -1188,20 +1231,27 @@ mod fm_tests {
     #[test]
     fn set_scalar_replaces() {
         let d = s("---\ntype: wiki\ntitle: Old\n---\nbody");
-        assert_eq!(r(set_scalar(d.as_slice(), "title", "New").unwrap()),
-            "---\ntype: wiki\ntitle: New\n---\nbody");
+        assert_eq!(
+            r(set_scalar(d.as_slice(), "title", "New").unwrap()),
+            "---\ntype: wiki\ntitle: New\n---\nbody"
+        );
     }
 
     #[test]
     fn set_scalar_inserts_missing() {
         let d = s("---\ntype: wiki\n---\nbody");
-        assert_eq!(r(set_scalar(d.as_slice(), "description", "desc").unwrap()),
-            "---\ntype: wiki\ndescription: desc\n---\nbody");
+        assert_eq!(
+            r(set_scalar(d.as_slice(), "description", "desc").unwrap()),
+            "---\ntype: wiki\ndescription: desc\n---\nbody"
+        );
     }
 
     #[test]
     fn set_scalar_no_frontmatter_err() {
-        assert_eq!(set_scalar(s("# heading").as_slice(), "t", "v"), Err(FmError::NoFrontmatter));
+        assert_eq!(
+            set_scalar(s("# heading").as_slice(), "t", "v"),
+            Err(FmError::NoFrontmatter)
+        );
     }
 
     #[test]
@@ -1216,7 +1266,10 @@ mod fm_tests {
         data.push(0x92);
         data.extend_from_slice(b" here\n");
         let out = set_scalar(data.as_slice(), "title", "New");
-        assert!(out.is_ok(), "non-UTF-8 body must not erase the frontmatter frame: {out:?}");
+        assert!(
+            out.is_ok(),
+            "non-UTF-8 body must not erase the frontmatter frame: {out:?}"
+        );
         let out = out.unwrap();
         let title = scalar_value(out.as_slice(), "title").expect("title rewritten");
         assert_eq!(title, "New");
@@ -1230,8 +1283,14 @@ mod fm_tests {
         // CRLF neighbours. The rewritten `title` line must keep its `\r\n`.
         let data = b"---\r\ntype: wiki\r\ntitle: Old\r\n---\r\nbody\r\n";
         let out = set_scalar(data, "title", "New").expect("set_scalar on CRLF file");
-        let title_line = out.windows(b"title: New".len()).position(|w| w == b"title: New");
-        assert!(title_line.is_some(), "rewritten title line present: {:?}", String::from_utf8_lossy(&out));
+        let title_line = out
+            .windows(b"title: New".len())
+            .position(|w| w == b"title: New");
+        assert!(
+            title_line.is_some(),
+            "rewritten title line present: {:?}",
+            String::from_utf8_lossy(&out)
+        );
         let start = title_line.unwrap();
         let after = &out[start + b"title: New".len()..];
         assert!(
@@ -1247,8 +1306,10 @@ mod fm_tests {
     #[test]
     fn append_inline() {
         let d = s("---\ntype: wiki\ntags: [a, b]\n---\nbody");
-        assert_eq!(r(append_list_item(d.as_slice(), "tags", "c").unwrap()),
-            "---\ntype: wiki\ntags: [a, b, c]\n---\nbody");
+        assert_eq!(
+            r(append_list_item(d.as_slice(), "tags", "c").unwrap()),
+            "---\ntype: wiki\ntags: [a, b, c]\n---\nbody"
+        );
     }
 
     #[test]
@@ -1270,14 +1331,18 @@ mod fm_tests {
     #[test]
     fn append_creates_absent() {
         let d = s("---\ntype: wiki\n---\nbody");
-        assert_eq!(r(append_list_item(d.as_slice(), "tags", "a").unwrap()),
-            "---\ntype: wiki\ntags: a\n---\nbody");
+        assert_eq!(
+            r(append_list_item(d.as_slice(), "tags", "a").unwrap()),
+            "---\ntype: wiki\ntags: a\n---\nbody"
+        );
     }
 
     #[test]
     fn append_no_frontmatter_err() {
-        assert_eq!(append_list_item(s("# h\ntags: [a]").as_slice(), "tags", "b"),
-            Err(FmError::NoFrontmatter));
+        assert_eq!(
+            append_list_item(s("# h\ntags: [a]").as_slice(), "tags", "b"),
+            Err(FmError::NoFrontmatter)
+        );
     }
 
     // ---- remove_field ----------------------------------------------------
@@ -1306,7 +1371,10 @@ mod fm_tests {
 
     #[test]
     fn remove_field_no_frontmatter_err() {
-        assert_eq!(remove_field(s("no fm").as_slice(), "t"), Err(FmError::NoFrontmatter));
+        assert_eq!(
+            remove_field(s("no fm").as_slice(), "t"),
+            Err(FmError::NoFrontmatter)
+        );
     }
 
     // ---- remove_list_item ------------------------------------------------
@@ -1349,25 +1417,35 @@ mod fm_tests {
     #[test]
     fn remove_list_item_absent_err() {
         let d = s("---\ntype: wiki\ntags: [a, b]\n---\nbody");
-        assert_eq!(remove_list_item(d.as_slice(), "tags", "zzz"), Err(FmError::ValueAbsent));
+        assert_eq!(
+            remove_list_item(d.as_slice(), "tags", "zzz"),
+            Err(FmError::ValueAbsent)
+        );
     }
 
     #[test]
     fn remove_list_item_on_scalar_err() {
         let d = s("---\ntype: wiki\ntitle: X\n---\nbody");
-        assert_eq!(remove_list_item(d.as_slice(), "title", "x"), Err(FmError::IsScalar));
+        assert_eq!(
+            remove_list_item(d.as_slice(), "title", "x"),
+            Err(FmError::IsScalar)
+        );
     }
 
     // ---- non-UTF-8 does not panic ----------------------------------------
     #[test]
     fn non_utf8_find_fm_no_panic() {
-        let d: Vec<u8> = vec![b'-', b'-', b'-', b'\n', 0xFF, b'\n', b'-', b'-', b'-', b'\n'];
+        let d: Vec<u8> = vec![
+            b'-', b'-', b'-', b'\n', 0xFF, b'\n', b'-', b'-', b'-', b'\n',
+        ];
         let _ = find_fm(d.as_slice());
     }
 
     #[test]
     fn non_utf8_set_no_panic() {
-        let d: Vec<u8> = vec![b'-', b'-', b'-', b'\n', 0xFF, b'\n', b'-', b'-', b'-', b'\n'];
+        let d: Vec<u8> = vec![
+            b'-', b'-', b'-', b'\n', 0xFF, b'\n', b'-', b'-', b'-', b'\n',
+        ];
         let _ = set_scalar(d.as_slice(), "title", "x");
         let _ = append_list_item(d.as_slice(), "tags", "a");
         let _ = remove_field(d.as_slice(), "title");

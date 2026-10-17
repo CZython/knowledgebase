@@ -26,14 +26,13 @@ fn examples() -> PathBuf {
 
 fn read(name: &str) -> String {
     let path = examples().join(name);
-    std::fs::read_to_string(&path).unwrap_or_else(|err| {
-        panic!("cannot read {}: {err}", path.display())
-    })
+    std::fs::read_to_string(&path)
+        .unwrap_or_else(|err| panic!("cannot read {}: {err}", path.display()))
 }
 
 use kb_core::frontmatter::parse;
+use kb_core::identity::{display_id, filename_minus_extension, find_h1, resolve_slug};
 use kb_core::meta::NoteType;
-use kb_core::identity::{resolve_slug, display_id, find_h1, filename_minus_extension};
 
 #[test]
 fn wiki_example_indexes_and_pops_fields() {
@@ -51,7 +50,10 @@ fn wiki_example_indexes_and_pops_fields() {
     // full pipeline: slug from title → display id.
     let slug = resolve_slug(p.title.as_deref(), find_h1(&p.body), Some("transformer"));
     assert_eq!(slug, Some("Transformer (architecture)"));
-    assert_eq!(display_id(NoteType::Wiki, slug.unwrap()), "wiki:Transformer (architecture)");
+    assert_eq!(
+        display_id(NoteType::Wiki, slug.unwrap()),
+        "wiki:Transformer (architecture)"
+    );
 }
 
 #[test]
@@ -96,9 +98,21 @@ fn all_examples_resolvable_to_a_display_id_when_indexable() {
     // the real identity pipeline (title → H1 → filename). The no-type page
     // has no kind, so it is excluded.
     for (name, kind, expected) in [
-        ("wiki.example.md", NoteType::Wiki, "wiki:Transformer (architecture)"),
-        ("note.example.md", NoteType::Note, "note:API Gateway — notes"),
-        ("label.example.md", NoteType::Label, "label:Transformer (papers)"),
+        (
+            "wiki.example.md",
+            NoteType::Wiki,
+            "wiki:Transformer (architecture)",
+        ),
+        (
+            "note.example.md",
+            NoteType::Note,
+            "note:API Gateway — notes",
+        ),
+        (
+            "label.example.md",
+            NoteType::Label,
+            "label:Transformer (papers)",
+        ),
     ] {
         let p = parse(&read(name));
         let slug = match resolve_slug(p.title.as_deref(), find_h1(&p.body), Some("file")) {

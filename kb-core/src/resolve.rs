@@ -193,7 +193,10 @@ pub fn resolve(query: &str, pages: &[Page]) -> Resolution {
     // to keep `path_matches`' documented case-sensitive semantic. `q` from
     // the stage-0 setup is the lowercased form and would be the wrong key.
     let stage3_suffix = format!("/{}", query.trim());
-    let pathy: Vec<&Page> = pages.iter().filter(|p| path_matches(query, p, &stage3_suffix)).collect();
+    let pathy: Vec<&Page> = pages
+        .iter()
+        .filter(|p| path_matches(query, p, &stage3_suffix))
+        .collect();
     if !pathy.is_empty() {
         return finish(pathy);
     }
@@ -245,10 +248,25 @@ mod tests {
 
     fn corpus() -> Vec<Page> {
         vec![
-            page("/root/wiki/attention.md", "Attention", "wiki", "wiki/attention.md"),
-            page("/root/wiki/Attention2.md", "Attention", "note", "wiki/attention2.md"),
+            page(
+                "/root/wiki/attention.md",
+                "Attention",
+                "wiki",
+                "wiki/attention.md",
+            ),
+            page(
+                "/root/wiki/Attention2.md",
+                "Attention",
+                "note",
+                "wiki/attention2.md",
+            ),
             page("/root/note/llm.md", "LLM", "note", "note/llm.md"),
-            page("/root/wiki/transformer.md", "Transformer (architecture)", "wiki", "wiki/transformer.md"),
+            page(
+                "/root/wiki/transformer.md",
+                "Transformer (architecture)",
+                "wiki",
+                "wiki/transformer.md",
+            ),
         ]
     }
 
@@ -279,8 +297,11 @@ mod tests {
         let b = resolve("Attention", &corpus());
         assert!(!b.is_unique(), "bare Attention is a collision");
         let t = resolve("wiki:Attention", &corpus());
-        assert_eq!(t, Resolution::Unique("/root/wiki/attention.md".into()),
-            "wiki:Attention selects the wiki page");
+        assert_eq!(
+            t,
+            Resolution::Unique("/root/wiki/attention.md".into()),
+            "wiki:Attention selects the wiki page"
+        );
     }
 
     #[test]
@@ -293,8 +314,11 @@ mod tests {
         // stage-2 bare-slug exact match — which the old code skipped.
         let pages = vec![page("/root/x.md", "foo:bar", "note", "x.md")];
         let r = resolve("foo:bar", &pages);
-        assert_eq!(r, Resolution::Unique("/root/x.md".into()),
-            "stage-1 type miss must fall through to stage-2 bare-slug match");
+        assert_eq!(
+            r,
+            Resolution::Unique("/root/x.md".into()),
+            "stage-1 type miss must fall through to stage-2 bare-slug match"
+        );
     }
 
     #[test]
@@ -306,7 +330,11 @@ mod tests {
         // stage 1 empty → stage 2 bare-slug "label:attention" (no match) →
         // stage 3 path (no match) → stage 4 substring (no slug contains
         // "label:attention") → Empty.
-        assert_eq!(r.count(), 0, "unknown type yields no stage-1 hit and no later stage matches");
+        assert_eq!(
+            r.count(),
+            0,
+            "unknown type yields no stage-1 hit and no later stage matches"
+        );
     }
 
     // ---- stage 2: exact slug, type-agnostic --------------------------------
@@ -315,10 +343,14 @@ mod tests {
     fn exact_slug_multiple_pages_is_a_collision() {
         let r = resolve("attention", &corpus());
         // sorted by abs_path (byte order): 'A'(65) < 'a'(97), so Attention2 first.
-        assert_eq!(r, Resolution::Candidates(vec![
-            "/root/wiki/Attention2.md".into(),
-            "/root/wiki/attention.md".into(),
-        ]), "two `Attention` pages → sorted candidate list, not an error");
+        assert_eq!(
+            r,
+            Resolution::Candidates(vec![
+                "/root/wiki/Attention2.md".into(),
+                "/root/wiki/attention.md".into(),
+            ]),
+            "two `Attention` pages → sorted candidate list, not an error"
+        );
     }
 
     // ---- stage 3: path ref -------------------------------------------------
@@ -343,15 +375,21 @@ mod tests {
         let r = resolve("transformer", &corpus());
         assert_eq!(r, Resolution::Unique("/root/wiki/transformer.md".into()));
         let r = resolve("archi", &corpus());
-        assert_eq!(r, Resolution::Unique("/root/wiki/transformer.md".into()),
-            "substring of the long slug still selects that one page");
+        assert_eq!(
+            r,
+            Resolution::Unique("/root/wiki/transformer.md".into()),
+            "substring of the long slug still selects that one page"
+        );
     }
 
     // ---- case-insensitivity on the slug axis --------------------------------
 
     #[test]
     fn slug_match_is_case_insensitive() {
-        assert_eq!(resolve("ATTENTION", &corpus()).count(), resolve("attention", &corpus()).count());
+        assert_eq!(
+            resolve("ATTENTION", &corpus()).count(),
+            resolve("attention", &corpus()).count()
+        );
         assert_eq!(resolve("lLm", &corpus()), resolve("LLM", &corpus()));
     }
 
@@ -390,8 +428,14 @@ mod tests {
 
     #[test]
     fn split_type_slug_shape() {
-        assert_eq!(split_type_slug("wiki:Attention"), Some(("wiki", "Attention")));
-        assert_eq!(split_type_slug("transformer (a):b"), Some(("transformer (a)", "b")));
+        assert_eq!(
+            split_type_slug("wiki:Attention"),
+            Some(("wiki", "Attention"))
+        );
+        assert_eq!(
+            split_type_slug("transformer (a):b"),
+            Some(("transformer (a)", "b"))
+        );
         assert_eq!(split_type_slug("Attention"), None);
         assert_eq!(split_type_slug(":no-type"), None);
         assert_eq!(split_type_slug("type:"), None);

@@ -32,11 +32,36 @@ struct Expected {
 }
 
 const TABLE: &[Expected] = &[
-    Expected { root: "notes", file: "wiki/transformer.md", page_type: "wiki", title: "Transformer (architecture)" },
-    Expected { root: "work", file: "projects/api-gateway/README.md", page_type: "note", title: "API Gateway — notes" },
-    Expected { root: "library", file: "llm.md", page_type: "label", title: "LLM" },
-    Expected { root: "library", file: "czech.md", page_type: "label", title: "Czech" },
-    Expected { root: "library", file: "transformer.md", page_type: "label", title: "Transformer (papers)" },
+    Expected {
+        root: "notes",
+        file: "wiki/transformer.md",
+        page_type: "wiki",
+        title: "Transformer (architecture)",
+    },
+    Expected {
+        root: "work",
+        file: "projects/api-gateway/README.md",
+        page_type: "note",
+        title: "API Gateway — notes",
+    },
+    Expected {
+        root: "library",
+        file: "llm.md",
+        page_type: "label",
+        title: "LLM",
+    },
+    Expected {
+        root: "library",
+        file: "czech.md",
+        page_type: "label",
+        title: "Czech",
+    },
+    Expected {
+        root: "library",
+        file: "transformer.md",
+        page_type: "label",
+        title: "Transformer (papers)",
+    },
 ];
 
 /// Minimal frontmatter reader: the region between the first `---` line and the
@@ -44,7 +69,11 @@ const TABLE: &[Expected] = &[
 /// parser (M1) — just enough to pull out `type:` and `title:` flat scalars.
 fn frontmatter_block(text: &str) -> String {
     let lines: Vec<&str> = text.split('\n').collect();
-    assert_eq!(lines.first().copied().unwrap_or("").trim(), "---", "page must open with ---");
+    assert_eq!(
+        lines.first().copied().unwrap_or("").trim(),
+        "---",
+        "page must open with ---"
+    );
     let start = 1;
     let end = lines[1..]
         .iter()

@@ -70,7 +70,9 @@ impl Filter {
     /// `true` iff this is a `tag:…` filter (the M7 layer routes it to
     /// `page_tags` + `tag_aliases`, not the `pages` column filter).
     #[inline]
-    pub fn is_tag(&self) -> bool { self.key == "tag" }
+    pub fn is_tag(&self) -> bool {
+        self.key == "tag"
+    }
 }
 
 /// A single piece of FTS **content**. Either a single bare/quoted term or a
@@ -145,9 +147,14 @@ impl ParsedQuery {
             // directly before/after a paren-group). Then NOT (infix), then bare
             // (bare *may* trail a NOT clause). Confirmed parseable on SQLite 3.46.0:
             //   "(llm OR mllm) NOT gpt attention"  →  OK [E]
-            clauses.push(
-                format!("({})", self.or_group.iter().map(render_term).collect::<Vec<_>>().join(" OR "))
-            );
+            clauses.push(format!(
+                "({})",
+                self.or_group
+                    .iter()
+                    .map(render_term)
+                    .collect::<Vec<_>>()
+                    .join(" OR ")
+            ));
             for nt in &self.not_terms {
                 clauses.push(format!("NOT {}", render_term(nt)));
             }
@@ -297,27 +304,39 @@ pub fn parse(query: &str) -> ParsedQuery {
     while i < toks.len() {
         match &toks[i] {
             Tok::Phrase(inner) => {
-                q.and_terms.push(Term::Token { text: inner.clone(), phrase: true });
+                q.and_terms.push(Term::Token {
+                    text: inner.clone(),
+                    phrase: true,
+                });
                 i += 1;
             }
             Tok::Word(w) => {
                 if let Some(t) = w.strip_prefix('~') {
                     if !t.is_empty() {
-                        q.or_group.push(Term::Token { text: t.to_string(), phrase: false });
+                        q.or_group.push(Term::Token {
+                            text: t.to_string(),
+                            phrase: false,
+                        });
                     }
                     i += 1;
                     continue;
                 }
                 if let Some(t) = w.strip_prefix('-') {
                     if !t.is_empty() {
-                        q.not_terms.push(Term::Token { text: t.to_string(), phrase: false });
+                        q.not_terms.push(Term::Token {
+                            text: t.to_string(),
+                            phrase: false,
+                        });
                     }
                     i += 1;
                     continue;
                 }
                 if let Some((k, v)) = split_key_value(w) {
                     if is_filter_key(k) && !v.is_empty() {
-                        q.filters.push(Filter { key: k.to_string(), value: v.to_string() });
+                        q.filters.push(Filter {
+                            key: k.to_string(),
+                            value: v.to_string(),
+                        });
                         i += 1;
                         continue;
                     }
@@ -327,7 +346,10 @@ pub fn parse(query: &str) -> ParsedQuery {
                     // phrase is the filter value, not separate FTS content.
                     if v.is_empty() && is_filter_key(k) {
                         if let Some(Tok::Phrase(inner)) = toks.get(i + 1) {
-                            q.filters.push(Filter { key: k.to_string(), value: inner.clone() });
+                            q.filters.push(Filter {
+                                key: k.to_string(),
+                                value: inner.clone(),
+                            });
                             i += 2;
                             continue;
                         }
@@ -335,7 +357,10 @@ pub fn parse(query: &str) -> ParsedQuery {
                     // non-whitelisted key (or empty value w/o a phrase): *content*, not a filter
                 }
                 if !w.is_empty() {
-                    q.and_terms.push(Term::Token { text: w.clone(), phrase: false });
+                    q.and_terms.push(Term::Token {
+                        text: w.clone(),
+                        phrase: false,
+                    });
                 }
                 i += 1;
             }
@@ -369,9 +394,21 @@ mod tests {
     #[test]
     fn whitelisted_key_is_a_filter() {
         let q = parse("type:wiki apple");
-        assert_eq!(q.filters, vec![Filter { key: "type".into(), value: "wiki".into() }]);
+        assert_eq!(
+            q.filters,
+            vec![Filter {
+                key: "type".into(),
+                value: "wiki".into()
+            }]
+        );
         assert_eq!(q.and_terms.len(), 1);
-        assert_eq!(q.and_terms[0], Term::Token { text: "apple".into(), phrase: false });
+        assert_eq!(
+            q.and_terms[0],
+            Term::Token {
+                text: "apple".into(),
+                phrase: false
+            }
+        );
     }
 
     #[test]
@@ -387,8 +424,17 @@ mod tests {
         // unbreakable, so the whole phrase is the filter *value* (multi-word),
         // not a separate FTS content phrase.
         let q = parse("tag:\"large language models\"");
-        assert_eq!(q.filters, vec![Filter { key: "tag".into(), value: "large language models".into() }]);
-        assert!(q.and_terms.is_empty(), "the phrase must be the filter value, not content");
+        assert_eq!(
+            q.filters,
+            vec![Filter {
+                key: "tag".into(),
+                value: "large language models".into()
+            }]
+        );
+        assert!(
+            q.and_terms.is_empty(),
+            "the phrase must be the filter value, not content"
+        );
         assert!(q.not_terms.is_empty());
         assert!(q.or_group.is_empty());
         assert_eq!(q.render_fts(), "");
@@ -398,9 +444,21 @@ mod tests {
     fn quoted_phrase_after_filter_key_mixed_with_content() {
         // Filter + content still separate: the `attention` term stays FTS.
         let q = parse("tag:\"llm\" attention");
-        assert_eq!(q.filters, vec![Filter { key: "tag".into(), value: "llm".into() }]);
+        assert_eq!(
+            q.filters,
+            vec![Filter {
+                key: "tag".into(),
+                value: "llm".into()
+            }]
+        );
         assert_eq!(q.and_terms.len(), 1);
-        assert_eq!(q.and_terms[0], Term::Token { text: "attention".into(), phrase: false });
+        assert_eq!(
+            q.and_terms[0],
+            Term::Token {
+                text: "attention".into(),
+                phrase: false
+            }
+        );
     }
 
     #[test]
@@ -409,7 +467,13 @@ mod tests {
         let q = parse("foo:bar");
         assert!(q.filters.is_empty(), "foo: must not be a filter");
         assert_eq!(q.and_terms.len(), 1);
-        assert_eq!(q.and_terms[0], Term::Token { text: "foo:bar".into(), phrase: false });
+        assert_eq!(
+            q.and_terms[0],
+            Term::Token {
+                text: "foo:bar".into(),
+                phrase: false
+            }
+        );
     }
 
     #[test]
@@ -487,14 +551,23 @@ mod tests {
     fn phrase_is_quoted() {
         let q = parse("\"exact phrase\"");
         assert_eq!(q.and_terms.len(), 1);
-        assert_eq!(q.and_terms[0], Term::Token { text: "exact phrase".into(), phrase: true });
+        assert_eq!(
+            q.and_terms[0],
+            Term::Token {
+                text: "exact phrase".into(),
+                phrase: true
+            }
+        );
         assert_eq!(q.render_fts(), "\"exact phrase\"");
     }
 
     #[test]
     fn inner_quote_is_doubled() {
         // a token containing a double-quote is ambiguous → quoted, inner doubled.
-        let t = Term::Token { text: String::from("a\"b"), phrase: false };
+        let t = Term::Token {
+            text: String::from("a\"b"),
+            phrase: false,
+        };
         assert_eq!(render_term(&t), "\"a\"\"b\"");
     }
 
@@ -502,7 +575,10 @@ mod tests {
     fn bare_word_stays_unquoted() {
         assert!(!needs_quoting("apple"));
         assert_eq!(
-            render_term(&Term::Token { text: "apple".into(), phrase: false }),
+            render_term(&Term::Token {
+                text: "apple".into(),
+                phrase: false
+            }),
             "apple"
         );
     }
@@ -513,7 +589,13 @@ mod tests {
         // is a single unescaped `"` in the phrase body).
         let q = parse(r#""a "" b""#);
         assert_eq!(q.and_terms.len(), 1);
-        assert_eq!(q.and_terms[0], Term::Token { text: String::from("a \" b"), phrase: true });
+        assert_eq!(
+            q.and_terms[0],
+            Term::Token {
+                text: String::from("a \" b"),
+                phrase: true
+            }
+        );
         // renders by re-escaping: the inner `"` is doubled again in the output
         assert_eq!(q.render_fts(), "\"a \"\" b\"");
     }

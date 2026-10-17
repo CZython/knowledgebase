@@ -143,9 +143,9 @@ pub fn has_alias(alias: &str, canonical: &str, aliases: &[(String, String)]) -> 
     if a.is_empty() || c.is_empty() {
         return false;
     }
-    aliases.iter().any(|(al, ca)| {
-        al.trim().to_lowercase() == a && ca.trim().to_lowercase() == c
-    })
+    aliases
+        .iter()
+        .any(|(al, ca)| al.trim().to_lowercase() == a && ca.trim().to_lowercase() == c)
 }
 
 // =============================================================================
@@ -156,8 +156,12 @@ pub fn has_alias(alias: &str, canonical: &str, aliases: &[(String, String)]) -> 
 mod tests {
     use super::*;
 
-    fn s(x: &str) -> String { x.to_string() }
-    fn t<T: ToString>(x: T) -> String { x.to_string() }
+    fn s(x: &str) -> String {
+        x.to_string()
+    }
+    fn t<T: ToString>(x: T) -> String {
+        x.to_string()
+    }
 
     // ---- normalize (§9): trim / drop-empty / dedupe / first-occurrence ---
 

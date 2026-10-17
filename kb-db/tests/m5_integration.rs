@@ -42,7 +42,10 @@ impl Setup {
     }
 
     fn register(&self) {
-        let p = fs::canonicalize(&self.root).unwrap().to_string_lossy().to_string();
+        let p = fs::canonicalize(&self.root)
+            .unwrap()
+            .to_string_lossy()
+            .to_string();
         self.db.add_root(&p, None, false).expect("add_root");
     }
 
@@ -65,8 +68,7 @@ fn count(db: &Db, table: &str) -> i64 {
 fn strings(db: &Db, sql: &str) -> Vec<String> {
     let mut stmt = db.conn.prepare(sql).unwrap();
     let it = stmt.query_map([], |r| r.get::<_, String>(0)).unwrap();
-    it.collect::<Result<Vec<_>, _>>()
-        .unwrap()
+    it.collect::<Result<Vec<_>, _>>().unwrap()
 }
 
 /// Write a page at `root/rel` with the given frontmatter and body.
@@ -91,7 +93,12 @@ fn index_derives_all_row_tables_and_fts() {
         "# Attention API\n\nSee [[Transformer (architecture)]] and papers/attention.pdf for details.\n",
     );
     // A no-type page → skipped + counted.
-    write_page(&s.root, "notes/loose.md", "", "just prose, no frontmatter type\n");
+    write_page(
+        &s.root,
+        "notes/loose.md",
+        "",
+        "just prose, no frontmatter type\n",
+    );
 
     s.register();
     refresh(&s.db).unwrap();
@@ -105,7 +112,11 @@ fn index_derives_all_row_tables_and_fts() {
         "SELECT p.id FROM pages_fts JOIN pages p ON p.rowid = pages_fts.rowid
            WHERE pages_fts MATCH 'attention' ORDER BY rank",
     );
-    assert_eq!(hits, vec!["note:Attention API"], "trigger must keep FTS in sync");
+    assert_eq!(
+        hits,
+        vec!["note:Attention API"],
+        "trigger must keep FTS in sync"
+    );
 
     // 2 tag rows.
     assert_eq!(count(&s.db, "page_tags"), 2);
@@ -131,11 +142,19 @@ fn index_derives_all_row_tables_and_fts() {
 fn no_type_pages_skipped_and_counted() {
     let s = Setup::new("skips");
     write_page(&s.root, "a.md", "", "no type here\n");
-    write_page(&s.root, "b.md", "type: wiki\ntitle: Good\n", "# Good\nbody\n");
+    write_page(
+        &s.root,
+        "b.md",
+        "type: wiki\ntitle: Good\n",
+        "# Good\nbody\n",
+    );
     s.register();
     let summ = refresh(&s.db).unwrap();
     assert_eq!(summ.indexed, 1);
-    assert_eq!(summ.skipped_no_type, 1, "no-type page must be counted as skipped");
+    assert_eq!(
+        summ.skipped_no_type, 1,
+        "no-type page must be counted as skipped"
+    );
     assert_eq!(count(&s.db, "pages"), 1);
 }
 
@@ -145,12 +164,28 @@ fn nested_roots_dedupe_to_one_row_innermost_wins() {
     // `s.root` is the OUTER root; `s.root/sub` is the INNER (child) root.
     fs::create_dir_all(s.root.join("sub")).unwrap();
     // A page visible under *both* roots (in the shared `sub` subtree).
-    write_page(&s.root, "sub/shared.md", "type: note\ntitle: Shared\n", "# Shared\nbody\n");
+    write_page(
+        &s.root,
+        "sub/shared.md",
+        "type: note\ntitle: Shared\n",
+        "# Shared\nbody\n",
+    );
     // A page only under outer.
-    write_page(&s.root, "only_outer.md", "type: note\ntitle: Outer Only\n", "# O\nbody\n");
+    write_page(
+        &s.root,
+        "only_outer.md",
+        "type: note\ntitle: Outer Only\n",
+        "# O\nbody\n",
+    );
 
-    let outer_path = fs::canonicalize(&s.root).unwrap().to_string_lossy().to_string();
-    let inner_path = fs::canonicalize(s.root.join("sub")).unwrap().to_string_lossy().to_string();
+    let outer_path = fs::canonicalize(&s.root)
+        .unwrap()
+        .to_string_lossy()
+        .to_string();
+    let inner_path = fs::canonicalize(s.root.join("sub"))
+        .unwrap()
+        .to_string_lossy()
+        .to_string();
     // Register outer first (lower seq), inner second (higher seq).
     s.db.add_root(&outer_path, None, false).unwrap();
     s.db.add_root(&inner_path, None, false).unwrap();
@@ -160,15 +195,14 @@ fn nested_roots_dedupe_to_one_row_innermost_wins() {
     // `shared.md` is under BOTH roots → exactly ONE row, and it points at the
     // *innermost* root (`sub`), NOT outer.
     assert_eq!(count(&s.db, "pages"), 2, "shared.md + only_outer.md");
-    let (root, rel) = s
-        .db
-        .conn
-        .query_row(
-            "SELECT root, rel_path FROM pages WHERE title LIKE '%Shared%'",
-            [],
-            |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)),
-        )
-        .unwrap();
+    let (root, rel) =
+        s.db.conn
+            .query_row(
+                "SELECT root, rel_path FROM pages WHERE title LIKE '%Shared%'",
+                [],
+                |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)),
+            )
+            .unwrap();
     let rootp = Path::new(&root);
     assert!(
         rootp.ends_with("sub"),
@@ -181,7 +215,12 @@ fn nested_roots_dedupe_to_one_row_innermost_wins() {
 fn refresh_is_incremental_and_gc_reclaims_deletes() {
     let s = Setup::new("incr");
     write_page(&s.root, "a.md", "type: note\ntitle: A\n", "# A\nv1\n");
-    write_page(&s.root, "to_die.md", "type: note\ntitle: Die\n", "# Die\nbody\n");
+    write_page(
+        &s.root,
+        "to_die.md",
+        "type: note\ntitle: Die\n",
+        "# Die\nbody\n",
+    );
     s.register();
     refresh(&s.db).unwrap();
     assert_eq!(count(&s.db, "pages"), 2);
@@ -191,19 +230,23 @@ fn refresh_is_incremental_and_gc_reclaims_deletes() {
     assert_eq!(same.indexed, 0, "unchanged tree must index 0 rows");
 
     // 2. Change one page's content → exactly 1 re-indexed.
-    write_page(&s.root, "a.md", "type: note\ntitle: A\ndescription: now updated\n", "# A\nv2 fresh\n");
+    write_page(
+        &s.root,
+        "a.md",
+        "type: note\ntitle: A\ndescription: now updated\n",
+        "# A\nv2 fresh\n",
+    );
     let changed = refresh(&s.db).unwrap();
     assert_eq!(changed.indexed, 1, "changed page must be re-indexed");
-    let desc: Option<String> = s
-        .db
-        .conn
-        .query_row(
-            "SELECT description FROM pages ORDER BY title LIMIT 1",
-            [],
-            |r| r.get(0),
-        )
-        .optional()
-        .unwrap();
+    let desc: Option<String> =
+        s.db.conn
+            .query_row(
+                "SELECT description FROM pages ORDER BY title LIMIT 1",
+                [],
+                |r| r.get(0),
+            )
+            .optional()
+            .unwrap();
     assert_eq!(desc.as_deref(), Some("now updated"));
 
     // 3. Delete a page → GC'd on the next refresh.
@@ -246,9 +289,14 @@ fn drop_root_surviving_under_another_root_keeps_the_page() {
         "# X\nbody\n",
     );
 
-    let outer_path = fs::canonicalize(&outer.root).unwrap().to_string_lossy().to_string();
-    let inner_path =
-        fs::canonicalize(outer.root.join("nested")).unwrap().to_string_lossy().to_string();
+    let outer_path = fs::canonicalize(&outer.root)
+        .unwrap()
+        .to_string_lossy()
+        .to_string();
+    let inner_path = fs::canonicalize(outer.root.join("nested"))
+        .unwrap()
+        .to_string_lossy()
+        .to_string();
 
     outer.db.add_root(&outer_path, None, false).unwrap();
     outer.db.add_root(&inner_path, None, false).unwrap();
@@ -272,7 +320,12 @@ fn drop_root_surviving_under_another_root_keeps_the_page() {
 fn walk_snapshot_surfaces_only_indexable_files() {
     let s = Setup::new("surfaces");
     fs::create_dir_all(s.root.join(".git")).unwrap();
-    write_page(&s.root, "keep.md", "type: note\ntitle: Keep\n", "# K\nbody\n");
+    write_page(
+        &s.root,
+        "keep.md",
+        "type: note\ntitle: Keep\n",
+        "# K\nbody\n",
+    );
     fs::write(s.root.join(".git/hidden.md"), "x").unwrap(); // dot-dir, skipped
     fs::write(s.root.join("plain.txt"), "x").unwrap(); // ext not in allow-list
 

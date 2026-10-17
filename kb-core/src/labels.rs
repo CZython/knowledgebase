@@ -215,7 +215,10 @@ mod tests {
         match classify(body) {
             LabelRef::Files(f) => assert_eq!(
                 f,
-                vec!["papers/attention-is-all-you-need.pdf", "books/deep-learning-goodfellow-ch3.epub"]
+                vec![
+                    "papers/attention-is-all-you-need.pdf",
+                    "books/deep-learning-goodfellow-ch3.epub"
+                ]
             ),
             other => panic!("expected Files, got {other:?}"),
         }
@@ -238,12 +241,16 @@ mod tests {
 
     #[test]
     fn case1_stops_at_next_heading_and_skips_prose() {
-        let body = "## Files\ncollect-me.pdf\nsome prose line here\nme-too.epub\n## Next\nafter.pdf\n";
+        let body =
+            "## Files\ncollect-me.pdf\nsome prose line here\nme-too.epub\n## Next\nafter.pdf\n";
         // prose skipped, block ends at `## Next`; `after.pdf` (after the next
         // heading) is NOT in this label's list.
         assert_eq!(
             classify(body),
-            LabelRef::Files(vec!["collect-me.pdf".to_string(), "me-too.epub".to_string()])
+            LabelRef::Files(vec![
+                "collect-me.pdf".to_string(),
+                "me-too.epub".to_string()
+            ])
         );
     }
 
@@ -274,7 +281,10 @@ mod tests {
         // paths, prose, more paths → the run is only the first contiguous run
         // (paths BEFORE the prose); the trailing ones are past the prose.
         let body = "# X\n\npapers/a.pdf\ninterruption prose\npapers/b.pdf\n";
-        assert_eq!(classify(body), LabelRef::Files(vec!["papers/a.pdf".to_string()]));
+        assert_eq!(
+            classify(body),
+            LabelRef::Files(vec!["papers/a.pdf".to_string()])
+        );
     }
 
     // ---- case 3: folder-wide ----------------------------------------------
@@ -299,7 +309,10 @@ mod tests {
         // heading present ⇒ case 1 wins and its (explicit) list is used.
         let body = "# X\npapers/early.pdf\n\n## Files\npapers/really-listed.pdf\n";
         // `## files` present → case 1: collect its block → only the listed one.
-        assert_eq!(classify(body), LabelRef::Files(vec!["papers/really-listed.pdf".to_string()]));
+        assert_eq!(
+            classify(body),
+            LabelRef::Files(vec!["papers/really-listed.pdf".to_string()])
+        );
     }
 
     // ---- well-formedness (referenced paths) -------------------------------

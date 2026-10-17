@@ -83,7 +83,9 @@ pub fn entry_unlocks(lowered_entry: &str, lowered_text: &str) -> bool {
 /// (the `exists over entries` half of the gate disjunction).
 #[inline]
 pub fn any_entry_unlocks(lowered_entries: &[String], lowered_text: &str) -> bool {
-    lowered_entries.iter().any(|e| entry_unlocks(e.as_str() /* already lowered */, lowered_text))
+    lowered_entries
+        .iter()
+        .any(|e| entry_unlocks(e.as_str() /* already lowered */, lowered_text))
 }
 
 /// The full **visibility** decision for a page under a query's *content text*
@@ -138,7 +140,9 @@ pub fn all_filters_hold(p: &str, filters: &[FilterPair]) -> bool {
     // the *shape* we pin is that it is a conjunction, which is commutative
     // over any deterministic `check`. We return the model predicate here so
     // that a unit test can drive it with a concrete `Eq`-based `check`.
-    filters.iter().all(|(k, v)| filter_match_on_page(p, k, v.as_str()))
+    filters
+        .iter()
+        .all(|(k, v)| filter_match_on_page(p, k, v.as_str()))
 }
 
 /// Page ↔ filter match, deterministic: a page's identity (its abs_path) is
@@ -178,8 +182,10 @@ pub fn filters_commute(a: &[FilterPair], b: &[FilterPair], p: &str) -> bool {
     // We use a deterministic stand-in `check` (not the placeholder `filter_match_on_page`);
     // the *property* is independent of the choice of `check`: any deterministic
     // predicate yields a commutative conjunction under reordering.
-    a.iter().all(|(k, v)| eq_check_on_page(p, k.as_str(), v.as_str()))
-        == b.iter().all(|(k, v)| eq_check_on_page(p, k.as_str(), v.as_str()))
+    a.iter()
+        .all(|(k, v)| eq_check_on_page(p, k.as_str(), v.as_str()))
+        == b.iter()
+            .all(|(k, v)| eq_check_on_page(p, k.as_str(), v.as_str()))
 }
 
 // =============================================================================
@@ -213,9 +219,13 @@ mod tests {
     #[test]
     fn gated_requires_an_entry() {
         let entries: Vec<String> = vec!["deep learning".to_string(), "mtls".to_string()];
-        assert!(gate_satisfied(GateClass::Gated, &entries, "ai deep learning")); // unlocks
-        assert!(gate_satisfied(GateClass::Gated, &entries, "mtls"));             // unlocks
-        assert!(!gate_satisfied(GateClass::Gated, &entries, "ai deep"));         // does NOT unlock
+        assert!(gate_satisfied(
+            GateClass::Gated,
+            &entries,
+            "ai deep learning"
+        )); // unlocks
+        assert!(gate_satisfied(GateClass::Gated, &entries, "mtls")); // unlocks
+        assert!(!gate_satisfied(GateClass::Gated, &entries, "ai deep")); // does NOT unlock
     }
 
     #[test]
@@ -233,7 +243,10 @@ mod tests {
         let entries: Vec<String> = vec![fold_lower("mTLS"), fold_lower("Deep Learning")];
         assert!(entry_unlocks(&entries[0], &fold_lower("mtls everywhere")));
         assert!(entry_unlocks(&entries[0], &fold_lower("xMTLSx")));
-        assert!(entry_unlocks(&entries[1], &fold_lower("i am studying AI deep learning now")));
+        assert!(entry_unlocks(
+            &entries[1],
+            &fold_lower("i am studying AI deep learning now")
+        ));
         assert!(!entry_unlocks(&entries[1], &fold_lower("deep, learning"))); // not contiguous
     }
 
@@ -256,8 +269,8 @@ mod tests {
         ];
         assert!(filters_commute(&a, &b, page));
         // also: both sides are TRUE when the page lists every pair.
-        assert!(a.iter().all(|(k,v)| page.contains(&format!("{k}={v}"))));
-        assert!(b.iter().all(|(k,v)| page.contains(&format!("{k}={v}"))));
+        assert!(a.iter().all(|(k, v)| page.contains(&format!("{k}={v}"))));
+        assert!(b.iter().all(|(k, v)| page.contains(&format!("{k}={v}"))));
     }
 
     #[test]
@@ -268,7 +281,7 @@ mod tests {
         let page = "type=wiki";
         let a: Vec<FilterPair> = vec![
             ("type".into(), "wiki".into()),
-            ("language".into(), "en".into()),   // page has no language=en
+            ("language".into(), "en".into()), // page has no language=en
         ];
         let b: Vec<FilterPair> = vec![
             ("language".into(), "en".into()),
@@ -296,10 +309,12 @@ mod tests {
         let q = super::super::search_grammar::parse("~llm ~mllm -gpt apple tag:x");
         // tag:x is a filter → in the filter lane (not in AND)
         assert!(q.filters.iter().any(|f| f.key == "tag"));
-        assert!(!q.and_terms.iter().any(|t| matches!(t, super::super::search_grammar::Term::Token{ text, ..} if text == "tag:x")));
-        assert_eq!(q.or_group.len(), 2);   // llm, mllm in the OR group
-        assert_eq!(q.not_terms.len(), 1);  // gpt in NOT
-        assert_eq!(q.and_terms.len(), 1);  // apple only
+        assert!(!q.and_terms.iter().any(
+            |t| matches!(t, super::super::search_grammar::Term::Token{ text, ..} if text == "tag:x")
+        ));
+        assert_eq!(q.or_group.len(), 2); // llm, mllm in the OR group
+        assert_eq!(q.not_terms.len(), 1); // gpt in NOT
+        assert_eq!(q.and_terms.len(), 1); // apple only
         assert!(matches!(
             &q.and_terms[0],
             super::super::search_grammar::Term::Token { text, phrase: false } if text == "apple"

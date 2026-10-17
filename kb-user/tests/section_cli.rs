@@ -6,8 +6,8 @@
 //! *shell* contract: exit codes, the 3-way text source, etag concurrency,
 //! dry-run, and the editor flow.
 
-use std::process::Command;
 use std::path::PathBuf;
+use std::process::Command;
 
 fn kb() -> Command {
     Command::new(
@@ -51,7 +51,10 @@ fn toc_lists_the_section_tree() {
     let pos_root = out.find("Root").unwrap();
     let pos_a = out.find("Alpha").unwrap();
     let pos_b = out.find("Beta").unwrap();
-    assert!(pos_root < pos_a && pos_a < pos_b, "outline must be in doc order");
+    assert!(
+        pos_root < pos_a && pos_a < pos_b,
+        "outline must be in doc order"
+    );
     assert!(out.contains("ref 1") && out.contains("level 1"));
     assert!(out.contains("level 2"));
 }
@@ -63,7 +66,10 @@ fn toc_json_is_well_formed_envelope() {
     assert_eq!(code, 0);
     // a single-line JSON object with a file field and a sections array
     let out = out.trim();
-    assert!(out.starts_with('{') && out.ends_with('}'), "envelope: {out}");
+    assert!(
+        out.starts_with('{') && out.ends_with('}'),
+        "envelope: {out}"
+    );
     assert!(out.starts_with("{\"file\":"), "envelope: {out}");
     assert!(out.contains("\"sections\":[{"), "sections array: {out}");
     assert!(out.contains("\"ref\":\"1\""), "root ref present: {out}");
@@ -86,7 +92,10 @@ fn show_full_includes_subsections() {
     let f = temp_md("showfull", &base_md());
     let (code, out, _) = run(&["show", f.to_str().unwrap(), "Alpha", "--full"]);
     assert_eq!(code, 0);
-    assert!(out.contains("Alpha-Sub"), "full span includes subsections: {out}");
+    assert!(
+        out.contains("Alpha-Sub"),
+        "full span includes subsections: {out}"
+    );
     assert!(out.contains("sub body"), "{out}");
 }
 
@@ -115,23 +124,39 @@ fn show_unknown_ref_exits_2() {
 fn set_section_replaces_and_writes() {
     let f = temp_md("set", &base_md());
     let (code, _, _) = run(&[
-        "section", "--file", f.to_str().unwrap(),
-        "set", "Alpha", "--text", "brand new body", "--yes",
+        "section",
+        "--file",
+        f.to_str().unwrap(),
+        "set",
+        "Alpha",
+        "--text",
+        "brand new body",
+        "--yes",
     ]);
     assert_eq!(code, 0);
     let now = std::fs::read_to_string(&f).unwrap();
     assert!(now.contains("brand new body"), "{now}");
     assert!(!now.contains("alpha body"), "{now}");
     // set (without --keep-heading) replaces the section incl. its heading
-    assert!(!now.contains("## Alpha"), "set default drops the heading: {now}");
+    assert!(
+        !now.contains("## Alpha"),
+        "set default drops the heading: {now}"
+    );
 }
 
 #[test]
 fn set_keep_heading_preserves_heading() {
     let f = temp_md("setkeep", &base_md());
     let (code, _, _) = run(&[
-        "section", "--file", f.to_str().unwrap(),
-        "set", "Alpha", "--text", "new body", "--keep-heading", "--yes",
+        "section",
+        "--file",
+        f.to_str().unwrap(),
+        "set",
+        "Alpha",
+        "--text",
+        "new body",
+        "--keep-heading",
+        "--yes",
     ]);
     assert_eq!(code, 0);
     let now = std::fs::read_to_string(&f).unwrap();
@@ -143,8 +168,14 @@ fn set_keep_heading_preserves_heading() {
 fn append_section_before_next_heading() {
     let f = temp_md("append", &base_md());
     let (code, _, _) = run(&[
-        "section", "--file", f.to_str().unwrap(),
-        "append", "Beta", "--text", "appended line", "--yes",
+        "section",
+        "--file",
+        f.to_str().unwrap(),
+        "append",
+        "Beta",
+        "--text",
+        "appended line",
+        "--yes",
     ]);
     assert_eq!(code, 0);
     let now = std::fs::read_to_string(&f).unwrap();
@@ -160,8 +191,17 @@ fn append_section_before_next_heading() {
 fn insert_child_section() {
     let f = temp_md("insert", &base_md());
     let (code, _, _) = run(&[
-        "section", "--file", f.to_str().unwrap(),
-        "insert", "--ref", "Alpha", "--title", "Fresh", "--text", "fresh body", "--yes",
+        "section",
+        "--file",
+        f.to_str().unwrap(),
+        "insert",
+        "--ref",
+        "Alpha",
+        "--title",
+        "Fresh",
+        "--text",
+        "fresh body",
+        "--yes",
     ]);
     assert_eq!(code, 0);
     let now = std::fs::read_to_string(&f).unwrap();
@@ -176,8 +216,13 @@ fn insert_child_section() {
 fn replace_substring_reports_count_on_stderr() {
     let f = temp_md("repl", &base_md());
     let (code, _, err) = run(&[
-        "replace", f.to_str().unwrap(),
-        "--find", "alpha body", "--new", "alpha body v9", "--yes",
+        "replace",
+        f.to_str().unwrap(),
+        "--find",
+        "alpha body",
+        "--new",
+        "alpha body v9",
+        "--yes",
     ]);
     assert_eq!(code, 0);
     assert!(err.contains("1 replacement"), "{err}");
@@ -189,10 +234,18 @@ fn replace_substring_reports_count_on_stderr() {
 fn replace_substring_not_found_exits_2() {
     let f = temp_md("replnf", &base_md());
     let (code, _, err) = run(&[
-        "replace", f.to_str().unwrap(),
-        "--find", "nope-not-here", "--new", "x", "--yes",
+        "replace",
+        f.to_str().unwrap(),
+        "--find",
+        "nope-not-here",
+        "--new",
+        "x",
+        "--yes",
     ]);
-    assert_eq!(code, 2, "nothing-to-replace is a typed error (stderr: {err})");
+    assert_eq!(
+        code, 2,
+        "nothing-to-replace is a typed error (stderr: {err})"
+    );
     // file must be untouched
     assert_eq!(std::fs::read_to_string(&f).unwrap(), base_md());
 }
@@ -213,8 +266,15 @@ fn emitted_diff_is_reverse_applicable_by_patch_one() {
 
     // (1) the edit the binary will actually apply
     let (code, _, _) = run(&[
-        "section", "--file", f.to_str().unwrap(),
-        "set", "Alpha", "--text", "the brand new alpha body\nsecond line", "--keep-heading", "--yes",
+        "section",
+        "--file",
+        f.to_str().unwrap(),
+        "set",
+        "Alpha",
+        "--text",
+        "the brand new alpha body\nsecond line",
+        "--keep-heading",
+        "--yes",
     ]);
     assert_eq!(code, 0);
     let after = std::fs::read_to_string(&f).unwrap();
@@ -225,14 +285,26 @@ fn emitted_diff_is_reverse_applicable_by_patch_one() {
 
     // (3) capture the binary's dry-run diff (stdout only)
     let (code, diff_out, _) = run(&[
-        "section", "--file", f.to_str().unwrap(),
-        "set", "Alpha", "--text", "the brand new alpha body\nsecond line", "--keep-heading", "--dry-run",
+        "section",
+        "--file",
+        f.to_str().unwrap(),
+        "set",
+        "Alpha",
+        "--text",
+        "the brand new alpha body\nsecond line",
+        "--keep-heading",
+        "--dry-run",
     ]);
     assert_eq!(code, 0);
     let path_s = f.to_str().unwrap().to_string();
-    assert!(diff_out.contains("@@") && diff_out.contains("-alpha body"),
-            "diff must have hunk header + removed lines: {diff_out}");
-    assert!(diff_out.starts_with(&format!("--- {path_s}\n+++ ")), "labels: {diff_out}");
+    assert!(
+        diff_out.contains("@@") && diff_out.contains("-alpha body"),
+        "diff must have hunk header + removed lines: {diff_out}"
+    );
+    assert!(
+        diff_out.starts_with(&format!("--- {path_s}\n+++ ")),
+        "labels: {diff_out}"
+    );
 
     // (4) feed that diff to patch(1); compare the result to the binary's write
     let tmp_dir = std::env::temp_dir();
@@ -250,7 +322,12 @@ fn emitted_diff_is_reverse_applicable_by_patch_one() {
     let out = {
         use std::io::Write;
         let mut child = p1;
-        child.stdin.as_mut().unwrap().write_all(diff_out.as_bytes()).unwrap();
+        child
+            .stdin
+            .as_mut()
+            .unwrap()
+            .write_all(diff_out.as_bytes())
+            .unwrap();
         child.wait_with_output().unwrap()
     };
     assert!(
@@ -259,8 +336,10 @@ fn emitted_diff_is_reverse_applicable_by_patch_one() {
         String::from_utf8_lossy(&out.stderr)
     );
     let patched_now = std::fs::read_to_string(&patched).unwrap();
-    assert_eq!(patched_now, after,
-               "patch(1) applying our diff must reproduce the binary's actual write");
+    assert_eq!(
+        patched_now, after,
+        "patch(1) applying our diff must reproduce the binary's actual write"
+    );
     let _ = std::fs::remove_file(&patched);
 }
 
@@ -278,17 +357,33 @@ fn if_unchanged_match_proceeds_mismatch_aborts_3() {
 
     // (b) unchanged target → guard passes
     let (code, _, err) = run(&[
-        "section", "--file", f.to_str().unwrap(),
-        "set", "Alpha", "--text", "alpha v2", "--keep-heading",
-        "--if-unchanged", etag, "--yes",
+        "section",
+        "--file",
+        f.to_str().unwrap(),
+        "set",
+        "Alpha",
+        "--text",
+        "alpha v2",
+        "--keep-heading",
+        "--if-unchanged",
+        etag,
+        "--yes",
     ]);
     assert_eq!(code, 0, "matching etag passes (stderr: {err})");
 
     // (c) repeat with the *stale* etag → guard trips with exit 3
     let (code, _, err) = run(&[
-        "section", "--file", f.to_str().unwrap(),
-        "set", "Alpha", "--text", "alpha v3", "--keep-heading",
-        "--if-unchanged", etag, "--yes",
+        "section",
+        "--file",
+        f.to_str().unwrap(),
+        "set",
+        "Alpha",
+        "--text",
+        "alpha v3",
+        "--keep-heading",
+        "--if-unchanged",
+        etag,
+        "--yes",
     ]);
     assert_eq!(code, 3, "stale etag → exit 3 (stderr: {err})");
 }
@@ -298,22 +393,40 @@ fn dry_run_prints_diff_but_writes_nothing() {
     let f = temp_md("dry", &base_md());
     let before = std::fs::read_to_string(&f).unwrap();
     let (code, out, _) = run(&[
-        "section", "--file", f.to_str().unwrap(),
-        "set", "Alpha", "--text", "dry-run body", "--dry-run",
+        "section",
+        "--file",
+        f.to_str().unwrap(),
+        "set",
+        "Alpha",
+        "--text",
+        "dry-run body",
+        "--dry-run",
     ]);
     assert_eq!(code, 0);
     assert!(out.contains("@@"), "dry-run shows a unified diff: {out}");
-    assert_eq!(std::fs::read_to_string(&f).unwrap(), before, "dry-run must not write");
+    assert_eq!(
+        std::fs::read_to_string(&f).unwrap(),
+        before,
+        "dry-run must not write"
+    );
 }
 
 #[test]
 fn text_source_stdin() {
     let f = temp_md("stdin", &base_md());
     let mut c = kb();
-    c
-        .args(["section", "--file", f.to_str().unwrap(), "set", "Alpha", "--keep-heading", "--stdin", "--yes"])
-        .stdin(std::process::Stdio::piped())
-        .stdout(std::process::Stdio::piped());
+    c.args([
+        "section",
+        "--file",
+        f.to_str().unwrap(),
+        "set",
+        "Alpha",
+        "--keep-heading",
+        "--stdin",
+        "--yes",
+    ])
+    .stdin(std::process::Stdio::piped())
+    .stdout(std::process::Stdio::piped());
     let mut child = c.spawn().unwrap();
     use std::io::Write;
     child
@@ -324,7 +437,9 @@ fn text_source_stdin() {
         .unwrap();
     let status = child.wait().unwrap();
     assert!(status.success());
-    assert!(std::fs::read_to_string(&f).unwrap().contains("body-via-stdin"));
+    assert!(std::fs::read_to_string(&f)
+        .unwrap()
+        .contains("body-via-stdin"));
 }
 
 #[test]
@@ -332,19 +447,32 @@ fn text_source_from_file() {
     let f = temp_md("fromfile", &base_md());
     let src = temp_md("fromfile_src", "body-from-file\n");
     let (code, _, _) = run(&[
-        "section", "--file", f.to_str().unwrap(),
-        "set", "Alpha", "--keep-heading",
-        "--from-file", src.to_str().unwrap(), "--yes",
+        "section",
+        "--file",
+        f.to_str().unwrap(),
+        "set",
+        "Alpha",
+        "--keep-heading",
+        "--from-file",
+        src.to_str().unwrap(),
+        "--yes",
     ]);
     assert_eq!(code, 0);
-    assert!(std::fs::read_to_string(&f).unwrap().contains("body-from-file"));
+    assert!(std::fs::read_to_string(&f)
+        .unwrap()
+        .contains("body-from-file"));
 }
 
 #[test]
 fn no_text_source_is_exit_1() {
     let f = temp_md("nosource", &base_md());
     let (code, _, err) = run(&[
-        "section", "--file", f.to_str().unwrap(), "set", "Alpha", "--yes",
+        "section",
+        "--file",
+        f.to_str().unwrap(),
+        "set",
+        "Alpha",
+        "--yes",
     ]);
     assert_eq!(code, 1, "generic error (stderr: {err})");
 }
@@ -364,10 +492,16 @@ fn show_fm_prints_whole_frame() {
     let (code, out, _) = run(&["show", f.to_str().unwrap(), "fm"]);
     assert_eq!(code, 0);
     assert!(out.starts_with("---\n"), "frame starts with opener: {out}");
-    assert!(out.contains("type: wiki") && out.contains("title: Foo"), "{out}");
+    assert!(
+        out.contains("type: wiki") && out.contains("title: Foo"),
+        "{out}"
+    );
     assert!(out.contains("- b"), "{out}");
     // the body must NOT leak into the frame
-    assert!(!out.contains("body\n# H") && !out.contains("# H"), "body excluded: {out}");
+    assert!(
+        !out.contains("body\n# H") && !out.contains("# H"),
+        "body excluded: {out}"
+    );
 }
 
 #[test]
@@ -384,7 +518,10 @@ fn show_fm_key_list_includes_items() {
     let (code, out, _) = run(&["show", f.to_str().unwrap(), "fm.tags"]);
     assert_eq!(code, 0);
     assert!(out.contains("tags:"), "{out}");
-    assert!(out.contains("- a") && out.contains("- b"), "list items included: {out}");
+    assert!(
+        out.contains("- a") && out.contains("- b"),
+        "list items included: {out}"
+    );
 }
 
 #[test]
@@ -407,16 +544,28 @@ fn fm_set_scalar_creates_or_replaces() {
     let f = temp_md("fm_set", &fm_md());
     // create a new scalar key
     let (code, _, err) = run(&[
-        "section", "--file", f.to_str().unwrap(),
-        "set", "fm.description", "--value", "A short desc", "--yes",
+        "section",
+        "--file",
+        f.to_str().unwrap(),
+        "set",
+        "fm.description",
+        "--value",
+        "A short desc",
+        "--yes",
     ]);
     assert_eq!(code, 0, "{err}");
     let now = std::fs::read_to_string(&f).unwrap();
     assert!(now.contains("description: A short desc"), "{now}");
     // replace an existing scalar key
     let (code, _, err) = run(&[
-        "section", "--file", f.to_str().unwrap(),
-        "set", "fm.title", "--value", "Bar", "--yes",
+        "section",
+        "--file",
+        f.to_str().unwrap(),
+        "set",
+        "fm.title",
+        "--value",
+        "Bar",
+        "--yes",
     ]);
     assert_eq!(code, 0, "{err}");
     let now = std::fs::read_to_string(&f).unwrap();
@@ -428,29 +577,45 @@ fn fm_set_scalar_creates_or_replaces() {
 fn fm_append_list_item() {
     let f = temp_md("fm_append", &fm_md());
     let (code, _, err) = run(&[
-        "section", "--file", f.to_str().unwrap(),
-        "append", "fm.tags", "--value", "c", "--yes",
+        "section",
+        "--file",
+        f.to_str().unwrap(),
+        "append",
+        "fm.tags",
+        "--value",
+        "c",
+        "--yes",
     ]);
     assert_eq!(code, 0, "{err}");
     let (code, out, _) = run(&["show", f.to_str().unwrap(), "fm.tags"]);
     assert_eq!(code, 0);
-    assert!(out.contains("- a") && out.contains("- b") && out.contains("c"),
-           "appended item present: {out}");
+    assert!(
+        out.contains("- a") && out.contains("- b") && out.contains("c"),
+        "appended item present: {out}"
+    );
 }
 
 #[test]
 fn fm_rm_list_item() {
     let f = temp_md("fm_rmitem", &fm_md());
     let (code, _, err) = run(&[
-        "section", "--file", f.to_str().unwrap(),
-        "rm", "fm.tags", "a", "--yes",
+        "section",
+        "--file",
+        f.to_str().unwrap(),
+        "rm",
+        "fm.tags",
+        "a",
+        "--yes",
     ]);
     assert_eq!(code, 0, "{err}");
     let (code, out, _) = run(&["show", f.to_str().unwrap(), "fm.tags"]);
     assert_eq!(code, 0);
     // the kernel collapses a rewritten block list to inline form, so assert
     // on the value rather than a specific `- b` block layout.
-    assert!(!out.contains(" a,") && !out.contains("]a") && !out.contains("[a]"), "{out}");
+    assert!(
+        !out.contains(" a,") && !out.contains("]a") && !out.contains("[a]"),
+        "{out}"
+    );
     assert!(out.contains("b"), "b retained: {out}");
 }
 
@@ -458,8 +623,12 @@ fn fm_rm_list_item() {
 fn fm_rm_field() {
     let f = temp_md("fm_rmfield", &fm_md());
     let (code, _, err) = run(&[
-        "section", "--file", f.to_str().unwrap(),
-        "rm", "fm.title", "--yes",
+        "section",
+        "--file",
+        f.to_str().unwrap(),
+        "rm",
+        "fm.title",
+        "--yes",
     ]);
     assert_eq!(code, 0, "{err}");
     let (code, _, err) = run(&["show", f.to_str().unwrap(), "fm.title"]);
@@ -475,19 +644,34 @@ fn fm_rm_list_item_absent_exits_2() {
     let f = temp_md("fm_rmabs", &fm_md());
     let before = std::fs::read_to_string(&f).unwrap();
     let (code, _, err) = run(&[
-        "section", "--file", f.to_str().unwrap(),
-        "rm", "fm.tags", "zzz-not-there", "--yes",
+        "section",
+        "--file",
+        f.to_str().unwrap(),
+        "rm",
+        "fm.tags",
+        "zzz-not-there",
+        "--yes",
     ]);
     assert_eq!(code, 2, "absent value → exit 2 (stderr: {err})");
-    assert_eq!(std::fs::read_to_string(&f).unwrap(), before, "file untouched");
+    assert_eq!(
+        std::fs::read_to_string(&f).unwrap(),
+        before,
+        "file untouched"
+    );
 }
 
 #[test]
 fn fm_ops_on_no_frame_exit_2() {
     let f = temp_md("fm_ops", &base_md());
     let (code, _, err) = run(&[
-        "section", "--file", f.to_str().unwrap(),
-        "set", "fm.title", "--value", "x", "--yes",
+        "section",
+        "--file",
+        f.to_str().unwrap(),
+        "set",
+        "fm.title",
+        "--value",
+        "x",
+        "--yes",
     ]);
     assert_eq!(code, 2, "no frontmatter → exit 2 (stderr: {err})");
 }
@@ -502,11 +686,23 @@ fn fm_if_unchanged_mismatch_exits_3() {
     // a *wrong* etag trips the guard (exit 3) before any mutation
     let before = std::fs::read_to_string(&f).unwrap();
     let (code, _, err) = run(&[
-        "section", "--file", f.to_str().unwrap(),
-        "set", "fm.title", "--value", "Nope", "--if-unchanged", "deadbeefdeadbeef", "--yes",
+        "section",
+        "--file",
+        f.to_str().unwrap(),
+        "set",
+        "fm.title",
+        "--value",
+        "Nope",
+        "--if-unchanged",
+        "deadbeefdeadbeef",
+        "--yes",
     ]);
     assert_eq!(code, 3, "stale/mismatch etag → exit 3 (stderr: {err})");
-    assert_eq!(std::fs::read_to_string(&f).unwrap(), before, "file untouched");
+    assert_eq!(
+        std::fs::read_to_string(&f).unwrap(),
+        before,
+        "file untouched"
+    );
     let _ = good;
 }
 
@@ -515,12 +711,22 @@ fn fm_dry_run_writes_nothing() {
     let f = temp_md("fm_dry", &fm_md());
     let before = std::fs::read_to_string(&f).unwrap();
     let (code, out, _) = run(&[
-        "section", "--file", f.to_str().unwrap(),
-        "set", "fm.description", "--value", "dry", "--dry-run",
+        "section",
+        "--file",
+        f.to_str().unwrap(),
+        "set",
+        "fm.description",
+        "--value",
+        "dry",
+        "--dry-run",
     ]);
     assert_eq!(code, 0);
     assert!(out.contains("@@"), "dry-run shows a diff: {out}");
-    assert_eq!(std::fs::read_to_string(&f).unwrap(), before, "dry-run must not write");
+    assert_eq!(
+        std::fs::read_to_string(&f).unwrap(),
+        before,
+        "dry-run must not write"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -545,13 +751,22 @@ fn patch_applies_a_real_external_diff_byte_identical() {
     let want_s = fixture("section_new.md");
     std::fs::write(&f, &base_s).unwrap();
     let (code, _, err) = run(&[
-        "patch", f.to_str().unwrap(),
-        "--patch-file", format!("{}/../kb/testdata/standard.diff", env!("CARGO_MANIFEST_DIR")).as_str(),
+        "patch",
+        f.to_str().unwrap(),
+        "--patch-file",
+        format!(
+            "{}/../kb/testdata/standard.diff",
+            env!("CARGO_MANIFEST_DIR")
+        )
+        .as_str(),
         "--yes",
     ]);
     assert_eq!(code, 0, "patch failed: {err}");
     let now = std::fs::read_to_string(&f).unwrap();
-    assert_eq!(now, want_s, "patch output must byte-match the GNU-patch reference");
+    assert_eq!(
+        now, want_s,
+        "patch output must byte-match the GNU-patch reference"
+    );
     let _ = std::fs::remove_file(&f);
 }
 
@@ -567,9 +782,18 @@ fn patch_via_stdin_applies() {
     c.stderr(std::process::Stdio::piped());
     let mut child = c.spawn().unwrap();
     use std::io::Write;
-    child.stdin.as_mut().unwrap().write_all(fixture("standard.diff").as_bytes()).unwrap();
+    child
+        .stdin
+        .as_mut()
+        .unwrap()
+        .write_all(fixture("standard.diff").as_bytes())
+        .unwrap();
     let out = child.wait_with_output().unwrap();
-    assert!(out.status.success(), "patch --patch-stdin failed: {}", String::from_utf8_lossy(&out.stderr));
+    assert!(
+        out.status.success(),
+        "patch --patch-stdin failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
     assert_eq!(std::fs::read_to_string(&f).unwrap(), want_s);
     let _ = std::fs::remove_file(&f);
 }
@@ -583,8 +807,10 @@ fn patch_via_inline_text_applies() {
     // escape via clap's `--patch-text=...` (which accepts a literal value).
     let patch = fixture("standard.diff");
     let (code, _, err) = run(&[
-        "patch", f.to_str().unwrap(),
-        "--patch-text", patch.as_str(),
+        "patch",
+        f.to_str().unwrap(),
+        "--patch-text",
+        patch.as_str(),
         "--yes",
     ]);
     assert_eq!(code, 0, "patch --patch-text failed: {err}");
@@ -598,13 +824,23 @@ fn patch_dry_run_prints_diff_but_writes_nothing() {
     let base_s = fixture("section_old.md");
     std::fs::write(&f, &base_s).unwrap();
     let (code, out, _) = run(&[
-        "patch", f.to_str().unwrap(),
-        "--patch-file", format!("{}/../kb/testdata/standard.diff", env!("CARGO_MANIFEST_DIR")).as_str(),
+        "patch",
+        f.to_str().unwrap(),
+        "--patch-file",
+        format!(
+            "{}/../kb/testdata/standard.diff",
+            env!("CARGO_MANIFEST_DIR")
+        )
+        .as_str(),
         "--dry-run",
     ]);
     assert_eq!(code, 0);
     assert!(out.contains("@@"), "dry-run must show the diff: {out}");
-    assert_eq!(std::fs::read_to_string(&f).unwrap(), base_s, "dry-run must not write");
+    assert_eq!(
+        std::fs::read_to_string(&f).unwrap(),
+        base_s,
+        "dry-run must not write"
+    );
     let _ = std::fs::remove_file(&f);
 }
 
@@ -613,19 +849,39 @@ fn patch_json_is_well_formed_envelope() {
     let f = std::env::temp_dir().join(format!("kb_patch_e_{}.md", std::process::id()));
     std::fs::write(&f, fixture("section_old.md")).unwrap();
     let (code, out, _) = run(&[
-        "patch", f.to_str().unwrap(),
-        "--patch-file", format!("{}/../kb/testdata/standard.diff", env!("CARGO_MANIFEST_DIR")).as_str(),
-        "--yes", "--json",
+        "patch",
+        f.to_str().unwrap(),
+        "--patch-file",
+        format!(
+            "{}/../kb/testdata/standard.diff",
+            env!("CARGO_MANIFEST_DIR")
+        )
+        .as_str(),
+        "--yes",
+        "--json",
     ]);
     assert_eq!(code, 0);
     // exactly one JSON object on stdout with the uniform write envelope
     let out = out.trim();
-    assert!(out.starts_with('{') && out.ends_with('}'), "envelope: {out}");
-    for k in ["\"file\":", "\"changed\":", "\"dry_run\":", "\"applied\":",
-              "\"bytes_before\":", "\"bytes_after\":", "\"diff\":"] {
+    assert!(
+        out.starts_with('{') && out.ends_with('}'),
+        "envelope: {out}"
+    );
+    for k in [
+        "\"file\":",
+        "\"changed\":",
+        "\"dry_run\":",
+        "\"applied\":",
+        "\"bytes_before\":",
+        "\"bytes_after\":",
+        "\"diff\":",
+    ] {
         assert!(out.contains(k), "missing field {k} in: {out}");
     }
-    assert!(out.contains("\"applied\": true"), "must report applied=true: {out}");
+    assert!(
+        out.contains("\"applied\": true"),
+        "must report applied=true: {out}"
+    );
     let _ = std::fs::remove_file(&f);
 }
 
@@ -634,7 +890,10 @@ fn patch_no_source_is_exit_1() {
     let f = std::env::temp_dir().join(format!("kb_patch_f_{}.md", std::process::id()));
     std::fs::write(&f, fixture("section_old.md")).unwrap();
     let (code, _, err) = run(&["patch", f.to_str().unwrap(), "--yes"]);
-    assert_eq!(code, 1, "no source at all is a generic error (stderr: {err})");
+    assert_eq!(
+        code, 1,
+        "no source at all is a generic error (stderr: {err})"
+    );
     let _ = std::fs::remove_file(&f);
 }
 
@@ -642,10 +901,18 @@ fn patch_no_source_is_exit_1() {
 fn patch_two_sources_is_exit_1() {
     let f = std::env::temp_dir().join(format!("kb_patch_g_{}.md", std::process::id()));
     std::fs::write(&f, fixture("section_old.md")).unwrap();
-    let pf = format!("{}/../kb/testdata/standard.diff", env!("CARGO_MANIFEST_DIR"));
+    let pf = format!(
+        "{}/../kb/testdata/standard.diff",
+        env!("CARGO_MANIFEST_DIR")
+    );
     let (code, _, err) = run(&[
-        "patch", f.to_str().unwrap(),
-        "--patch-file", pf.as_str(), "--patch-text", "x", "--yes",
+        "patch",
+        f.to_str().unwrap(),
+        "--patch-file",
+        pf.as_str(),
+        "--patch-text",
+        "x",
+        "--yes",
     ]);
     assert_eq!(code, 1, "two sources → generic error (stderr: {err})");
     let _ = std::fs::remove_file(&f);
@@ -666,12 +933,13 @@ fn patch_identity_is_a_noop_changeless() {
     let base_lines: Vec<&str> = base.lines().take(3).collect();
     let ctx: Vec<String> = base_lines.iter().map(|l| format!(" {l}")).collect();
     let patch = format!("--- a\n+++ b\n@@ -1,3 +1,3 @@\n{}", ctx.join("\n"));
-    let (code, _out, err) = run(&[
-        "patch", f.to_str().unwrap(), "--patch-text", patch.as_str(),
-    ]);
+    let (code, _out, err) = run(&["patch", f.to_str().unwrap(), "--patch-text", patch.as_str()]);
     assert_eq!(code, 0, "identity patch must succeed (stderr: {err})");
     let now = std::fs::read_to_string(&f).unwrap();
-    assert_eq!(now, base, "an identity patch must be a no-op, file untouched");
+    assert_eq!(
+        now, base,
+        "an identity patch must be a no-op, file untouched"
+    );
     let _ = std::fs::remove_file(&f);
 }
 

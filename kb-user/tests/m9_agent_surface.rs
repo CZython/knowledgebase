@@ -29,10 +29,7 @@ struct Setup {
 
 impl Setup {
     fn new(tag: &str) -> Self {
-        let base = std::env::temp_dir().join(format!(
-            "kbm9_{pid}_{tag}",
-            pid = std::process::id()
-        ));
+        let base = std::env::temp_dir().join(format!("kbm9_{pid}_{tag}", pid = std::process::id()));
         let root = base.join("root");
         let _ = fs::remove_dir_all(&root);
         fs::create_dir_all(&root).unwrap();
@@ -93,8 +90,10 @@ fn assert_json(s: &str, what: &str, is_array: bool, is_object: bool) {
     }
     let res = ch.wait_with_output().unwrap();
     if !res.status.success() {
-        eprintln!("assert_json({what}) FAILED\n--- stdout ---\n{s}\n--- stderr ---\n{}",
-            String::from_utf8_lossy(&res.stderr));
+        eprintln!(
+            "assert_json({what}) FAILED\n--- stdout ---\n{s}\n--- stderr ---\n{}",
+            String::from_utf8_lossy(&res.stderr)
+        );
         panic!("assert_json({what}) failed — bad JSON or wrong top-level kind");
     }
     let _ = is_object;
@@ -126,12 +125,18 @@ fn roots_json_roundtrip() {
     let (code, out, _) = run(&s, &["roots", "--json"]);
     assert_eq!(code, 0);
     assert_json(&out, "roots", true, false);
-    assert!(out.starts_with('[') || out.trim_start().starts_with('['),
-        "roots --json must be a JSON array");
-    assert!(out.contains(&format!("\"path\": \"{root}\"")),
-        "roots --json must carry the registered path;\ngot:\n{out}");
-    assert!(out.contains("\"include_hidden\""),
-        "roots --json must carry include_hidden");
+    assert!(
+        out.starts_with('[') || out.trim_start().starts_with('['),
+        "roots --json must be a JSON array"
+    );
+    assert!(
+        out.contains(&format!("\"path\": \"{root}\"")),
+        "roots --json must carry the registered path;\ngot:\n{out}"
+    );
+    assert!(
+        out.contains("\"include_hidden\""),
+        "roots --json must carry include_hidden"
+    );
 }
 
 #[test]
@@ -141,64 +146,106 @@ fn add_droproot_refresh_json() {
     write_page(&s, "a.md", "type: note\ntitle: A\n", "x\n");
     write_page(&s, "b.md", "type: wiki\ntitle: B\n", "y\n");
 
-    let (code,out,_) = run(&s, &["add", &root, "--json"]);
+    let (code, out, _) = run(&s, &["add", &root, "--json"]);
     assert_eq!(code, 0);
     assert_json(&out, "add", false, true);
-    assert!(out.contains("\"registered\""), "add --json must carry the registered path");
-    assert!(out.contains("\"refresh\""), "add --json must embed the refresh summary");
+    assert!(
+        out.contains("\"registered\""),
+        "add --json must carry the registered path"
+    );
+    assert!(
+        out.contains("\"refresh\""),
+        "add --json must embed the refresh summary"
+    );
 
-    let (code,out,_) = run(&s, &["refresh", "--json"]);
+    let (code, out, _) = run(&s, &["refresh", "--json"]);
     assert_eq!(code, 0);
     assert_json(&out, "refresh", false, true);
-    for k in ["full","indexed","skipped_no_type","skipped_missing_slug","gc","roots_walked"] {
-        assert!(out.contains(&format!("\"{k}\"")), "refresh --json missing key {k}\ngot: {out}");
+    for k in [
+        "full",
+        "indexed",
+        "skipped_no_type",
+        "skipped_missing_slug",
+        "gc",
+        "roots_walked",
+    ] {
+        assert!(
+            out.contains(&format!("\"{k}\"")),
+            "refresh --json missing key {k}\ngot: {out}"
+        );
     }
 
-    let (code,out,_) = run(&s, &["full-rebuild", "--json"]);
+    let (code, out, _) = run(&s, &["full-rebuild", "--json"]);
     assert_eq!(code, 0);
     assert_json(&out, "full-rebuild", false, true);
-    assert!(out.contains("\"full\": true"), "full-rebuild --json must be full:true");
+    assert!(
+        out.contains("\"full\": true"),
+        "full-rebuild --json must be full:true"
+    );
 
-    let (code,out,_) = run(&s, &["drop-root", &root, "--json"]);
+    let (code, out, _) = run(&s, &["drop-root", &root, "--json"]);
     assert_eq!(code, 0);
     assert_json(&out, "drop-root", false, true);
     assert!(out.contains("\"dropped\"") && out.contains("\"gc\""));
     // After the drop, the indexed pages should be gone (GC).
-    let (code,out,_) = run(&s, &["refresh", "--json"]);
+    let (code, out, _) = run(&s, &["refresh", "--json"]);
     assert_eq!(code, 0);
-    assert!(out.contains("\"gc\": ") || out.contains("\"gc\":0"),
-        "refresh after drop must carry a gc count; got: {out}");
+    assert!(
+        out.contains("\"gc\": ") || out.contains("\"gc\":0"),
+        "refresh after drop must carry a gc count; got: {out}"
+    );
 }
 
 #[test]
 fn browse_tag_json() {
     let s = Setup::new("browsetag");
     let root = s.root.to_string_lossy().into_owned();
-    write_page(&s, "a.md", "type: note\ntitle: Alpha\ntags:\n  - foo\n  - bar\n", "alpha\n");
-    write_page(&s, "b.md", "type: wiki\ntitle: Beta\ntags:\n  - bar\n", "beta\n");
-    let (code,_,_) = run(&s, &["add", &root]);
+    write_page(
+        &s,
+        "a.md",
+        "type: note\ntitle: Alpha\ntags:\n  - foo\n  - bar\n",
+        "alpha\n",
+    );
+    write_page(
+        &s,
+        "b.md",
+        "type: wiki\ntitle: Beta\ntags:\n  - bar\n",
+        "beta\n",
+    );
+    let (code, _, _) = run(&s, &["add", &root]);
     assert_eq!(code, 0);
 
     {
-        let (code,out,_) = run(&s, &["browse", "--json"]);
+        let (code, out, _) = run(&s, &["browse", "--json"]);
         assert_eq!(code, 0);
         assert_json(&out, "browse", true, false);
-        assert!(out.contains("\"id\"") && out.contains("\"tags\""), "browse must carry id+tags; got: {out}");
-        assert!(out.contains("Alpha") && out.contains("Beta"), "both pages present; got: {out}");
+        assert!(
+            out.contains("\"id\"") && out.contains("\"tags\""),
+            "browse must carry id+tags; got: {out}"
+        );
+        assert!(
+            out.contains("Alpha") && out.contains("Beta"),
+            "both pages present; got: {out}"
+        );
     }
     {
-        let (code,out,_) = run(&s, &["tag", "bar", "--json"]);
+        let (code, out, _) = run(&s, &["tag", "bar", "--json"]);
         assert_eq!(code, 0);
         assert_json(&out, "tag", true, false);
-        assert!(out.contains("Alpha") && out.contains("Beta"), "both tagged pages; got: {out}");
+        assert!(
+            out.contains("Alpha") && out.contains("Beta"),
+            "both tagged pages; got: {out}"
+        );
     }
     {
         // A tag no one uses — a clean empty array, not a human "no pages".
-        let (code,out,_) = run(&s, &["tag", "nobody", "--json"]);
+        let (code, out, _) = run(&s, &["tag", "nobody", "--json"]);
         assert_eq!(code, 0);
         let t = out.trim();
-        assert!(t == "[]" || t.starts_with("[") && t.ends_with("]"),
-            "empty tag --json must be a JSON array; got: {out}");
+        assert!(
+            t == "[]" || t.starts_with("[") && t.ends_with("]"),
+            "empty tag --json must be a JSON array; got: {out}"
+        );
     }
 }
 
@@ -207,39 +254,58 @@ fn tag_alias_json_roundtrip() {
     let s = Setup::new("alias");
     let root = s.root.to_string_lossy().into_owned();
     write_page(&s, "a.md", "type: note\ntitle: A\n", "x\n");
-    let (code,_,_) = run(&s, &["add", &root]);
+    let (code, _, _) = run(&s, &["add", &root]);
     assert_eq!(code, 0);
 
     // empty list
     {
-        let (code,out,_) = run(&s, &["tag-alias", "--list", "--json"]);
+        let (code, out, _) = run(&s, &["tag-alias", "--list", "--json"]);
         assert_eq!(code, 0);
         let t = out.trim();
-        assert!(t == "[]" || t.starts_with('[') && t.ends_with(']'),
-            "empty alias --list --json must be a JSON array; got: {out}");
+        assert!(
+            t == "[]" || t.starts_with('[') && t.ends_with(']'),
+            "empty alias --list --json must be a JSON array; got: {out}"
+        );
     }
     // add
     {
-        let (code,out,_) = run(&s, &["tag-alias", "--add", "newalias", "--canonical", "REALCANON", "--json"]);
+        let (code, out, _) = run(
+            &s,
+            &[
+                "tag-alias",
+                "--add",
+                "newalias",
+                "--canonical",
+                "REALCANON",
+                "--json",
+            ],
+        );
         assert_eq!(code, 0);
         assert_json(&out, "alias--add", false, true);
-        assert!(out.contains("\"alias\"") && out.contains("\"canonical\""),
-            "alias --add --json must carry both; got: {out}");
+        assert!(
+            out.contains("\"alias\"") && out.contains("\"canonical\""),
+            "alias --add --json must carry both; got: {out}"
+        );
     }
     // list now shows the row
     {
-        let (code,out,_) = run(&s, &["tag-alias", "--list", "--json"]);
+        let (code, out, _) = run(&s, &["tag-alias", "--list", "--json"]);
         assert_eq!(code, 0);
         assert_json(&out, "alias--list", true, false);
-        assert!(out.contains("\"newalias\"") && out.contains("\"REALCANON\""),
-            "alias --list --json must show the row; got: {out}");
+        assert!(
+            out.contains("\"newalias\"") && out.contains("\"REALCANON\""),
+            "alias --list --json must show the row; got: {out}"
+        );
     }
     // rm removes it
     {
-        let (code,out,_) = run(&s, &["tag-alias", "--rm", "newalias", "--json"]);
+        let (code, out, _) = run(&s, &["tag-alias", "--rm", "newalias", "--json"]);
         assert_eq!(code, 0);
         assert_json(&out, "alias--rm", false, true);
-        assert!(out.contains("\"removed\""), "alias --rm --json must carry a removed count; got: {out}");
+        assert!(
+            out.contains("\"removed\""),
+            "alias --rm --json must carry a removed count; got: {out}"
+        );
     }
 }
 
@@ -247,44 +313,75 @@ fn tag_alias_json_roundtrip() {
 fn resolve_info_links_json() {
     let s = Setup::new("rii");
     let root = s.root.to_string_lossy().into_owned();
-    write_page(&s, "alpha.md", "type: note\ntitle: Unique-Slug-A\n", "alpha\n");
-    write_page(&s, "beta.md",  "type: note\ntitle: Unique-Slug-B\n", "beta\n");
-    let (code,_,_) = run(&s, &["add", &root]);
+    write_page(
+        &s,
+        "alpha.md",
+        "type: note\ntitle: Unique-Slug-A\n",
+        "alpha\n",
+    );
+    write_page(
+        &s,
+        "beta.md",
+        "type: note\ntitle: Unique-Slug-B\n",
+        "beta\n",
+    );
+    let (code, _, _) = run(&s, &["add", &root]);
     assert_eq!(code, 0);
 
     // resolve -- unique
     {
-        let (code,out,_) = run(&s, &["resolve", "Unique-Slug-A", "--json"]);
+        let (code, out, _) = run(&s, &["resolve", "Unique-Slug-A", "--json"]);
         assert_eq!(code, 0);
         assert_json(&out, "resolve-unique", false, true);
-        assert!(out.contains("\"outcome\": \"unique\""), "unique outcome; got: {out}");
-        assert!(out.contains("\"id\"") && out.contains("\"abs_path\""), "id+abs_path in candidates; got: {out}");
+        assert!(
+            out.contains("\"outcome\": \"unique\""),
+            "unique outcome; got: {out}"
+        );
+        assert!(
+            out.contains("\"id\"") && out.contains("\"abs_path\""),
+            "id+abs_path in candidates; got: {out}"
+        );
     }
     // resolve -- empty
     {
-        let (code,out,_) = run(&s, &["resolve", "nobody-here", "--json"]);
+        let (code, out, _) = run(&s, &["resolve", "nobody-here", "--json"]);
         assert_eq!(code, 0);
         assert_json(&out, "resolve-empty", false, true);
-        assert!(out.contains("\"outcome\": \"empty\""), "empty outcome; got: {out}");
+        assert!(
+            out.contains("\"outcome\": \"empty\""),
+            "empty outcome; got: {out}"
+        );
     }
     // info
     let page = s.root.join("alpha.md");
     {
-        let (code,out,_) = run(&s, &["info", page.to_str().unwrap(), "--json"]);
+        let (code, out, _) = run(&s, &["info", page.to_str().unwrap(), "--json"]);
         assert_eq!(code, 0);
         assert_json(&out, "info", false, true);
-        for k in ["id","type","title","abs_path","rel_path","tags","links","out","in","mtime"] {
-            assert!(out.contains(&format!("\"{k}\"")), "info must carry {k}; got: {out}");
+        for k in [
+            "id", "type", "title", "abs_path", "rel_path", "tags", "links", "out", "in", "mtime",
+        ] {
+            assert!(
+                out.contains(&format!("\"{k}\"")),
+                "info must carry {k}; got: {out}"
+            );
         }
-        assert!(out.contains("Unique-Slug-A"), "info must carry the title; got: {out}");
+        assert!(
+            out.contains("Unique-Slug-A"),
+            "info must carry the title; got: {out}"
+        );
     }
     // links
     {
-        let (code,out,_) = run(&s, &["links", "note:Unique-Slug-A", "--json"]);
+        let (code, out, _) = run(&s, &["links", "note:Unique-Slug-A", "--json"]);
         assert_eq!(code, 0);
         assert_json(&out, "links", false, true);
-        assert!(out.contains("\"page\"") && out.contains("\"forward\"") && out.contains("\"backlinks\""),
-            "links --json must carry page/forward/backlinks; got: {out}");
+        assert!(
+            out.contains("\"page\"")
+                && out.contains("\"forward\"")
+                && out.contains("\"backlinks\""),
+            "links --json must carry page/forward/backlinks; got: {out}"
+        );
     }
 }
 
@@ -293,13 +390,27 @@ fn stats_json() {
     let s = Setup::new("stats");
     let root = s.root.to_string_lossy().into_owned();
     write_page(&s, "a.md", "type: note\ntitle: A\n", "x\n");
-    let (code,_,_) = run(&s, &["add", &root]);
+    let (code, _, _) = run(&s, &["add", &root]);
     assert_eq!(code, 0);
-    let (code,out,_) = run(&s, &["stats", "--json"]);
+    let (code, out, _) = run(&s, &["stats", "--json"]);
     assert_eq!(code, 0);
     assert_json(&out, "stats", false, true);
-    for k in ["roots","totals","pages","tags","links","tag_aliases","db","path","size_bytes","last_touch"] {
-        assert!(out.contains(&format!("\"{k}\"")), "stats must carry {k}; got: {out}");
+    for k in [
+        "roots",
+        "totals",
+        "pages",
+        "tags",
+        "links",
+        "tag_aliases",
+        "db",
+        "path",
+        "size_bytes",
+        "last_touch",
+    ] {
+        assert!(
+            out.contains(&format!("\"{k}\"")),
+            "stats must carry {k}; got: {out}"
+        );
     }
 }
 
@@ -309,18 +420,27 @@ fn cron_json_roundtrip() {
     // single JSON object with the fields a script needs.
     let s = Setup::new("cron");
     {
-        let (code,out,_) = run(&s, &["cron"]);
+        let (code, out, _) = run(&s, &["cron"]);
         assert_eq!(code, 0);
-        assert!(out.contains("crontab -e"), "cron (text form) must print the paste-ready block; got: {out}");
+        assert!(
+            out.contains("crontab -e"),
+            "cron (text form) must print the paste-ready block; got: {out}"
+        );
     }
     {
-        let (code,out,_) = run(&s, &["cron", "--json"]);
+        let (code, out, _) = run(&s, &["cron", "--json"]);
         assert_eq!(code, 0);
         assert_json(&out, "cron", false, true);
-        for k in ["command","db","line"] {
-            assert!(out.contains(&format!("\"{k}\"")), "cron --json must carry {k}; got: {out}");
+        for k in ["command", "db", "line"] {
+            assert!(
+                out.contains(&format!("\"{k}\"")),
+                "cron --json must carry {k}; got: {out}"
+            );
         }
-        assert!(out.contains("refresh"), "cron --json command must be the refresh subcommand; got: {out}");
+        assert!(
+            out.contains("refresh"),
+            "cron --json command must be the refresh subcommand; got: {out}"
+        );
     }
 }
 
@@ -335,35 +455,72 @@ fn section_op_json_roundtrip() {
     fs::write(&file, initial).unwrap();
 
     // append a child — non-interactive (no TTY, no --yes needed under --json)
-    let (code,out,_) = run(&s, &["section",
-        "--file", file.to_str().unwrap(),
-        "append", "Alpha",
-        "--text", "appended line",
-        "--json",
-    ]);
-    assert_eq!(code, 0, "section --json append must apply non-interactively");
+    let (code, out, _) = run(
+        &s,
+        &[
+            "section",
+            "--file",
+            file.to_str().unwrap(),
+            "append",
+            "Alpha",
+            "--text",
+            "appended line",
+            "--json",
+        ],
+    );
+    assert_eq!(
+        code, 0,
+        "section --json append must apply non-interactively"
+    );
     assert_json(&out, "section-append", false, true);
-    for k in ["file","changed","dry_run","applied","bytes_before","bytes_after","diff"] {
-        assert!(out.contains(&format!("\"{k}\"")), "section --json must carry {k}; got: {out}");
+    for k in [
+        "file",
+        "changed",
+        "dry_run",
+        "applied",
+        "bytes_before",
+        "bytes_after",
+        "diff",
+    ] {
+        assert!(
+            out.contains(&format!("\"{k}\"")),
+            "section --json must carry {k}; got: {out}"
+        );
     }
-    assert!(out.contains("\"applied\": true"), "append must report applied:true; got: {out}");
+    assert!(
+        out.contains("\"applied\": true"),
+        "append must report applied:true; got: {out}"
+    );
     // the diff on stderr (not stdout), the JSON on stdout.
     let content = fs::read_to_string(&file).unwrap();
-    assert!(content.contains("appended line"), "append must have written");
+    assert!(
+        content.contains("appended line"),
+        "append must have written"
+    );
 
     // dry-run — applied:false, file unchanged
     let before = fs::read_to_string(&file).unwrap();
     {
-        let (code,out,_) = run(&s, &["section",
-            "--file", file.to_str().unwrap(),
-            "append", "Beta",
-            "--text", "DRY",
-            "--dry-run",
-            "--json",
-        ]);
+        let (code, out, _) = run(
+            &s,
+            &[
+                "section",
+                "--file",
+                file.to_str().unwrap(),
+                "append",
+                "Beta",
+                "--text",
+                "DRY",
+                "--dry-run",
+                "--json",
+            ],
+        );
         assert_eq!(code, 0);
         assert_json(&out, "section-dryrun", false, true);
-        assert!(out.contains("\"applied\": false"), "dry-run must be applied:false; got: {out}");
+        assert!(
+            out.contains("\"applied\": false"),
+            "dry-run must be applied:false; got: {out}"
+        );
     }
     let after = fs::read_to_string(&file).unwrap();
     assert_eq!(before, after, "--dry-run --json must NOT write");
@@ -377,26 +534,45 @@ fn replace_op_json_roundtrip() {
     fs::write(&file, "findme findme findme").unwrap();
 
     // --count 1 --json
-    let (code,out,_) = run(&s, &["replace",
-        file.to_str().unwrap(),
-        "--find", "findme",
-        "--new", "Z",
-        "--count", "1",
-        "--json",
-    ]);
+    let (code, out, _) = run(
+        &s,
+        &[
+            "replace",
+            file.to_str().unwrap(),
+            "--find",
+            "findme",
+            "--new",
+            "Z",
+            "--count",
+            "1",
+            "--json",
+        ],
+    );
     assert_eq!(code, 0);
     assert_json(&out, "replace", false, true);
-    assert!(out.contains("\"applied\": true"), "replace must be applied; got: {out}");
+    assert!(
+        out.contains("\"applied\": true"),
+        "replace must be applied; got: {out}"
+    );
     let content = fs::read_to_string(&file).unwrap();
-    assert_eq!(content, "Z findme findme", "replace --count 1 must replace exactly one");
+    assert_eq!(
+        content, "Z findme findme",
+        "replace --count 1 must replace exactly one"
+    );
 
     // all remaining
-    let (code,out,_) = run(&s, &["replace",
-        file.to_str().unwrap(),
-        "--find", "findme",
-        "--new", "W",
-        "--json",
-    ]);
+    let (code, out, _) = run(
+        &s,
+        &[
+            "replace",
+            file.to_str().unwrap(),
+            "--find",
+            "findme",
+            "--new",
+            "W",
+            "--json",
+        ],
+    );
     assert_eq!(code, 0);
     assert_json(&out, "replace2", false, true);
     assert!(out.contains("\"applied\": true"));
@@ -414,11 +590,21 @@ fn section_edit_removed() {
     let file = s.root.join("doc.md");
     fs::create_dir_all(&s.root).unwrap();
     fs::write(&file, "# Sec\n\nx\n").unwrap();
-    let (code,_,err) = run(&s, &["section",
-        "--file", file.to_str().unwrap(),
-        "edit", "Sec", "--yes",
-    ]);
-    assert_ne!(code, 0, "`section edit` is not compiled in; clap should reject it");
+    let (code, _, err) = run(
+        &s,
+        &[
+            "section",
+            "--file",
+            file.to_str().unwrap(),
+            "edit",
+            "Sec",
+            "--yes",
+        ],
+    );
+    assert_ne!(
+        code, 0,
+        "`section edit` is not compiled in; clap should reject it"
+    );
     let _ = err; // clap names the unrecognised subcommand on stderr
 }
 
@@ -428,12 +614,19 @@ fn section_edit_removed() {
 fn search_json_still_works() {
     let s = Setup::new("search");
     let root = s.root.to_string_lossy().into_owned();
-    write_page(&s, "a.md", "type: note\ntitle: Unique-Slug\nsearch_terms:\n  - gatedword\n", "gatedword text\n");
-    let (code,_,_) = run(&s, &["add", &root]);
+    write_page(
+        &s,
+        "a.md",
+        "type: note\ntitle: Unique-Slug\nsearch_terms:\n  - gatedword\n",
+        "gatedword text\n",
+    );
+    let (code, _, _) = run(&s, &["add", &root]);
     assert_eq!(code, 0);
-    let (code,out,_) = run(&s, &["search", "gatedword", "--json"]);
+    let (code, out, _) = run(&s, &["search", "gatedword", "--json"]);
     assert_eq!(code, 0);
     assert_json(&out, "search", true, false);
-    assert!(out.contains("Unique-Slug") || out.contains("gatedword"),
-        "search --json must include the page; got: {out}");
+    assert!(
+        out.contains("Unique-Slug") || out.contains("gatedword"),
+        "search --json must include the page; got: {out}"
+    );
 }

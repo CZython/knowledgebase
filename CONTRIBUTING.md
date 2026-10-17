@@ -25,14 +25,19 @@ anything non-trivial — they are the source of truth for intent.
 
 Stage by stage, if you need them separately:
 
-```sh
-cargo build                          # both kb-user and kb-hardened
-cargo user                           # alias → cargo build -p kb-user
-cargo hardened                       # alias → cargo build -p kb-hardened
-cargo clippy --workspace --all-targets -- -D warnings
-cargo test --workspace               # 409 tests
-./verify.sh                          # Verus + z3 pass over kb-core/spec
-```
+ ```sh
+ cargo build                          # both kb-user and kb-hardened
+ cargo user                           # alias → cargo build -p kb-user
+ cargo hardened                       # alias → cargo build -p kb-hardened
+ cargo fmt --all                      # format (no --check; CI runs --check)
+ cargo clippy --workspace --all-targets -- -D warnings
+ cargo test --workspace               # 409 tests
+ ./verify.sh                          # Verus + z3 pass over kb-core/spec
+ ```
+ 
+ Format is part of the gate — CI fails on `cargo fmt --check`. Run
+ `cargo fmt --all` before committing; it reorders `use` blocks, wraps long
+ `vec![…]` literals, and normalises whitespace.
 
 ### Feature flags
 

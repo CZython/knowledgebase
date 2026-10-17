@@ -74,8 +74,8 @@ pub struct Link {
 /// A known file extension that makes a bare token "look like a path" (the
 /// path-ref heuristic). Kept small and deliberate.
 const PATH_EXTS: &[&str] = &[
-    "md", "mdx", "markdown", "txt", "pdf", "epub", "csv", "json", "yaml", "yml", "toml",
-    "rs", "py", "js", "ts", "go", "c", "h", "cpp", "hpp", "sql", "sh", "html", "css",
+    "md", "mdx", "markdown", "txt", "pdf", "epub", "csv", "json", "yaml", "yml", "toml", "rs",
+    "py", "js", "ts", "go", "c", "h", "cpp", "hpp", "sql", "sh", "html", "css",
 ];
 
 /// True if `token` looks like a filesystem path: contains a `/`, or ends
@@ -136,7 +136,9 @@ pub fn extract_links(body: &str) -> Vec<Link> {
             // found `[[` at i; scan for the closing `]]` (no newline inside)
             i += 2;
             let start = i;
-            while i < bytes.len() && !(bytes[i] == b']' && i + 1 < bytes.len() && bytes[i + 1] == b']') {
+            while i < bytes.len()
+                && !(bytes[i] == b']' && i + 1 < bytes.len() && bytes[i + 1] == b']')
+            {
                 if bytes[i] == b'\n' {
                     break; // wikilink does not span a newline
                 }
@@ -145,7 +147,10 @@ pub fn extract_links(body: &str) -> Vec<Link> {
             if i < bytes.len() && bytes[i] == b']' && i + 1 < bytes.len() && bytes[i + 1] == b']' {
                 let inner = body[start..i].trim().to_string();
                 if !inner.is_empty() {
-                    out.push(Link { target: inner, style: LinkStyle::Wikilink });
+                    out.push(Link {
+                        target: inner,
+                        style: LinkStyle::Wikilink,
+                    });
                 }
                 i += 2; // skip `]]`
             } else {
@@ -162,7 +167,10 @@ pub fn extract_links(body: &str) -> Vec<Link> {
             if token_start < i {
                 let token = &body[token_start..i];
                 if let Some(style) = classify_token(token) {
-                    out.push(Link { target: token.to_string(), style });
+                    out.push(Link {
+                        target: token.to_string(),
+                        style,
+                    });
                 }
             }
             // advance past trailing whitespace so we don't loop forever
@@ -252,7 +260,13 @@ mod tests {
     fn wikilink_bare_slug() {
         let links = extract_links("> tracked by the [[LLM]] label");
         assert_eq!(links.len(), 1);
-        assert_eq!(links[0], Link { target: "LLM".to_string(), style: LinkStyle::Wikilink });
+        assert_eq!(
+            links[0],
+            Link {
+                target: "LLM".to_string(),
+                style: LinkStyle::Wikilink
+            }
+        );
     }
 
     #[test]
@@ -280,7 +294,13 @@ mod tests {
         // (the target is the whole inner string), not a relative path.
         let links = extract_links("refer to [[a/b]] here");
         assert_eq!(links.len(), 1);
-        assert_eq!(links[0], Link { target: "a/b".to_string(), style: LinkStyle::Wikilink });
+        assert_eq!(
+            links[0],
+            Link {
+                target: "a/b".to_string(),
+                style: LinkStyle::Wikilink
+            }
+        );
     }
 
     #[test]
@@ -297,14 +317,20 @@ mod tests {
     #[test]
     fn bare_words_are_not_paths() {
         let links = extract_links("token bucket vs sliding window");
-        assert!(links.is_empty(), "prose words must not be extracted as links");
+        assert!(
+            links.is_empty(),
+            "prose words must not be extracted as links"
+        );
     }
 
     // ---- dedupe (no duplicate (target,style) edges) ------------------------
 
     #[test]
     fn dedup_collapses_repeated_edges() {
-        let mk = |t: &str, s: LinkStyle| Link { target: t.to_string(), style: s };
+        let mk = |t: &str, s: LinkStyle| Link {
+            target: t.to_string(),
+            style: s,
+        };
         let links = vec![
             mk("LLM", LinkStyle::Wikilink),
             mk("LLM", LinkStyle::Wikilink),
@@ -323,8 +349,14 @@ mod tests {
     #[test]
     fn dedup_is_idempotent() {
         let links = vec![
-            Link { target: "x.pdf".into(), style: LinkStyle::Relative },
-            Link { target: "x.pdf".into(), style: LinkStyle::Relative },
+            Link {
+                target: "x.pdf".into(),
+                style: LinkStyle::Relative,
+            },
+            Link {
+                target: "x.pdf".into(),
+                style: LinkStyle::Relative,
+            },
         ];
         let once = dedup(links);
         let twice = dedup(once.clone());

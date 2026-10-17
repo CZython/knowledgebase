@@ -47,16 +47,26 @@ pub enum SectionPlacement {
 pub enum SectionError {
     EmptyRef,
     /// A dotted number / title-path was supplied but matches no section.
-    NoSection { ref_: String },
+    NoSection {
+        ref_: String,
+    },
     /// Two or more sections match — list them so the caller can disambiguate.
-    Ambiguous { ref_: String, candidates: Vec<String> },
+    Ambiguous {
+        ref_: String,
+        candidates: Vec<String>,
+    },
     /// `replace_in` was called with a scope but the literal was not found
     /// (mirrors `mdtool.py`'s "nothing to replace").
-    NotFound { literal: String, scope: String },
+    NotFound {
+        literal: String,
+        scope: String,
+    },
     /// SECURITY_REPORT 3.13: a `Child` insert under a level-6 target would
     /// need level 7, which isn't a valid heading level — the old `base.min(6)`
     /// silently clamped it to a *sibling* of the parent instead of erroring.
-    ChildOfLeaf { ref_: String },
+    ChildOfLeaf {
+        ref_: String,
+    },
 }
 
 impl std::fmt::Display for SectionError {
@@ -65,11 +75,7 @@ impl std::fmt::Display for SectionError {
             SectionError::EmptyRef => write!(f, "empty section reference"),
             SectionError::NoSection { ref_ } => write!(f, "no section matching {ref_:?}"),
             SectionError::Ambiguous { ref_, candidates } => {
-                write!(
-                    f,
-                    "ambiguous reference {ref_:?}: {}",
-                    candidates.join(", ")
-                )
+                write!(f, "ambiguous reference {ref_:?}: {}", candidates.join(", "))
             }
             SectionError::NotFound { literal, scope } => {
                 write!(f, "nothing to replace: {literal:?} not found ({scope})")
@@ -258,11 +264,14 @@ impl Doc {
             }
         };
         let chunk = &self.data[lo..hi];
-        let (new_chunk, n) = replace_substring(chunk, find.as_bytes(), replacement.as_bytes(), count);
+        let (new_chunk, n) =
+            replace_substring(chunk, find.as_bytes(), replacement.as_bytes(), count);
         if n == 0 {
             return Err(SectionError::NotFound {
                 literal: find.to_string(),
-                scope: scope.map(|s| s.to_string()).unwrap_or_else(|| "whole file".to_string()),
+                scope: scope
+                    .map(|s| s.to_string())
+                    .unwrap_or_else(|| "whole file".to_string()),
             });
         }
         Ok((splice(&self.data, lo, hi, &new_chunk), n))
@@ -272,7 +281,12 @@ impl Doc {
     /// (heading + body) is replaced; with `keep_heading` the original heading
     /// line is retained and only the body replaced (a blank line is inserted
     /// after the heading). Returns the new full buffer.
-    pub fn set_section(&self, ref_: &str, text: &str, keep_heading: bool) -> Result<Vec<u8>, SectionError> {
+    pub fn set_section(
+        &self,
+        ref_: &str,
+        text: &str,
+        keep_heading: bool,
+    ) -> Result<Vec<u8>, SectionError> {
         let i = self.resolve(ref_)?;
         let sec = &self.sections[i];
         let mut body = ensure_trailing_newline(text.as_bytes().to_vec());
@@ -476,9 +490,9 @@ impl Doc {
             let expected_level = (k as u8) + 2;
             let want = part.to_lowercase();
             cands.retain(|&i| {
-                    self.sections[i].level == expected_level
-                        && self.sections[i].title.to_lowercase() == want
-                });
+                self.sections[i].level == expected_level
+                    && self.sections[i].title.to_lowercase() == want
+            });
             if cands.is_empty() {
                 break;
             }
@@ -538,7 +552,10 @@ pub fn splice(data: &[u8], lo: usize, hi: usize, new: &[u8]) -> Vec<u8> {
     // SECURITY_REPORT 3.12: `saturating_sub` so a violated invariant (e.g.
     // `hi - lo > data.len() + new.len()`) can never underflow the capacity
     // to a usize near 0 in release, where `debug_assert!` is gone.
-    let cap = data.len().saturating_add(new.len()).saturating_sub(hi.saturating_sub(lo));
+    let cap = data
+        .len()
+        .saturating_add(new.len())
+        .saturating_sub(hi.saturating_sub(lo));
     let mut out = Vec::with_capacity(cap);
     out.extend_from_slice(&data[..lo]);
     out.extend_from_slice(new);
@@ -549,7 +566,12 @@ pub fn splice(data: &[u8], lo: usize, hi: usize, new: &[u8]) -> Vec<u8> {
 /// Replace non-overlapping occurrences of `find` with `replacement` inside
 /// `data`, left-to-right. `count == 0` means "replace all". Returns
 /// `(new_data, n)`. Pure (does not mutate `data`).
-fn replace_substring(data: &[u8], find: &[u8], replacement: &[u8], count: usize) -> (Vec<u8>, usize) {
+fn replace_substring(
+    data: &[u8],
+    find: &[u8],
+    replacement: &[u8],
+    count: usize,
+) -> (Vec<u8>, usize) {
     if find.is_empty() {
         return (data.to_vec(), 0);
     }
@@ -596,7 +618,7 @@ fn is_dotted(ref_: &str) -> bool {
             last_was_digit = true;
         } else if c == '.' && last_was_digit {
             last_was_digit = false; // a dot is OK only after a digit, and
-            // must be followed by another digit (loop continues)
+                                    // must be followed by another digit (loop continues)
         } else {
             return false;
         }
@@ -743,7 +765,10 @@ mod tests {
         assert_eq!(heading_of(b"#"), Some((1, String::new())));
         assert_eq!(heading_of(b"#   "), Some((1, String::new())));
         // leading spaces (<=3)
-        assert_eq!(heading_of(b"  # Indented"), Some((1, "Indented".to_string())));
+        assert_eq!(
+            heading_of(b"  # Indented"),
+            Some((1, "Indented".to_string()))
+        );
         // tab separator
         assert_eq!(heading_of(b"#\tTabbed"), Some((1, "Tabbed".to_string())));
     }
@@ -838,9 +863,7 @@ mod tests {
 
     #[test]
     fn resolve_dotted_numbers() {
-        let d = Doc::new(
-            b"# Root\n\n## A\n\n## B\n\n### B1\n\n# Sec2\n".to_vec(),
-        );
+        let d = Doc::new(b"# Root\n\n## A\n\n## B\n\n### B1\n\n# Sec2\n".to_vec());
         assert_eq!(d.resolve("1"), Ok(0));
         assert_eq!(d.resolve("1.1"), Ok(1));
         assert_eq!(d.resolve("1.2"), Ok(2));
@@ -875,15 +898,16 @@ mod tests {
 
     #[test]
     fn resolve_empty_and_ambiguity() {
-        let d = Doc::new(
-            b"# Root\n\n## Alpha\none\n\n## Alpha\ntwo\n".to_vec(),
-        );
+        let d = Doc::new(b"# Root\n\n## Alpha\none\n\n## Alpha\ntwo\n".to_vec());
         assert!(matches!(d.resolve(""), Err(SectionError::EmptyRef)));
         assert!(matches!(d.resolve("   "), Err(SectionError::EmptyRef)));
         // two sections both titled "Alpha" -> substring stage finds 2 -> ambiguous
         match d.resolve("Alpha") {
             Err(SectionError::Ambiguous { candidates, .. }) => {
-                assert_eq!(candidates, vec!["1.1 Alpha".to_string(), "1.2 Alpha".to_string()]);
+                assert_eq!(
+                    candidates,
+                    vec!["1.1 Alpha".to_string(), "1.2 Alpha".to_string()]
+                );
             }
             other => panic!("expected Ambiguous, got {other:?}"),
         }
@@ -891,10 +915,7 @@ mod tests {
 
     #[test]
     fn own_and_full_bytes_differ_when_subsections_exist() {
-        let d = Doc::new(
-            b"# Root\n\n## B\nown body\n\n### B1\nsub body\n"
-                .to_vec(),
-        );
+        let d = Doc::new(b"# Root\n\n## B\nown body\n\n### B1\nsub body\n".to_vec());
         let own = d.own_bytes("1.1").unwrap();
         let full = d.full_bytes("1.1").unwrap();
         // own body excludes B1; full span includes B1 -> full is strictly longer
@@ -935,7 +956,7 @@ mod tests {
         // fires first (correctly).
         let data = b"hello world"; // len 11
         let new = splice(data, 8, 3, b"X"); // lo=8 > hi=3, both in-bounds
-        // out = data[..8] ++ "X" ++ data[3..]
+                                            // out = data[..8] ++ "X" ++ data[3..]
         let expected = format!(
             "{}X{}",
             String::from_utf8(data[..8].to_vec()).unwrap(),
@@ -951,9 +972,7 @@ mod tests {
         // SECURITY_REPORT 3.13: a `Child` insert under a level-6 target would
         // need level 7. The old `base.min(6)` clamped it back to 6 and silently
         // produced a *sibling* of the parent. Now it is a proper error.
-        let d = Doc::new(
-            b"# A\n\n## B\n\n### C\n\n#### D\n\n##### E\n\n###### F\nbody\n".to_vec(),
-        );
+        let d = Doc::new(b"# A\n\n## B\n\n### C\n\n#### D\n\n##### E\n\n###### F\nbody\n".to_vec());
         let f = d.resolve("1.1.1.1.1.1").expect("level-6 section resolves");
         assert_eq!(d.sections[f].level, 6, "target is level 6");
         match d.insert_section(
@@ -996,7 +1015,7 @@ mod tests {
         let s = String::from_utf8(new).unwrap();
         assert!(s.contains("keep new"));
         assert!(s.contains("old text")); // section B is not 1.2 (B is 1.2) — wait:
-        // 1.1=A, 1.2=B. So scoped to B: B's "old"->"new", A's "old text" untouched.
+                                         // 1.1=A, 1.2=B. So scoped to B: B's "old"->"new", A's "old text" untouched.
     }
 
     #[test]
@@ -1028,7 +1047,9 @@ mod tests {
     #[test]
     fn set_section_default_replaces_whole_section() {
         let d = Doc::new(b"# Root\nold heading body\n\n## A\nold A body\n".to_vec());
-        let new = d.set_section("1.1", "## A\nbrand new A body\n", false).unwrap();
+        let new = d
+            .set_section("1.1", "## A\nbrand new A body\n", false)
+            .unwrap();
         let s = String::from_utf8(new).unwrap();
         assert!(s.contains("brand new A body"));
         assert!(!s.contains("old A body"));
@@ -1075,13 +1096,7 @@ mod tests {
     fn insert_section_end() {
         let d = Doc::new(b"# Root\nbody\n".to_vec());
         let (ins, chunk) = d
-            .insert_section(
-                SectionPlacement::End,
-                None,
-                "new body text",
-                "New",
-                Some(2),
-            )
+            .insert_section(SectionPlacement::End, None, "new body text", "New", Some(2))
             .unwrap();
         assert_eq!(ins, d.data.len());
         let s = String::from_utf8(chunk.to_vec()).unwrap();
@@ -1093,7 +1108,13 @@ mod tests {
     fn insert_section_child_inferred_level() {
         let d = Doc::new(b"# Root\n\n## A\nbody A\n".to_vec());
         let (_ins, chunk) = d
-            .insert_section(SectionPlacement::Child, Some("1.1"), "child body", "Child", None)
+            .insert_section(
+                SectionPlacement::Child,
+                Some("1.1"),
+                "child body",
+                "Child",
+                None,
+            )
             .unwrap();
         let s = String::from_utf8(chunk.to_vec()).unwrap();
         // prefix is a blank-line separator (the target ends with a single
@@ -1106,13 +1127,7 @@ mod tests {
     fn insert_section_before_uses_target_start() {
         let d = Doc::new(b"# Root\n\n## A\nA body\n".to_vec());
         let (ins, _chunk) = d
-            .insert_section(
-                SectionPlacement::Before,
-                Some("1.1"),
-                "x",
-                "Pre",
-                None,
-            )
+            .insert_section(SectionPlacement::Before, Some("1.1"), "x", "Pre", None)
             .unwrap();
         // insertion is exactly at `A`'s start (the A heading byte)
         assert_eq!(ins, d.sections[1].start);
@@ -1121,8 +1136,7 @@ mod tests {
     #[test]
     fn doc_new_fence_close_needs_same_char_and_len() {
         // open with ~~~~, close must be ~~~ or longer, same char
-        let buf = b"# Root\nbefore\n\n~~~~\n# fenced H1 inside\n~~~~\n\n## After\nbody\n"
-            .to_vec();
+        let buf = b"# Root\nbefore\n\n~~~~\n# fenced H1 inside\n~~~~\n\n## After\nbody\n".to_vec();
         let d = Doc::new(buf);
         let titles: Vec<&str> = d.sections.iter().map(|s| s.title.as_str()).collect();
         assert_eq!(titles, vec!["Root", "After"]);

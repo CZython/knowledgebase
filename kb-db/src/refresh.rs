@@ -22,7 +22,7 @@
 use crate::index::{self, IndexOutcome};
 use crate::walk_snapshot;
 use crate::Db;
-use rusqlite::{params, Result, OptionalExtension};
+use rusqlite::{params, OptionalExtension, Result};
 use std::fs;
 use std::path::Path;
 
@@ -86,7 +86,12 @@ fn load_roots(db: &Db) -> Result<Vec<RootRow>> {
                 path: r.get::<_, String>(0)?,
                 extra_exts: r
                     .get::<_, Option<String>>(1)?
-                    .map(|s| s.lines().map(|l| l.to_string()).filter(|l| !l.is_empty()).collect())
+                    .map(|s| {
+                        s.lines()
+                            .map(|l| l.to_string())
+                            .filter(|l| !l.is_empty())
+                            .collect()
+                    })
                     .unwrap_or_default(),
                 include_hidden: r.get::<_, i32>(2)? != 0,
                 seq: r.get::<_, i64>(3)?,
@@ -105,12 +110,7 @@ fn load_roots(db: &Db) -> Result<Vec<RootRow>> {
 /// files are *absent* from the candidate set. Callers must not GC against that
 /// set (a page under a failed root would look orphaned even though the file is
 /// still on disk) — that is the SECURITY_REPORT 3.3 data-loss window.
-fn candidate_files(
-    roots: &[RootRow],
-) -> (
-    std::collections::BTreeSet<String>,
-    Vec<String>,
-) {
+fn candidate_files(roots: &[RootRow]) -> (std::collections::BTreeSet<String>, Vec<String>) {
     let mut out: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
     let mut failed: Vec<String> = Vec::new();
     for r in roots {
@@ -178,10 +178,8 @@ pub fn refresh(db: &Db) -> Result<RefreshSummary> {
 
     let (candidates, failed_roots) = candidate_files(&roots);
     let mut outcome = IndexOutcome::new();
-    let roots_for_pick: Vec<(String, i64)> = roots
-        .iter()
-        .map(|r| (r.path.clone(), r.seq))
-        .collect();
+    let roots_for_pick: Vec<(String, i64)> =
+        roots.iter().map(|r| (r.path.clone(), r.seq)).collect();
     let kept: Vec<String> = candidates.iter().cloned().collect();
     for abs in &candidates {
         let path = Path::new(abs);
@@ -249,7 +247,7 @@ fn gc_orphaned_pages(db: &Db, keep: &[String]) -> Result<usize> {
         let mut stmt = conn.prepare("SELECT abs_path FROM pages")?;
         let it = stmt.query_map([], |r| r.get::<_, String>(0))?;
         let collected: Result<Vec<String>> = it.collect();
-        
+
         collected?
     };
 
@@ -307,11 +305,7 @@ pub fn full_rebuild(db: &Db) -> Result<RefreshSummary> {
 /// partial-wipe + partial-re-index is surfaced as a non-zero exit rather than
 /// a silent thinner corpus). All per-page errors are collected and reported
 /// together.
-fn candidates_to_records(
-    db: &Db,
-    roots: &[RootRow],
-    summ: &mut RefreshSummary,
-) -> Result<()> {
+fn candidates_to_records(db: &Db, roots: &[RootRow], summ: &mut RefreshSummary) -> Result<()> {
     let (candidates, failed_roots) = candidate_files(roots);
     if !failed_roots.is_empty() {
         // A root we could not walk contributes no candidates; in a full
@@ -324,10 +318,8 @@ fn candidates_to_records(
         );
     }
     let mut outcome = IndexOutcome::new();
-    let roots_for_pick: Vec<(String, i64)> = roots
-        .iter()
-        .map(|r| (r.path.clone(), r.seq))
-        .collect();
+    let roots_for_pick: Vec<(String, i64)> =
+        roots.iter().map(|r| (r.path.clone(), r.seq)).collect();
     let mut errors: Vec<String> = Vec::new();
     for abs in candidates {
         let path = Path::new(&abs);
@@ -426,8 +418,11 @@ mod tests {
         assert_eq!(s2.indexed, 0, "unchanged content must be skipped entirely");
 
         // change the *content* → re-index
-        fs::write(&p, "---\ntype: note\ntitle: N v2\ndescription: updated\n---\nbody v2\n")
-            .unwrap();
+        fs::write(
+            &p,
+            "---\ntype: note\ntitle: N v2\ndescription: updated\n---\nbody v2\n",
+        )
+        .unwrap();
         let s3 = refresh(&db).unwrap();
         assert_eq!(s3.indexed, 1, "changed content must be re-indexed");
         let _ = fs::remove_dir_all(&dir);
@@ -470,18 +465,30 @@ mod tests {
         let root_b = base.join("rootB");
         fs::create_dir_all(&root_a).unwrap();
         fs::create_dir_all(&root_b).unwrap();
-        fs::write(root_a.join("a.md"), "---\ntype: note\ntitle: A\n---\nbody a\n").unwrap();
-        fs::write(root_b.join("b.md"), "---\ntype: note\ntitle: B\n---\nbody b\n").unwrap();
+        fs::write(
+            root_a.join("a.md"),
+            "---\ntype: note\ntitle: A\n---\nbody a\n",
+        )
+        .unwrap();
+        fs::write(
+            root_b.join("b.md"),
+            "---\ntype: note\ntitle: B\n---\nbody b\n",
+        )
+        .unwrap();
 
         let db = fresh_db();
         db.add_root(
             &fs::canonicalize(&root_a).unwrap().to_string_lossy(),
-            None, false,
-        ).unwrap();
+            None,
+            false,
+        )
+        .unwrap();
         db.add_root(
             &fs::canonicalize(&root_b).unwrap().to_string_lossy(),
-            None, false,
-        ).unwrap();
+            None,
+            false,
+        )
+        .unwrap();
 
         let s1 = refresh(&db).unwrap();
         assert_eq!(s1.indexed, 2, "both pages indexed");
@@ -494,26 +501,33 @@ mod tests {
         fs::rename(&root_b, &root_b_renamed).unwrap();
 
         let s2 = refresh(&db).unwrap();
-        assert!(s2.gc_skipped, "GC must be skipped when a root failed to walk");
-        assert_eq!(s2.gc, 0, "no pages GC'd against an incomplete candidate set");
+        assert!(
+            s2.gc_skipped,
+            "GC must be skipped when a root failed to walk"
+        );
+        assert_eq!(
+            s2.gc, 0,
+            "no pages GC'd against an incomplete candidate set"
+        );
 
         // Both pages survive (a.md under the clean root, b.md under the failed
         // root). b.md's file is still on disk (now at rootB.away), so it must
         // NOT have been deleted from the index.
-        let b_present: i64 = db.conn
-            .query_row(
-                "SELECT COUNT(*) FROM pages WHERE title = 'B'",
-                [],
-                |r| r.get(0),
-            )
+        let b_present: i64 = db
+            .conn
+            .query_row("SELECT COUNT(*) FROM pages WHERE title = 'B'", [], |r| {
+                r.get(0)
+            })
             .unwrap();
-        assert_eq!(b_present, 1, "the failed root's page must survive a skipped GC");
-        let a_present: i64 = db.conn
-            .query_row(
-                "SELECT COUNT(*) FROM pages WHERE title = 'A'",
-                [],
-                |r| r.get(0),
-            )
+        assert_eq!(
+            b_present, 1,
+            "the failed root's page must survive a skipped GC"
+        );
+        let a_present: i64 = db
+            .conn
+            .query_row("SELECT COUNT(*) FROM pages WHERE title = 'A'", [], |r| {
+                r.get(0)
+            })
             .unwrap();
         assert_eq!(a_present, 1);
 
@@ -530,20 +544,16 @@ mod tests {
         fs::create_dir_all(&dir).unwrap();
         let ok_file = dir.join("ok.md");
         let bad_file = dir.join("bad.md");
-        fs::write(
-            &ok_file,
-            "---\ntype: note\ntitle: OK\n---\nbody ok\n",
-        ).unwrap();
-        fs::write(
-            &bad_file,
-            "---\ntype: note\ntitle: BAD\n---\nbody bad\n",
-        ).unwrap();
+        fs::write(&ok_file, "---\ntype: note\ntitle: OK\n---\nbody ok\n").unwrap();
+        fs::write(&bad_file, "---\ntype: note\ntitle: BAD\n---\nbody bad\n").unwrap();
 
         let db = fresh_db();
         db.add_root(
             &fs::canonicalize(&dir).unwrap().to_string_lossy(),
-            None, false,
-        ).unwrap();
+            None,
+            false,
+        )
+        .unwrap();
 
         // Make bad_file unreadable (deterministic upsert failure).
         #[cfg(unix)]
@@ -585,18 +595,30 @@ mod tests {
         let root_b = base.join("rootB");
         fs::create_dir_all(&root_a).unwrap();
         fs::create_dir_all(&root_b).unwrap();
-        fs::write(root_a.join("a.md"), "---\ntype: note\ntitle: A\n---\nbody a\n").unwrap();
-        fs::write(root_b.join("b.md"), "---\ntype: note\ntitle: B\n---\nbody b\n").unwrap();
+        fs::write(
+            root_a.join("a.md"),
+            "---\ntype: note\ntitle: A\n---\nbody a\n",
+        )
+        .unwrap();
+        fs::write(
+            root_b.join("b.md"),
+            "---\ntype: note\ntitle: B\n---\nbody b\n",
+        )
+        .unwrap();
 
         let db = fresh_db();
         db.add_root(
             &fs::canonicalize(&root_a).unwrap().to_string_lossy(),
-            None, false,
-        ).unwrap();
+            None,
+            false,
+        )
+        .unwrap();
         db.add_root(
             &fs::canonicalize(&root_b).unwrap().to_string_lossy(),
-            None, false,
-        ).unwrap();
+            None,
+            false,
+        )
+        .unwrap();
 
         let s1 = full_rebuild(&db).unwrap();
         assert_eq!(s1.indexed, 2, "both pages indexed on a clean rebuild");
@@ -608,17 +630,22 @@ mod tests {
         let s2 = full_rebuild(&db).unwrap();
         // The surviving root re-indexed exactly one page…
         assert_eq!(s2.indexed, 1, "surviving root re-indexed");
-        let a_present: i64 = db.conn
-            .query_row("SELECT COUNT(*) FROM pages WHERE title = 'A'", [], |r| r.get(0))
+        let a_present: i64 = db
+            .conn
+            .query_row("SELECT COUNT(*) FROM pages WHERE title = 'A'", [], |r| {
+                r.get(0)
+            })
             .unwrap();
         assert_eq!(a_present, 1, "surviving root's page present");
         // …while the failed root's page was wiped and not re-indexed.
-        let b_present: i64 = db.conn
-            .query_row("SELECT COUNT(*) FROM pages WHERE title = 'B'", [], |r| r.get(0))
+        let b_present: i64 = db
+            .conn
+            .query_row("SELECT COUNT(*) FROM pages WHERE title = 'B'", [], |r| {
+                r.get(0)
+            })
             .unwrap();
         assert_eq!(
-            b_present,
-            0,
+            b_present, 0,
             "full_rebuild wipes first, so the failed root's page is absent (partial rebuild)"
         );
 

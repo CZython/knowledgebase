@@ -191,13 +191,9 @@ pub fn build_page(
     };
     let h1 = identity::find_h1(&fm.body);
     let filestem = identity::filename_minus_extension(abs_path.to_string_lossy().as_ref());
-    let slug = identity::resolve_slug(
-        fm.title.as_deref(),
-        h1,
-        filestem.as_deref(),
-    )
-    .map(|s| s.to_string())
-    .ok_or(IndexError::MissingSlug)?;
+    let slug = identity::resolve_slug(fm.title.as_deref(), h1, filestem.as_deref())
+        .map(|s| s.to_string())
+        .ok_or(IndexError::MissingSlug)?;
     let page_type = page_type_str(&kind).to_string();
     let id = identity::display_id(kind.clone(), &slug);
 
@@ -229,8 +225,10 @@ pub fn build_page(
     // DB's PK contract); we dedupe here so `upsert_page`'s
     // `INSERT ... ON CONFLICT` never fights a duplicate PK.
     let raw_links = links::extract_links(&fm.body);
-    let link_rows: Vec<(String, LinkStyle)> =
-        links::dedup(raw_links).into_iter().map(|l: Link| (l.target, l.style)).collect();
+    let link_rows: Vec<(String, LinkStyle)> = links::dedup(raw_links)
+        .into_iter()
+        .map(|l: Link| (l.target, l.style))
+        .collect();
 
     // fs metadata (mtime_ns / content_hash). `std::fs` here, not
     // `fs::symlink_metadata` — the file itself is already loaded above so
@@ -238,7 +236,9 @@ pub fn build_page(
     // already have followed it; the walker classifies symlinks as
     // non-indexable via `NodeKind::Symlink`, so we only get here for real
     // files).
-    let meta = abs_path.metadata().map_err(|e| IndexError::Read(e.to_string()))?;
+    let meta = abs_path
+        .metadata()
+        .map_err(|e| IndexError::Read(e.to_string()))?;
     let mtime_ns = meta
         .modified()
         .ok()
@@ -289,7 +289,10 @@ fn kb_core_search_terms_unquoted(terms: &[String]) -> Vec<String> {
                 .strip_prefix('"')
                 .or_else(|| b.strip_prefix('\''))
                 .unwrap_or(b);
-            let r = r.strip_suffix('"').or_else(|| r.strip_suffix('\'')).unwrap_or(r);
+            let r = r
+                .strip_suffix('"')
+                .or_else(|| r.strip_suffix('\''))
+                .unwrap_or(r);
             r.trim().to_string()
         })
         .collect()
@@ -326,7 +329,9 @@ impl std::fmt::Display for IndexError {
                     write!(f, "no type: in frontmatter")
                 }
             }
-            IndexError::MissingSlug => write!(f, "no resolvable slug (title/H1/filename all empty)"),
+            IndexError::MissingSlug => {
+                write!(f, "no resolvable slug (title/H1/filename all empty)")
+            }
             IndexError::Read(e) => write!(f, "read failed: {e}"),
         }
     }
@@ -412,21 +417,25 @@ pub fn upsert_page(db: &Db, rec: &PageRecord) -> Result<usize> {
     )?;
 
     // 5. Gate rows.
-    let mut ins_gate = tx.prepare_cached("INSERT OR IGNORE INTO page_gates (abs_path, term) VALUES (?1, ?2)")?;
+    let mut ins_gate =
+        tx.prepare_cached("INSERT OR IGNORE INTO page_gates (abs_path, term) VALUES (?1, ?2)")?;
     for t in &rec.gate_terms {
         ins_gate.execute(params![rec.abs_path, t])?;
     }
     drop(ins_gate);
 
     // 6. Tag rows.
-    let mut ins_tag = tx.prepare_cached("INSERT OR IGNORE INTO page_tags (abs_path, tag) VALUES (?1, ?2)")?;
+    let mut ins_tag =
+        tx.prepare_cached("INSERT OR IGNORE INTO page_tags (abs_path, tag) VALUES (?1, ?2)")?;
     for t in &rec.tag_rows {
         ins_tag.execute(params![rec.abs_path, t])?;
     }
     drop(ins_tag);
 
     // 7. Link rows.
-    let mut ins_link = tx.prepare_cached("INSERT OR IGNORE INTO links (from_path, to_path, style) VALUES (?1, ?2, ?3)")?;
+    let mut ins_link = tx.prepare_cached(
+        "INSERT OR IGNORE INTO links (from_path, to_path, style) VALUES (?1, ?2, ?3)",
+    )?;
     for (target, style) in &rec.link_rows {
         ins_link.execute(params![rec.abs_path, target, style.as_str()])?;
     }
@@ -440,9 +449,18 @@ pub fn upsert_page(db: &Db, rec: &PageRecord) -> Result<usize> {
 /// refresh GC when a file is no longer under any registered root.
 pub fn delete_page(db: &Db, abs_path: &str) -> Result<usize> {
     let tx = db.conn.unchecked_transaction()?;
-    tx.execute("DELETE FROM page_gates WHERE abs_path = ?1", params![abs_path])?;
-    tx.execute("DELETE FROM page_tags  WHERE abs_path = ?1", params![abs_path])?;
-    tx.execute("DELETE FROM links     WHERE from_path = ?1", params![abs_path])?;
+    tx.execute(
+        "DELETE FROM page_gates WHERE abs_path = ?1",
+        params![abs_path],
+    )?;
+    tx.execute(
+        "DELETE FROM page_tags  WHERE abs_path = ?1",
+        params![abs_path],
+    )?;
+    tx.execute(
+        "DELETE FROM links     WHERE from_path = ?1",
+        params![abs_path],
+    )?;
     let n = tx.execute("DELETE FROM pages WHERE abs_path = ?1", params![abs_path])?;
     tx.commit()?;
     Ok(n)
@@ -482,12 +500,10 @@ pub fn upsert_or_skip(
             out.skipped_missing_slug += 1;
             Ok(())
         }
-        Err(IndexError::Read(msg)) => {
-            Err(rusqlite::Error::SqliteFailure(
-                rusqlite::ffi::Error::new(-1),
-                Some(format!("index: {msg}")),
-            ))
-        }
+        Err(IndexError::Read(msg)) => Err(rusqlite::Error::SqliteFailure(
+            rusqlite::ffi::Error::new(-1),
+            Some(format!("index: {msg}")),
+        )),
     }
 }
 
@@ -512,7 +528,11 @@ mod tests {
         let out = kb_core_search_terms_unquoted(&src);
         assert_eq!(
             out,
-            vec!["mTLS".to_string(), "token bucket".to_string(), "a b".to_string()]
+            vec![
+                "mTLS".to_string(),
+                "token bucket".to_string(),
+                "a b".to_string()
+            ]
         );
     }
 

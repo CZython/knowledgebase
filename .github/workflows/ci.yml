@@ -37,7 +37,9 @@ jobs:
           cargo build -p kb-user
           cargo build -p kb-hardened
 
-      - name: Stage 3 — clippy -D warnings (all targets)
+      - name: Stage 3a — cargo fmt --check
+        run: cargo fmt --all -- --check
+      - name: Stage 3b — clippy -D warnings (all targets)
         run: cargo clippy --workspace --all-targets -- -D warnings
 
       - name: Stage 4 — test

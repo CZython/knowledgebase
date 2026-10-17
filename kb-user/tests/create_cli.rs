@@ -15,7 +15,9 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 fn kb() -> Command {
-    Command::new(std::env::var("CARGO_BIN_EXE_kb").expect("CARGO_BIN_EXE_kb unset — run under cargo test"))
+    Command::new(
+        std::env::var("CARGO_BIN_EXE_kb").expect("CARGO_BIN_EXE_kb unset — run under cargo test"),
+    )
 }
 
 struct Setup {
@@ -25,10 +27,8 @@ struct Setup {
 
 impl Setup {
     fn new(tag: &str) -> Self {
-        let base = std::env::temp_dir().join(format!(
-            "kbcreate_{pid}_{tag}",
-            pid = std::process::id()
-        ));
+        let base =
+            std::env::temp_dir().join(format!("kbcreate_{pid}_{tag}", pid = std::process::id()));
         let root = base.join("root");
         let _ = fs::remove_dir_all(&root);
         fs::create_dir_all(&root).unwrap();
@@ -123,21 +123,43 @@ fn create_writes_the_full_field_scaffold() {
     // PLAN §4: `type:` + `title:` required in spirit (title = slug source),
     // the optional fields present-but-empty so they are ready to fill.
     assert!(body.starts_with("---\n"), "opens with a frame: {body:?}");
-    assert!(body.contains("type: wiki\n"), "default type is wiki: {body:?}");
-    assert!(body.contains("title: my-note\n"), "title from the file stem");
+    assert!(
+        body.contains("type: wiki\n"),
+        "default type is wiki: {body:?}"
+    );
+    assert!(
+        body.contains("title: my-note\n"),
+        "title from the file stem"
+    );
     assert!(body.contains("description:\n"), "empty description slot");
     assert!(body.contains("tags: []\n"), "empty tag list");
     assert!(body.contains("search_terms: []\n"), "empty gate list");
-    assert!(body.contains("\n---\n\n# my-note\n\n"), "H1 after the frame");
+    assert!(
+        body.contains("\n---\n\n# my-note\n\n"),
+        "H1 after the frame"
+    );
     assert!(out.contains("created"), "human note: {out}");
-    assert!(out.starts_with("--- /dev/null\n"), "a new-file diff is shown: {out}");
+    assert!(
+        out.starts_with("--- /dev/null\n"),
+        "a new-file diff is shown: {out}"
+    );
 }
 
 #[test]
 fn create_appends_md_and_builds_missing_dirs() {
     let s = Setup::new("paths");
-    let (code, _, err) = run(&s, &["create", "deep/sub/note", "--path",
-        s.root.to_str().unwrap(), "--type", "note", "--yes"]);
+    let (code, _, err) = run(
+        &s,
+        &[
+            "create",
+            "deep/sub/note",
+            "--path",
+            s.root.to_str().unwrap(),
+            "--type",
+            "note",
+            "--yes",
+        ],
+    );
     assert_eq!(code, 0, "stderr: {err}");
     assert!(s.root.join("deep/sub/note.md").is_file());
     let body = fs::read_to_string(s.root.join("deep/sub/note.md")).unwrap();
@@ -174,7 +196,10 @@ fn create_refuses_to_clobber_an_existing_file() {
     let (code, _, err) = run(&s, &["create", "keep", "--yes"]);
     assert_eq!(code, 1, "stderr: {err}");
     assert!(err.contains("already exists"), "{err}");
-    assert_eq!(fs::read_to_string(s.root.join("keep.md")).unwrap(), "ORIGINAL\n");
+    assert_eq!(
+        fs::read_to_string(s.root.join("keep.md")).unwrap(),
+        "ORIGINAL\n"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -187,7 +212,10 @@ fn create_dry_run_writes_nothing() {
     let (code, out, err) = run(&s, &["create", "ghost", "--dry-run", "--yes"]);
     assert_eq!(code, 0, "stderr: {err}");
     assert!(!s.root.join("ghost.md").exists());
-    assert!(out.starts_with("--- /dev/null\n"), "diff still shown: {out}");
+    assert!(
+        out.starts_with("--- /dev/null\n"),
+        "diff still shown: {out}"
+    );
     assert!(err.contains("dry-run"), "{err}");
 
     let (code, out, err) = run(&s, &["create", "ghost", "--dry-run", "--json"]);
@@ -214,8 +242,9 @@ fn create_json_is_one_object_on_stdout() {
     let (code, out, err) = run(&s, &["create", "meta", "--json", "--yes"]);
     assert_eq!(code, 0, "stderr: {err}");
     assert_json(&out, "create --json");
-    for k in ["file", "type", "title", "id", "created", "edited", "indexed",
-              "dry_run", "bytes", "diff"] {
+    for k in [
+        "file", "type", "title", "id", "created", "edited", "indexed", "dry_run", "bytes", "diff",
+    ] {
         assert!(out.contains(&format!("\"{k}\":")), "key {k} present: {out}");
     }
     // No roots → the file exists, nothing is indexed, `id` is null.
@@ -224,8 +253,14 @@ fn create_json_is_one_object_on_stdout() {
     assert!(s.root.join("meta.md").is_file());
     // The `file` is absolute, so an agent does not re-anchor it on the cwd.
     assert!(
-        out.contains(&format!("\"file\": \"{}",
-            s.root.join("meta.md").to_str().unwrap().replace('\\', "\\\\"))),
+        out.contains(&format!(
+            "\"file\": \"{}",
+            s.root
+                .join("meta.md")
+                .to_str()
+                .unwrap()
+                .replace('\\', "\\\\")
+        )),
         "{out}"
     );
 }
@@ -262,7 +297,10 @@ fn create_skips_indexing_when_no_roots_are_registered() {
     assert_json(&out, "create --json");
     assert!(out.contains("\"indexed\": false"), "{out}");
     assert!(err.contains("no roots registered"), "stderr note: {err}");
-    assert!(s.root.join("loose.md").is_file(), "the page is still written");
+    assert!(
+        s.root.join("loose.md").is_file(),
+        "the page is still written"
+    );
 }
 
 #[test]
@@ -273,12 +311,7 @@ fn create_skips_indexing_outside_every_registered_root() {
     let outside = s.root.parent().unwrap().join("outside");
     let _ = fs::remove_dir_all(&outside);
     fs::create_dir_all(&outside).unwrap();
-    let (code, out, err) = run_in(
-        &s,
-        &outside,
-        &["create", "stray", "--json", "--yes"],
-        &[],
-    );
+    let (code, out, err) = run_in(&s, &outside, &["create", "stray", "--json", "--yes"], &[]);
     let _ = fs::remove_dir_all(&outside);
     assert_eq!(code, 0, "stderr: {err}");
     assert!(out.contains("\"indexed\": false"), "{out}");
@@ -314,7 +347,10 @@ fn create_indexes_the_bytes_the_editor_saved() {
     assert_eq!(code, 0, "stderr: {err}");
 
     let body = fs::read_to_string(s.root.join("edited-me.md")).unwrap();
-    assert!(body.contains("type: note\n"), "editor's bytes are on disk: {body}");
+    assert!(
+        body.contains("type: note\n"),
+        "editor's bytes are on disk: {body}"
+    );
     assert!(body.contains("- edited"), "{body}");
 
     // The index reflects the edited type + tag, not the scaffold.
@@ -324,7 +360,10 @@ fn create_indexes_the_bytes_the_editor_saved() {
 
     let (code, out, err) = run(&s, &["tag", "edited"]);
     assert_eq!(code, 0, "stderr: {err}");
-    assert!(out.contains("edited-me"), "tag collected from the edited bytes: {out}");
+    assert!(
+        out.contains("edited-me"),
+        "tag collected from the edited bytes: {out}"
+    );
 }
 
 #[test]
@@ -332,8 +371,12 @@ fn create_indexes_the_bytes_the_editor_saved() {
 fn create_edit_failure_leaves_the_scaffold_and_indexes_nothing() {
     let s = Setup::new("editfail");
     add(&s);
-    let (code, _, err) = run_in(&s, &s.root, &["create", "boom", "-e", "--yes"],
-        &[("EDITOR", "false")]);
+    let (code, _, err) = run_in(
+        &s,
+        &s.root,
+        &["create", "boom", "-e", "--yes"],
+        &[("EDITOR", "false")],
+    );
     assert_eq!(code, 1, "stderr: {err}");
     assert!(err.contains("exited"), "{err}");
     // The scaffold is the source of truth and survives; it is simply not
@@ -350,7 +393,10 @@ fn create_edit_with_json_is_rejected() {
     let (code, _, err) = run(&s, &["create", "nope", "-e", "--json", "--yes"]);
     assert_eq!(code, 1, "stderr: {err}");
     assert!(err.contains("--edit"), "names the offending flag: {err}");
-    assert!(!s.root.join("nope.md").exists(), "rejected before any write");
+    assert!(
+        !s.root.join("nope.md").exists(),
+        "rejected before any write"
+    );
 }
 
 #[test]
@@ -363,6 +409,9 @@ fn create_e_flag_is_rejected_in_hardened_build() {
     let s = Setup::new("noed");
     let (code, _, err) = run(&s, &["create", "noe", "-e", "--yes"]);
     assert_eq!(code, 2, "clap usage error is exit 2: {err}");
-    assert!(err.contains("unexpected argument"), "names the offending flag: {err}");
+    assert!(
+        err.contains("unexpected argument"),
+        "names the offending flag: {err}"
+    );
     assert!(!s.root.join("noe.md").exists(), "rejected before any write");
 }

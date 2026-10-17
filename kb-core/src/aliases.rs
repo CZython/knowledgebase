@@ -46,8 +46,8 @@
 //! over the DB's unique-alias, tab-free domain) is pinned by the unit tests
 //! below, the same exec↔spec split as `tags.rs` / `links.rs`.
 
-use std::fmt::Write as _;
 use std::collections::BTreeMap;
+use std::fmt::Write as _;
 
 /// The line-level codec constant: a single ASCII tab separates the two fields.
 /// It is a *data* separator, chosen because tag strings never contain one
@@ -174,15 +174,25 @@ mod tests {
 
     #[test]
     fn export_sorts_and_is_deterministic() {
-        let a = vec![("czechia".to_string(), "czech".to_string()), ("llm2".to_string(), "llm".to_string())];
-        let b = vec![("llm2".to_string(), "llm".to_string()), ("czechia".to_string(), "czech".to_string())];
+        let a = vec![
+            ("czechia".to_string(), "czech".to_string()),
+            ("llm2".to_string(), "llm".to_string()),
+        ];
+        let b = vec![
+            ("llm2".to_string(), "llm".to_string()),
+            ("czechia".to_string(), "czech".to_string()),
+        ];
         assert_eq!(to_text(&a), to_text(&b), "row order must not matter");
         assert_eq!(to_text(&a), "czechia\tczech\nllm2\tllm\n");
     }
 
     #[test]
     fn export_dedups_identical_rows() {
-        let a = vec![("x".into(), "y".into()), ("x".into(), "y".into()), ("x".into(), "y".into())];
+        let a = vec![
+            ("x".into(), "y".into()),
+            ("x".into(), "y".into()),
+            ("x".into(), "y".into()),
+        ];
         assert_eq!(to_text(&a), "x\ty\n");
     }
 
@@ -245,7 +255,11 @@ mod tests {
     #[test]
     fn import_round_trips_the_db_domain() {
         // unique aliases, tab-free tag strings — the `tag_aliases` PK domain.
-        let set = vec![("czechia".to_string(), "czech".to_string()), ("uk".to_string(), "united-kingdom".to_string()), ("llm2".to_string(), "llm".to_string())];
+        let set = vec![
+            ("czechia".to_string(), "czech".to_string()),
+            ("uk".to_string(), "united-kingdom".to_string()),
+            ("llm2".to_string(), "llm".to_string()),
+        ];
         let text = to_text(&set);
         // to_text sorts; from_text preserves that order → compare to the set's sorted form.
         assert_eq!(from_text(&text), sorted_copy(&set));
@@ -255,26 +269,45 @@ mod tests {
     fn import_skips_ignorable_and_malformed_lines() {
         let text = "# backup\nczechia\tczech\n\nbadline\n\tczech\nllm2\tllm\na\t\n";
         // "badline" (no tab), "\tczech" (empty alias), "a\t" (empty canon) skip.
-        assert_eq!(from_text(text), vec![("czechia".into(), "czech".into()), ("llm2".into(), "llm".into())]);
+        assert_eq!(
+            from_text(text),
+            vec![
+                ("czechia".into(), "czech".into()),
+                ("llm2".into(), "llm".into())
+            ]
+        );
     }
 
     #[test]
     fn import_last_wins_on_repeated_alias() {
         // matches `--add` upsert: earlier definition shadowed by later.
         let text = "a\tx\nb\ty\na\tX2\n";
-        assert_eq!(from_text(text), vec![("a".into(), "X2".into()), ("b".into(), "y".into())]);
+        assert_eq!(
+            from_text(text),
+            vec![("a".into(), "X2".into()), ("b".into(), "y".into())]
+        );
     }
 
     #[test]
     fn import_preserves_first_occurrence_order_of_survivors() {
         let text = "z\t1\na\t2\nm\t3\nz\t1b\n"; // z appears first & last
-        // order: z, a, m  (z stays at its first index; value updated to 1b)
-        assert_eq!(from_text(text), vec![("z".into(), "1b".into()), ("a".into(), "2".into()), ("m".into(), "3".into())]);
+                                                // order: z, a, m  (z stays at its first index; value updated to 1b)
+        assert_eq!(
+            from_text(text),
+            vec![
+                ("z".into(), "1b".into()),
+                ("a".into(), "2".into()),
+                ("m".into(), "3".into())
+            ]
+        );
     }
 
     #[test]
     fn import_idempotent_over_export() {
-        let set = vec![("czechia".into(), "czech".into()), ("uk".into(), "united-kingdom".into())];
+        let set = vec![
+            ("czechia".into(), "czech".into()),
+            ("uk".into(), "united-kingdom".into()),
+        ];
         let text = to_text(&set);
         let once = from_text(&text);
         let twice = from_text(&to_text(&once));
@@ -283,8 +316,11 @@ mod tests {
 
     #[test]
     fn import_empty_and_comment_only_is_empty() {
-        assert_eq!(from_text(""), Vec::<(String,String)>::new());
-        assert_eq!(from_text("# only a comment\n\n  #another\n"), Vec::<(String,String)>::new());
+        assert_eq!(from_text(""), Vec::<(String, String)>::new());
+        assert_eq!(
+            from_text("# only a comment\n\n  #another\n"),
+            Vec::<(String, String)>::new()
+        );
     }
 
     fn sorted_copy(v: &[(String, String)]) -> Vec<(String, String)> {

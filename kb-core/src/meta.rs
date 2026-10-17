@@ -72,8 +72,8 @@ impl NoteType {
     pub fn prefix(&self) -> &'static str {
         match self {
             NoteType::Label => "label:",
-            NoteType::Wiki  => "wiki:",
-            NoteType::Note  => "note:",
+            NoteType::Wiki => "wiki:",
+            NoteType::Note => "note:",
         }
     }
 
@@ -86,9 +86,9 @@ impl NoteType {
     pub fn parse(s: &str) -> Option<Self> {
         match s.trim().to_ascii_lowercase().as_str() {
             "label" => Some(NoteType::Label),
-            "wiki"  => Some(NoteType::Wiki),
-            "note"  => Some(NoteType::Note),
-            _       => None,
+            "wiki" => Some(NoteType::Wiki),
+            "note" => Some(NoteType::Note),
+            _ => None,
         }
     }
 }
@@ -171,7 +171,9 @@ mod tests {
         let m = meta(NoteType::Note, "Transformer architecture (papers)");
         assert_eq!(m.as_display_id(), "note:Transformer architecture (papers)");
         assert!(m.as_display_id().starts_with("note:"));
-        assert!(m.as_display_id().ends_with("Transformer architecture (papers)"));
+        assert!(m
+            .as_display_id()
+            .ends_with("Transformer architecture (papers)"));
     }
 
     // ---- prefix correctness (every kind) ---------------------------------
@@ -179,8 +181,8 @@ mod tests {
     #[test]
     fn prefixes_are_correct() {
         assert_eq!(NoteType::Label.prefix(), "label:");
-        assert_eq!(NoteType::Wiki.prefix(),  "wiki:");
-        assert_eq!(NoteType::Note.prefix(),  "note:");
+        assert_eq!(NoteType::Wiki.prefix(), "wiki:");
+        assert_eq!(NoteType::Note.prefix(), "note:");
     }
 
     // The three prefixes are pairwise distinct (mirrors spec I2/I3).
@@ -204,8 +206,8 @@ mod tests {
         assert_eq!(NoteType::parse("Label"), Some(NoteType::Label));
         assert_eq!(NoteType::parse("LABEL"), Some(NoteType::Label));
         assert_eq!(NoteType::parse(" wiki"), Some(NoteType::Wiki));
-        assert_eq!(NoteType::parse("Note"),  Some(NoteType::Note));
-        assert_eq!(NoteType::parse("note"),  Some(NoteType::Note));
+        assert_eq!(NoteType::parse("Note"), Some(NoteType::Note));
+        assert_eq!(NoteType::parse("note"), Some(NoteType::Note));
     }
 
     #[test]
@@ -250,8 +252,7 @@ mod tests {
             kind: NoteType::Label,
             slug: "Transformers (architecture)".to_string(),
             description: Some(
-                "A proxy note pointing at /src/papers/acl_2017/transformer.pdf"
-                    .to_string()
+                "A proxy note pointing at /src/papers/acl_2017/transformer.pdf".to_string(),
             ),
             tags: vec!["rust".to_string(), "architecture".to_string()],
             search_terms: vec!["rust async".to_string(), "grpc".to_string()],
@@ -261,6 +262,6 @@ mod tests {
         assert!(m.tags.len() == 2);
         assert!(m.search_terms.len() == 2);
         let d = m.description.as_ref().unwrap();
-        assert!(d.len() <= 255);  // PLAN.md §3
+        assert!(d.len() <= 255); // PLAN.md §3
     }
 }

@@ -209,8 +209,7 @@ mod tests {
 
     #[test]
     fn filename_when_no_title_no_h1() {
-        let s =
-            resolve_slug(None, None, Some("transformer")).unwrap();
+        let s = resolve_slug(None, None, Some("transformer")).unwrap();
         assert_eq!(s, "transformer");
     }
 
@@ -293,8 +292,14 @@ mod tests {
     #[test]
     fn display_id_is_prefix_plus_slug() {
         assert_eq!(display_id(NoteType::Label, "LLM"), "label:LLM");
-        assert_eq!(display_id(NoteType::Wiki, "Transformer (architecture)"), "wiki:Transformer (architecture)");
-        assert_eq!(display_id(NoteType::Note, "API Gateway — notes"), "note:API Gateway — notes");
+        assert_eq!(
+            display_id(NoteType::Wiki, "Transformer (architecture)"),
+            "wiki:Transformer (architecture)"
+        );
+        assert_eq!(
+            display_id(NoteType::Note, "API Gateway — notes"),
+            "note:API Gateway — notes"
+        );
     }
 
     #[test]

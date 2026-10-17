@@ -60,21 +60,34 @@ impl Graph {
         if from == to {
             return false; // drop self-loop (§9 no self-loops)
         }
-        let added = self.out.entry(from.to_string()).or_default().insert(to.to_string());
+        let added = self
+            .out
+            .entry(from.to_string())
+            .or_default()
+            .insert(to.to_string());
         if added {
-            self.back.entry(to.to_string()).or_default().insert(from.to_string());
+            self.back
+                .entry(to.to_string())
+                .or_default()
+                .insert(from.to_string());
         }
         added
     }
 
     /// The deduped, sorted forward neighbours of `node`, or an empty list.
     pub fn outgoing(&self, node: &str) -> Vec<String> {
-        self.out.get(node).map(|s| s.iter().cloned().collect()).unwrap_or_default()
+        self.out
+            .get(node)
+            .map(|s| s.iter().cloned().collect())
+            .unwrap_or_default()
     }
 
     /// The deduped, sorted backlinks (sources) of `node`, or an empty list.
     pub fn incoming(&self, node: &str) -> Vec<String> {
-        self.back.get(node).map(|s| s.iter().cloned().collect()).unwrap_or_default()
+        self.back
+            .get(node)
+            .map(|s| s.iter().cloned().collect())
+            .unwrap_or_default()
     }
 
     /// True iff the resolved edge `from -> to` is present (forward view).
@@ -138,21 +151,30 @@ mod tests {
     #[test]
     fn backlink_is_inverse_of_forward() {
         let mut g = Graph::new();
-        g.add_edge("/a/x.md", "/b/y.md");        // x -> y
-        g.add_edge("/a/x.md", "/c/z.md");        // x -> z
-        g.add_edge("/c/z.md", "/b/y.md");        // z -> y
-        g.add_edge("/b/y.md", "/d/w.md");        // y -> w
+        g.add_edge("/a/x.md", "/b/y.md"); // x -> y
+        g.add_edge("/a/x.md", "/c/z.md"); // x -> z
+        g.add_edge("/c/z.md", "/b/y.md"); // z -> y
+        g.add_edge("/b/y.md", "/d/w.md"); // y -> w
 
         // forward view of x
         assert_eq!(g.outgoing("/a/x.md"), vec!["/b/y.md", "/c/z.md"]);
         // y's backlinks = {x, z}
         assert_eq!(g.incoming("/b/y.md"), vec!["/a/x.md", "/c/z.md"]);
         // equivalence holds for every present edge (x→y, z→y)
-        assert!(g.has_edge("/a/x.md", "/b/y.md") == g.incoming("/b/y.md").contains(&"/a/x.md".to_string()));
-        assert!(g.has_edge("/c/z.md", "/b/y.md") == g.incoming("/b/y.md").contains(&"/c/z.md".to_string()));
+        assert!(
+            g.has_edge("/a/x.md", "/b/y.md")
+                == g.incoming("/b/y.md").contains(&"/a/x.md".to_string())
+        );
+        assert!(
+            g.has_edge("/c/z.md", "/b/y.md")
+                == g.incoming("/b/y.md").contains(&"/c/z.md".to_string())
+        );
         // and the converse: a source listed in in(y) has that edge
         for s in g.incoming("/b/y.md").clone() {
-            assert!(g.has_edge(&s, "/b/y.md"), "{s} must appear as a forward edge to y");
+            assert!(
+                g.has_edge(&s, "/b/y.md"),
+                "{s} must appear as a forward edge to y"
+            );
         }
     }
 
@@ -162,7 +184,10 @@ mod tests {
     fn duplicate_edges_collapse() {
         let mut g = Graph::new();
         assert!(g.add_edge("/a/x.md", "/b/y.md"));
-        assert!(!g.add_edge("/a/x.md", "/b/y.md"), "second identical add reports no change");
+        assert!(
+            !g.add_edge("/a/x.md", "/b/y.md"),
+            "second identical add reports no change"
+        );
         assert_eq!(g.outgoing("/a/x.md"), vec!["/b/y.md"]);
         assert_eq!(g.incoming("/b/y.md"), vec!["/a/x.md"]);
         assert_eq!(g.edges().len(), 1);
@@ -178,9 +203,9 @@ mod tests {
         g.add_edge("/b/y.md", "/c/z.md");
 
         // The EDGE SET seen from `out` equals the edge set seen from `in`.
-        let from_out: std::collections::BTreeSet<(String,String)> =
+        let from_out: std::collections::BTreeSet<(String, String)> =
             g.edges().into_iter().collect();
-        let from_in: std::collections::BTreeSet<(String,String)> = {
+        let from_in: std::collections::BTreeSet<(String, String)> = {
             let mut s = std::collections::BTreeSet::new();
             for (target, sources) in &g.back {
                 for src in sources {
@@ -189,7 +214,10 @@ mod tests {
             }
             s
         };
-        assert_eq!(from_out, from_in, "forward and backlink views must name the same edges");
+        assert_eq!(
+            from_out, from_in,
+            "forward and backlink views must name the same edges"
+        );
     }
 
     // ---- pure `inverse` round-trips over a non-loop map --------------------
@@ -197,22 +225,43 @@ mod tests {
     #[test]
     fn inverse_of_forward_recovers_backlinks() {
         let mut out: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
-        out.entry("/a/x.md".to_string()).or_default().insert("/b/y.md".to_string());
-        out.entry("/a/x.md".to_string()).or_default().insert("/c/z.md".to_string());
-        out.entry("/b/y.md".to_string()).or_default().insert("/c/z.md".to_string());
+        out.entry("/a/x.md".to_string())
+            .or_default()
+            .insert("/b/y.md".to_string());
+        out.entry("/a/x.md".to_string())
+            .or_default()
+            .insert("/c/z.md".to_string());
+        out.entry("/b/y.md".to_string())
+            .or_default()
+            .insert("/c/z.md".to_string());
         let inb = inverse(&out);
-        assert_eq!(inb.get("/b/y.md").map(|s| s.iter().cloned().collect::<Vec<_>>()), Some(vec!["/a/x.md".to_string()]));
-        assert_eq!(inb.get("/c/z.md").map(|s| s.iter().cloned().collect::<Vec<_>>()), Some(vec!["/a/x.md".to_string(), "/b/y.md".to_string()]));
+        assert_eq!(
+            inb.get("/b/y.md")
+                .map(|s| s.iter().cloned().collect::<Vec<_>>()),
+            Some(vec!["/a/x.md".to_string()])
+        );
+        assert_eq!(
+            inb.get("/c/z.md")
+                .map(|s| s.iter().cloned().collect::<Vec<_>>()),
+            Some(vec!["/a/x.md".to_string(), "/b/y.md".to_string()])
+        );
     }
 
     #[test]
     fn inverse_drops_self_loops_even_if_present_in_input() {
         let mut out: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
-        out.entry("/a/x.md".to_string()).or_default().insert("/a/x.md".to_string()); // self loop
-        out.entry("/a/x.md".to_string()).or_default().insert("/b/y.md".to_string());
+        out.entry("/a/x.md".to_string())
+            .or_default()
+            .insert("/a/x.md".to_string()); // self loop
+        out.entry("/a/x.md".to_string())
+            .or_default()
+            .insert("/b/y.md".to_string());
         let inb = inverse(&out);
         // x→x is dropped, so x is not a backlink of itself
         assert!(!inb.contains_key("/a/x.md"));
-        assert!(inb.get("/b/y.md").map(|s| s.contains("/a/x.md")).unwrap_or(false));
+        assert!(inb
+            .get("/b/y.md")
+            .map(|s| s.contains("/a/x.md"))
+            .unwrap_or(false));
     }
 }

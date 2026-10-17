@@ -145,7 +145,9 @@ mod tests {
             .unwrap();
         assert!(n >= 8, "expected full schema, got {n} tables");
         let v: String = conn
-            .query_row("SELECT value FROM meta WHERE key='version'", [], |r| r.get(0))
+            .query_row("SELECT value FROM meta WHERE key='version'", [], |r| {
+                r.get(0)
+            })
             .unwrap();
         assert_eq!(v, SCHEMA_VERSION);
     }

@@ -131,10 +131,7 @@ pub fn is_under(root: &Path, abs_path: &Path) -> bool {
 ///
 /// Returns `(root_canonical, rel_path)`. `rel_path` is the page's path
 /// relative to the chosen root (always non-empty).
-pub fn winning_root(
-    roots: &[(String, i64)],
-    abs_path: &str,
-) -> Option<(String, String)> {
+pub fn winning_root(roots: &[(String, i64)], abs_path: &str) -> Option<(String, String)> {
     let abs = PathBuf::from(abs_path);
     // (depth, seq) — lexicographically larger wins: innermost first, then
     // most-recent on an exact depth tie.
@@ -194,16 +191,16 @@ mod tests {
         let root = w.root().to_string();
         assert!(set.contains(&format!("{root}/notes.md")));
         assert!(set.contains(&format!("{root}/.hidden.md")));
-        assert!(!set.contains(&format!("{root}/.git/config")), "dot-dir content must be skipped");
+        assert!(
+            !set.contains(&format!("{root}/.git/config")),
+            "dot-dir content must be skipped"
+        );
         let _ = fs::remove_dir_all(&dir);
     }
 
     #[test]
     fn winning_root_prefers_innermost() {
-        let roots = vec![
-            ("/a".to_string(), 1i64),
-            ("/a/b".to_string(), 2i64),
-        ];
+        let roots = vec![("/a".to_string(), 1i64), ("/a/b".to_string(), 2i64)];
         let (r, rel) = winning_root(&roots, "/a/b/c/d.md").unwrap();
         assert_eq!(r, "/a/b");
         assert_eq!(rel, "c/d.md");

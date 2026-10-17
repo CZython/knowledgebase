@@ -107,7 +107,10 @@ fn add_registers_root_and_indexes() {
     assert_eq!(code, 0, "stderr: {err}");
     let root = s.root.to_string_lossy().to_string();
     assert!(out.contains(&root), "root echoed: {out}");
-    assert!(out.contains("indexed") || out.contains("root(s)"), "refresh note: {out}");
+    assert!(
+        out.contains("indexed") || out.contains("root(s)"),
+        "refresh note: {out}"
+    );
 }
 
 #[test]
@@ -117,7 +120,10 @@ fn roots_lists_registered_roots() {
     add(&s);
     let (code, out, err) = run_bare(&s, &["roots"]);
     assert_eq!(code, 0, "stderr: {err}");
-    assert!(out.contains(s.root.to_str().unwrap()), "root path shown: {out}");
+    assert!(
+        out.contains(s.root.to_str().unwrap()),
+        "root path shown: {out}"
+    );
 }
 
 #[test]
@@ -128,7 +134,10 @@ fn drop_root_deregisters() {
     let root = s.root.to_string_lossy().into_owned();
     let (code, out, err) = run(&s, &["drop-root", root.as_str()]);
     assert_eq!(code, 0, "stderr: {err}");
-    assert!(out.contains("dropped") || out.contains("dropped root"), "drop note: {out}");
+    assert!(
+        out.contains("dropped") || out.contains("dropped root"),
+        "drop note: {out}"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -143,7 +152,10 @@ fn refresh_reports_counts() {
     add(&s);
     let (code, out, err) = run_bare(&s, &["refresh"]);
     assert_eq!(code, 0, "stderr: {err}");
-    assert!(out.contains("1 root(s)") || out.contains("root(s)"), "summary: {out}");
+    assert!(
+        out.contains("1 root(s)") || out.contains("root(s)"),
+        "summary: {out}"
+    );
     // the no-type page is skipped + counted
     assert!(out.contains("skipped"), "skip count present: {out}");
 }
@@ -189,7 +201,10 @@ fn search_finds_tagged_and_content_pages() {
     let (code, json, err) = run(&s, &["search", "transformers", "--json"]);
     assert_eq!(code, 0, "stderr: {err}");
     let json = json.trim();
-    assert!(json.starts_with('[') && json.ends_with(']'), "array: {json}");
+    assert!(
+        json.starts_with('[') && json.ends_with(']'),
+        "array: {json}"
+    );
     assert!(json.contains("\"id\":\"wiki:Attention\""), "id: {json}");
 }
 
@@ -205,10 +220,7 @@ fn search_tag_filter_uses_alias_expansion() {
     add(&s);
 
     // add a single-token alias: "models" -> canonical "llm".
-    let (code, out, err) = run_bare(
-        &s,
-        &["tag-alias", "--add", "models", "--canonical", "llm"],
-    );
+    let (code, out, err) = run_bare(&s, &["tag-alias", "--add", "models", "--canonical", "llm"]);
     assert_eq!(code, 0, "stderr: {err}");
     assert!(out.contains("llm"), "add echo: {out}");
 
@@ -238,7 +250,13 @@ fn search_multiword_tag_filter_via_quoted_alias() {
     // Add an alias "llm" -> "large language models" (multi-word canonical).
     let (code, _out, err) = run_bare(
         &s,
-        &["tag-alias", "--add", "llm", "--canonical", "large language models"],
+        &[
+            "tag-alias",
+            "--add",
+            "llm",
+            "--canonical",
+            "large language models",
+        ],
     );
     assert_eq!(code, 0, "stderr: {err}");
 
@@ -246,14 +264,23 @@ fn search_multiword_tag_filter_via_quoted_alias() {
     // to "large language models" and the SQL join lands on the page.
     let (code, out, err) = run(&s, &["search", "tag:\"llm\""]);
     assert_eq!(code, 0, "stderr: {err}");
-    assert!(out.contains("Large Language Models"), "multi-word alias hit: {out}");
+    assert!(
+        out.contains("Large Language Models"),
+        "multi-word alias hit: {out}"
+    );
     assert!(!out.contains("Unrelated"), "no false positive: {out}");
 
     // Also confirm the direct multi-word tag value filters correctly (no alias).
     let (code, out, err) = run(&s, &["search", "tag:\"large language models\""]);
     assert_eq!(code, 0, "stderr: {err}");
-    assert!(out.contains("Large Language Models"), "direct tag match: {out}");
-    assert!(!out.contains("Unrelated"), "no false positive direct: {out}");
+    assert!(
+        out.contains("Large Language Models"),
+        "direct tag match: {out}"
+    );
+    assert!(
+        !out.contains("Unrelated"),
+        "no false positive direct: {out}"
+    );
 }
 
 #[test]
@@ -271,8 +298,14 @@ fn search_not_only_is_a_documented_limited_path() {
     // `--` stops clap from treating the negative as a flag.
     let (code, out, err) = run(&s, &["search", "--", "-beta"]);
     assert_eq!(code, 0, "stderr: {err}");
-    assert!(out.contains("Alpha"), "page Alpha (does not contain beta) must be returned: {out}");
-    assert!(!out.contains("Beta"), "page Beta (contains beta) must be excluded: {out}");
+    assert!(
+        out.contains("Alpha"),
+        "page Alpha (does not contain beta) must be returned: {out}"
+    );
+    assert!(
+        !out.contains("Beta"),
+        "page Beta (contains beta) must be excluded: {out}"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -287,7 +320,10 @@ fn browse_lists_all_pages_numbered() {
     add(&s);
     let (code, out, err) = run_bare(&s, &["browse"]);
     assert_eq!(code, 0, "stderr: {err}");
-    assert!(out.contains("Alpha") && out.contains("Beta"), "both pages: {out}");
+    assert!(
+        out.contains("Alpha") && out.contains("Beta"),
+        "both pages: {out}"
+    );
     assert!(out.contains("page(s)"), "count footer: {out}");
     assert!(out.contains('1') && out.contains('2'), "numbered: {out}");
 }
@@ -308,7 +344,10 @@ fn browse_expands_label_pages() {
     add(&s);
     let (code, out, err) = run_bare(&s, &["browse"]);
     assert_eq!(code, 0, "stderr: {err}");
-    assert!(out.contains("one.md") && out.contains("two.md"), "label expanded: {out}");
+    assert!(
+        out.contains("one.md") && out.contains("two.md"),
+        "label expanded: {out}"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -318,13 +357,26 @@ fn browse_expands_label_pages() {
 #[test]
 fn tag_lists_tagged_pages_and_expands_labels() {
     let s = Setup::new("tag");
-    write_page(&s, "wiki/a.md", "type: wiki\ntitle: A\ntags:\n  - llm\n", "attention\n");
-    write_page(&s, "wiki/b.md", "type: wiki\ntitle: B\ntags:\n  - other\n", "unrelated\n");
+    write_page(
+        &s,
+        "wiki/a.md",
+        "type: wiki\ntitle: A\ntags:\n  - llm\n",
+        "attention\n",
+    );
+    write_page(
+        &s,
+        "wiki/b.md",
+        "type: wiki\ntitle: B\ntags:\n  - other\n",
+        "unrelated\n",
+    );
     add(&s);
     let (code, out, err) = run_bare(&s, &["tag", "llm"]);
     assert_eq!(code, 0, "stderr: {err}");
     assert!(out.contains("A"), "tagged page present: {out}");
-    assert!(!out.contains("B  ") || !out.contains("wiki:B"), "untagged page absent: {out}");
+    assert!(
+        !out.contains("B  ") || !out.contains("wiki:B"),
+        "untagged page absent: {out}"
+    );
 }
 
 #[test]
@@ -333,12 +385,20 @@ fn tag_matches_mixed_case_tag_in_any_query_case() {
     // casing, so a stored mixed-case tag like `Czech` failed
     // `lower('Czech') IN ('Czech',…)` → no match, in any query case.
     let s = Setup::new("tag_case");
-    write_page(&s, "a.md", "type: note\ntitle: A\ntags: [Czech, llm]\n", "x\n");
+    write_page(
+        &s,
+        "a.md",
+        "type: note\ntitle: A\ntags: [Czech, llm]\n",
+        "x\n",
+    );
     add(&s);
     for q in ["Czech", "czech", "CZECH"] {
         let (code, out, err) = run_bare(&s, &["tag", q]);
         assert_eq!(code, 0, "stderr: {err}");
-        assert!(out.contains("A"), "tag {q:?} must match the stored `Czech`: {out}");
+        assert!(
+            out.contains("A"),
+            "tag {q:?} must match the stored `Czech`: {out}"
+        );
     }
     // A different tag must still not match.
     let (code, out, err) = run_bare(&s, &["tag", "llm"]);
@@ -349,16 +409,30 @@ fn tag_matches_mixed_case_tag_in_any_query_case() {
 #[test]
 fn tag_alias_round_trip() {
     let s = Setup::new("tagalias");
-    write_page(&s, "a.md", "type: note\ntitle: A\ntags:\n  - czech\n", "x\n");
+    write_page(
+        &s,
+        "a.md",
+        "type: note\ntitle: A\ntags:\n  - czech\n",
+        "x\n",
+    );
     add(&s);
     // add
-    let (code, out, err) = run_bare(&s, &["tag-alias", "--add", "Czechia", "--canonical", "czech"]);
+    let (code, out, err) = run_bare(
+        &s,
+        &["tag-alias", "--add", "Czechia", "--canonical", "czech"],
+    );
     assert_eq!(code, 0, "stderr: {err}");
-    assert!(out.contains("Czechia") && out.contains("czech"), "add echo: {out}");
+    assert!(
+        out.contains("Czechia") && out.contains("czech"),
+        "add echo: {out}"
+    );
     // list
     let (code, out, err) = run_bare(&s, &["tag-alias", "--list"]);
     assert_eq!(code, 0, "stderr: {err}");
-    assert!(out.contains("Czechia") && out.contains("czech"), "list: {out}");
+    assert!(
+        out.contains("Czechia") && out.contains("czech"),
+        "list: {out}"
+    );
     // tag via the alias string now resolves to czech
     let (code, out, err) = run_bare(&s, &["tag", "Czechia"]);
     assert_eq!(code, 0, "stderr: {err}");
@@ -372,21 +446,44 @@ fn tag_alias_round_trip() {
 #[test]
 fn tag_alias_export_then_wipe_then_import_recovers_the_map() {
     let s = Setup::new("tagalias_roundtrip");
-    write_page(&s, "a.md", "type: note\ntitle: A\ntags:\n  - czech\n", "x\n");
+    write_page(
+        &s,
+        "a.md",
+        "type: note\ntitle: A\ntags:\n  - czech\n",
+        "x\n",
+    );
     add(&s);
     // two aliases (including a multi-word canonical) — the recoverable state.
-    let (code, out, err) = run_bare(&s, &["tag-alias", "--add", "Czechia", "--canonical", "czech"]);
+    let (code, out, err) = run_bare(
+        &s,
+        &["tag-alias", "--add", "Czechia", "--canonical", "czech"],
+    );
     assert_eq!(code, 0, "add 1: {err}");
     let _ = out;
-    let (code, out, err) = run_bare(&s, &["tag-alias", "--add", "llms", "--canonical", "large language models"]);
+    let (code, out, err) = run_bare(
+        &s,
+        &[
+            "tag-alias",
+            "--add",
+            "llms",
+            "--canonical",
+            "large language models",
+        ],
+    );
     assert_eq!(code, 0, "add 2: {err}");
     let _ = out;
 
     // export to a recovery file.
     let backup = s.root.parent().unwrap().join("alias_backup.tsv");
-    let (code, out, err) = run_bare(&s, &["tag-alias", "--export", "--file", backup.to_str().unwrap()]);
+    let (code, out, err) = run_bare(
+        &s,
+        &["tag-alias", "--export", "--file", backup.to_str().unwrap()],
+    );
     assert_eq!(code, 0, "export: {err}");
-    assert!(out.contains("exported") && out.contains("2"), "export echo: {out}");
+    assert!(
+        out.contains("exported") && out.contains("2"),
+        "export echo: {out}"
+    );
     let text = fs::read_to_string(&backup).unwrap();
     assert!(text.contains("Czechia\tczech"), "backup row 1: {text:?}");
     assert!(text.contains("llms\t"), "backup row 2: {text:?}");
@@ -400,30 +497,50 @@ fn tag_alias_export_then_wipe_then_import_recovers_the_map() {
     assert!(out.contains("no tag aliases"), "empty after wipe: {out}");
 
     // ---- import the recovery file back ----
-    let (code, out, err) = run_bare(&s, &["tag-alias", "--import", "--file", backup.to_str().unwrap()]);
+    let (code, out, err) = run_bare(
+        &s,
+        &["tag-alias", "--import", "--file", backup.to_str().unwrap()],
+    );
     assert_eq!(code, 0, "import: {err}");
     assert!(out.contains("imported 2"), "import echo: {out}");
 
     // the recovered rows are listed AND functional (the alias re-resolves).
     let (code, out, err) = run_bare(&s, &["tag-alias", "--list"]);
     assert_eq!(code, 0, "list after import: {err}");
-    assert!(out.contains("Czechia") && out.contains("czech"), "recovered 1: {out}");
-    assert!(out.contains("llms") && out.contains("large language models"), "recovered 2: {out}");
+    assert!(
+        out.contains("Czechia") && out.contains("czech"),
+        "recovered 1: {out}"
+    );
+    assert!(
+        out.contains("llms") && out.contains("large language models"),
+        "recovered 2: {out}"
+    );
 }
 
 #[test]
 fn tag_alias_export_empty_is_empty() {
     let s = Setup::new("tagalias_export_empty");
-    write_page(&s, "a.md", "type: note\ntitle: A\ntags:\n  - czech\n", "x\n");
+    write_page(
+        &s,
+        "a.md",
+        "type: note\ntitle: A\ntags:\n  - czech\n",
+        "x\n",
+    );
     add(&s);
     // no aliases added → export renders to the empty byte string.
     let (code, out, err) = run_bare(&s, &["tag-alias", "--export"]);
     assert_eq!(code, 0, "export empty: {err}");
-    assert_eq!(out, "", "empty export must be empty (no lone newline): {out:?}");
+    assert_eq!(
+        out, "",
+        "empty export must be empty (no lone newline): {out:?}"
+    );
     // and importing an empty backup is a no-op (wipe→reimport-empty = no rows).
     let empty = s.root.parent().unwrap().join("empty.tsv");
     fs::write(&empty, "").unwrap();
-    let (code, out, err) = run_bare(&s, &["tag-alias", "--import", "--file", empty.to_str().unwrap()]);
+    let (code, out, err) = run_bare(
+        &s,
+        &["tag-alias", "--import", "--file", empty.to_str().unwrap()],
+    );
     assert_eq!(code, 0, "import empty: {err}");
     assert!(out.contains("imported 0"), "imported 0: {out}");
     let (code, out, err) = run_bare(&s, &["tag-alias", "--list"]);
@@ -434,22 +551,42 @@ fn tag_alias_export_empty_is_empty() {
 #[test]
 fn tag_alias_import_is_idempotent() {
     let s = Setup::new("tagalias_idempotent");
-    write_page(&s, "a.md", "type: note\ntitle: A\ntags:\n  - czech\n", "x\n");
+    write_page(
+        &s,
+        "a.md",
+        "type: note\ntitle: A\ntags:\n  - czech\n",
+        "x\n",
+    );
     add(&s);
-    let (code, _, err) = run_bare(&s, &["tag-alias", "--add", "Czechia", "--canonical", "czech"]);
+    let (code, _, err) = run_bare(
+        &s,
+        &["tag-alias", "--add", "Czechia", "--canonical", "czech"],
+    );
     assert_eq!(code, 0, "add: {err}");
     let (code, _, err) = run_bare(&s, &["tag-alias", "--add", "llms", "--canonical", "llm"]);
     assert_eq!(code, 0, "add: {err}");
     let backup = s.root.parent().unwrap().join("backup.tsv");
-    let (code, _, err) = run_bare(&s, &["tag-alias", "--export", "--file", backup.to_str().unwrap()]);
+    let (code, _, err) = run_bare(
+        &s,
+        &["tag-alias", "--export", "--file", backup.to_str().unwrap()],
+    );
     assert_eq!(code, 0, "export: {err}");
     // import twice — the second is a no-op (upsert onto the same rows).
-    let (code, out, err) = run_bare(&s, &["tag-alias", "--import", "--file", backup.to_str().unwrap()]);
+    let (code, out, err) = run_bare(
+        &s,
+        &["tag-alias", "--import", "--file", backup.to_str().unwrap()],
+    );
     assert_eq!(code, 0, "import 1: {err}");
     let _ = out;
-    let (code, out, err) = run_bare(&s, &["tag-alias", "--import", "--file", backup.to_str().unwrap()]);
+    let (code, out, err) = run_bare(
+        &s,
+        &["tag-alias", "--import", "--file", backup.to_str().unwrap()],
+    );
     assert_eq!(code, 0, "import 2: {err}");
-    assert!(out.contains("imported 2"), "still loads 2 (idempotent): {out}");
+    assert!(
+        out.contains("imported 2"),
+        "still loads 2 (idempotent): {out}"
+    );
     // list is stable: exactly the two rows, no duplication.
     let (code, out, err) = run_bare(&s, &["tag-alias", "--list"]);
     assert_eq!(code, 0, "list: {err}");
@@ -462,20 +599,34 @@ fn tag_alias_import_is_idempotent() {
 #[test]
 fn tag_alias_import_skips_malformed_lines_without_losing_the_rest() {
     let s = Setup::new("tagalias_skip_malformed");
-    write_page(&s, "a.md", "type: note\ntitle: A\ntags:\n  - czech\n", "x\n");
+    write_page(
+        &s,
+        "a.md",
+        "type: note\ntitle: A\ntags:\n  - czech\n",
+        "x\n",
+    );
     add(&s);
     // a partially-typed / hand-edited backup: two good rows, comment, blank,
     // a no-tab line, an empty-field line — the good rows must still load.
     let backup = s.root.parent().unwrap().join("backup.tsv");
     let txt = "# recovery backup\nCzechia\tczech\n\nnot-a-row\n\tmissing-alias\nllms\tllm\n";
     fs::write(&backup, txt).unwrap();
-    let (code, out, err) = run_bare(&s, &["tag-alias", "--import", "--file", backup.to_str().unwrap()]);
+    let (code, out, err) = run_bare(
+        &s,
+        &["tag-alias", "--import", "--file", backup.to_str().unwrap()],
+    );
     assert_eq!(code, 0, "import: {err}");
     assert!(out.contains("imported 2"), "load the 2 good rows: {out}");
-    assert!(out.contains("2 line(s) skipped"), "report the 2 malformed: {out}");
+    assert!(
+        out.contains("2 line(s) skipped"),
+        "report the 2 malformed: {out}"
+    );
     let (code, out, err) = run_bare(&s, &["tag-alias", "--list"]);
     assert_eq!(code, 0, "list: {err}");
-    assert!(out.contains("Czechia") && out.contains("llms"), "both good rows present: {out}");
+    assert!(
+        out.contains("Czechia") && out.contains("llms"),
+        "both good rows present: {out}"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -568,7 +719,10 @@ fn cron_prints_a_paste_ready_line() {
     let s = Setup::new("cron");
     let (code, out, err) = run_bare(&s, &["cron"]);
     assert_eq!(code, 0, "stderr: {err}");
-    assert!(out.contains(s.db.to_str().unwrap()), "db path present: {out}");
+    assert!(
+        out.contains(s.db.to_str().unwrap()),
+        "db path present: {out}"
+    );
     assert!(out.contains("refresh"), "refresh verb present: {out}");
     assert!(out.contains("crontab -e"), "hint present: {out}");
 }
@@ -594,7 +748,10 @@ fn bare_existing_md_path_dispatches_to_info() {
     let code = out.status.code().unwrap_or(-1);
     let stdout = String::from_utf8_lossy(&out.stdout).into_owned();
     assert_eq!(code, 0, "stdout: {stdout}");
-    assert!(!stdout.contains("wiki:") && stdout.contains("note:Alpha"), "info, not search: {stdout}");
+    assert!(
+        !stdout.contains("wiki:") && stdout.contains("note:Alpha"),
+        "info, not search: {stdout}"
+    );
 }
 
 #[test]
@@ -632,9 +789,14 @@ fn wikilink_backlinks_resolve() {
     add(&s);
     let (code, out, err) = run(&s, &["links", "note:B"]);
     assert_eq!(code, 0, "stderr: {err}");
-    assert!(out.contains("backlinks (") || out.contains("backlinks (1)"),
-        "B has exactly one backlink: {out}");
-    assert!(out.contains("a.md") || out.contains("note:A"), "A appears as backlink: {out}");
+    assert!(
+        out.contains("backlinks (") || out.contains("backlinks (1)"),
+        "B has exactly one backlink: {out}"
+    );
+    assert!(
+        out.contains("a.md") || out.contains("note:A"),
+        "A appears as backlink: {out}"
+    );
 }
 
 /// A type-qualified resolve (`wiki:Attention`) matches the type-qualified
@@ -644,20 +806,39 @@ fn resolve_type_qualified_unique() {
     let s = Setup::new("m7b_type_qualified");
     // Two pages with the same slug but different types — collision on the
     // bare slug; disambiguation requires a type-qualified id.
-    write_page(&s, "w.md", "type: wiki\ntitle: Attention\n", "the wiki side\n");
-    write_page(&s, "n.md", "type: note\ntitle: Attention\n", "the note side\n");
+    write_page(
+        &s,
+        "w.md",
+        "type: wiki\ntitle: Attention\n",
+        "the wiki side\n",
+    );
+    write_page(
+        &s,
+        "n.md",
+        "type: note\ntitle: Attention\n",
+        "the note side\n",
+    );
     add(&s);
     // bare slug → collision list
     let (code, out, err) = run(&s, &["resolve", "attention"]);
     assert_eq!(code, 0, "no error: stderr: {err}");
-    assert!(out.contains("candidate"), "collision renders as candidates: {out}");
+    assert!(
+        out.contains("candidate"),
+        "collision renders as candidates: {out}"
+    );
     assert!(out.contains("wiki:Attention"), "wiki candidate: {out}");
     assert!(out.contains("note:Attention"), "note candidate: {out}");
     // type-qualified → unique
     let (code, out, err) = run(&s, &["resolve", "wiki:attention"]);
     assert_eq!(code, 0, "no error: stderr: {err}");
-    assert!(out.contains("wiki:Attention"), "resolved to wiki page: {out}");
-    assert!(!out.contains("note:Attention"), "note page is excluded: {out}");
+    assert!(
+        out.contains("wiki:Attention"),
+        "resolved to wiki page: {out}"
+    );
+    assert!(
+        !out.contains("note:Attention"),
+        "note page is excluded: {out}"
+    );
 }
 
 /// A bare-slug collision renders a candidate list (no hard error), which is
@@ -684,7 +865,10 @@ fn resolve_bare_slug_unique() {
     let (code, out, err) = run(&s, &["resolve", "attention"]);
     assert_eq!(code, 0, "no error: stderr: {err}");
     assert!(out.contains("wiki:Attention"), "resolved: {out}");
-    assert!(!out.contains("candidate"), "unique hit, not a collision: {out}");
+    assert!(
+        !out.contains("candidate"),
+        "unique hit, not a collision: {out}"
+    );
 }
 
 /// A substring that uniquely identifies a page resolves; one that doesn't is
@@ -694,15 +878,28 @@ fn resolve_substring_unique_and_ambiguous() {
     let s = Setup::new("m7b_substring");
     // "transformer-architecture" and "transformer-benchmarks" share the
     // substring "transformer" — ambiguous.
-    write_page(&s, "arch.md", "type: wiki\ntitle: transformer-architecture\n", "x\n");
-    write_page(&s, "bench.md", "type: wiki\ntitle: transformer-benchmarks\n", "y\n");
+    write_page(
+        &s,
+        "arch.md",
+        "type: wiki\ntitle: transformer-architecture\n",
+        "x\n",
+    );
+    write_page(
+        &s,
+        "bench.md",
+        "type: wiki\ntitle: transformer-benchmarks\n",
+        "y\n",
+    );
     add(&s);
     let (code, out, err) = run(&s, &["resolve", "transformer"]);
     assert_eq!(code, 0, "no error: stderr: {err}");
     assert!(out.contains("candidate"), "ambiguous: {out}");
     let (code, out, err) = run(&s, &["resolve", "transformer-architecture"]);
     assert_eq!(code, 0, "no error: stderr: {err}");
-    assert!(out.contains("wiki:transformer-architecture"), "unique: {out}");
+    assert!(
+        out.contains("wiki:transformer-architecture"),
+        "unique: {out}"
+    );
 }
 
 /// A non-existent slug → empty result, exit 0 (no hard error).

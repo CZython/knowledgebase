@@ -51,7 +51,10 @@ impl Db {
         if !is_memory {
             conn.pragma_update(None, "journal_mode", "WAL")?;
         }
-        Ok(Db { conn, owned_temp_db: None })
+        Ok(Db {
+            conn,
+            owned_temp_db: None,
+        })
     }
 
     /// Absolute path of a temp-file-backed test DB, or `None` for
@@ -83,7 +86,10 @@ impl Db {
         let _ = std::fs::remove_file(&path);
         let conn = Connection::open(&path)?;
         conn.pragma_update(None, "journal_mode", "WAL")?;
-        Ok(Db { conn, owned_temp_db: Some(path) })
+        Ok(Db {
+            conn,
+            owned_temp_db: Some(path),
+        })
     }
 
     /// Open the DB at its *projected* location under
@@ -124,14 +130,17 @@ impl Db {
     /// Assigns a monotonically-increasing `seq` (most-recent-first) so the
     /// dedupe tiebreak in `walk_snapshot::winning_root` is well-defined:
     /// re-registering a root bumps its `seq` above the old one.
-    pub fn add_root(&self, path: &str, extra_exts: Option<&str>, include_hidden: bool) -> Result<usize> {
+    pub fn add_root(
+        &self,
+        path: &str,
+        extra_exts: Option<&str>,
+        include_hidden: bool,
+    ) -> Result<usize> {
         let next_seq: i64 = self
             .conn
-            .query_row(
-                "SELECT COALESCE(MAX(seq), 0) + 1 FROM roots",
-                [],
-                |r| r.get::<_, i64>(0),
-            )
+            .query_row("SELECT COALESCE(MAX(seq), 0) + 1 FROM roots", [], |r| {
+                r.get::<_, i64>(0)
+            })
             .unwrap_or(1);
         self.conn.execute(
             "INSERT INTO roots (path, added_at, extra_exts, include_hidden, seq)
@@ -141,15 +150,22 @@ impl Db {
                 extra_exts = excluded.extra_exts,
                 include_hidden = excluded.include_hidden,
                 seq = excluded.seq",
-            (path, chrono_now_iso8601(), extra_exts, include_hidden as i32, next_seq),
+            (
+                path,
+                chrono_now_iso8601(),
+                extra_exts,
+                include_hidden as i32,
+                next_seq,
+            ),
         )
     }
 
     /// M0 smoke: list the roots. Empty vec if the table is empty.
     pub fn list_roots(&self) -> Result<Vec<String>> {
         let mut stmt = self.conn.prepare("SELECT path FROM roots ORDER BY path")?;
-        let out = stmt.query_map([], |r| r.get::<_, String>(0))?
-                      .collect::<Result<Vec<_>>>()?;
+        let out = stmt
+            .query_map([], |r| r.get::<_, String>(0))?
+            .collect::<Result<Vec<_>>>()?;
         Ok(out)
     }
 
@@ -158,10 +174,8 @@ impl Db {
     /// survive if they are still under another remaining root (the GC
     /// happens on the next `refresh`).
     pub fn drop_root(&self, path: &str) -> Result<usize> {
-        self.conn.execute(
-            "DELETE FROM roots WHERE path = ?1",
-            rusqlite::params![path],
-        )
+        self.conn
+            .execute("DELETE FROM roots WHERE path = ?1", rusqlite::params![path])
     }
 
     /// Apply the full M5 schema (roots + pages + page_gates + page_tags +
@@ -193,7 +207,9 @@ impl Db {
         }
         let v: Option<String> = self
             .conn
-            .query_row("SELECT value FROM meta WHERE key='version'", [], |r| r.get(0))
+            .query_row("SELECT value FROM meta WHERE key='version'", [], |r| {
+                r.get(0)
+            })
             .optional()?;
         Ok(v)
     }
@@ -209,12 +225,14 @@ impl Drop for Db {
             self.owned_temp_db = None;
             if let Some(path) = owned {
                 let _ = std::fs::remove_file(&path);
-                let _ = std::fs::remove_file(path.with_file_name(
-                    format!("{}.wal", path.file_name().and_then(|f| f.to_str()).unwrap_or("x.db")),
-                ));
-                let _ = std::fs::remove_file(path.with_file_name(
-                    format!("{}.shm", path.file_name().and_then(|f| f.to_str()).unwrap_or("x.db")),
-                ));
+                let _ = std::fs::remove_file(path.with_file_name(format!(
+                    "{}.wal",
+                    path.file_name().and_then(|f| f.to_str()).unwrap_or("x.db")
+                )));
+                let _ = std::fs::remove_file(path.with_file_name(format!(
+                    "{}.shm",
+                    path.file_name().and_then(|f| f.to_str()).unwrap_or("x.db")
+                )));
             }
         }
     }

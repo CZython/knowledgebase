@@ -14,9 +14,14 @@ use std::fs;
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
 
-fn kb() -> Command { Command::new(std::env::var("CARGO_BIN_EXE_kb").unwrap()) }
+fn kb() -> Command {
+    Command::new(std::env::var("CARGO_BIN_EXE_kb").unwrap())
+}
 
-struct S { root: PathBuf, db: PathBuf }
+struct S {
+    root: PathBuf,
+    db: PathBuf,
+}
 impl S {
     fn new() -> Self {
         let base = std::env::temp_dir().join(format!("kbfit_{}", std::process::id()));
@@ -28,16 +33,25 @@ impl S {
         S { root, db }
     }
 }
-impl Drop for S { fn drop(&mut self) { let _ = fs::remove_dir_all(self.root.parent().unwrap()); } }
+impl Drop for S {
+    fn drop(&mut self) {
+        let _ = fs::remove_dir_all(self.root.parent().unwrap());
+    }
+}
 
 fn run(s: &S, args: &[&str]) -> (i32, String, String) {
     let db = s.db.to_string_lossy().into_owned();
     let mut cmd = kb();
     cmd.arg(format!("--db={db}"));
-    for x in args { cmd.arg(x); }
+    for x in args {
+        cmd.arg(x);
+    }
     let o = cmd.output().unwrap();
-    (o.status.code().unwrap_or(-1), String::from_utf8_lossy(&o.stdout).into_owned(),
-     String::from_utf8_lossy(&o.stderr).into_owned())
+    (
+        o.status.code().unwrap_or(-1),
+        String::from_utf8_lossy(&o.stdout).into_owned(),
+        String::from_utf8_lossy(&o.stderr).into_owned(),
+    )
 }
 
 /// Feed `stdin` through `python3 -c prog [--arg1 ...]`; return (ok, out+err).
@@ -46,12 +60,21 @@ fn run(s: &S, args: &[&str]) -> (i32, String, String) {
 fn py(stdin: &str, prog: &str, args: &[String]) -> (bool, String) {
     let mut c = Command::new("python3");
     c.arg("-c").arg(prog);
-    for a in args { c.arg(a); }
+    for a in args {
+        c.arg(a);
+    }
     c.stdin(Stdio::piped());
     c.stdout(Stdio::piped());
     c.stderr(Stdio::piped());
     let mut ch = c.spawn().unwrap();
-    { use std::io::Write; ch.stdin.as_mut().unwrap().write_all(stdin.as_bytes()).unwrap(); }
+    {
+        use std::io::Write;
+        ch.stdin
+            .as_mut()
+            .unwrap()
+            .write_all(stdin.as_bytes())
+            .unwrap();
+    }
     let r = ch.wait_with_output().unwrap();
     let mut s = String::from_utf8_lossy(&r.stdout).into_owned();
     s.push_str(&String::from_utf8_lossy(&r.stderr));
@@ -66,9 +89,11 @@ fn json_is_lossless_encoding_of_text_surface() {
     // parser runs on it; the test proves only *that* and that `--json` is a
     // lossless encoding of that value.
     let file = s.root.join("page.md");
-    fs::write(&file,
-        "---\ntype: note\ntitle: Quantum é \"gate\"\ndescription: lossless\n---\n# body\n"
-    ).unwrap();
+    fs::write(
+        &file,
+        "---\ntype: note\ntitle: Quantum é \"gate\"\ndescription: lossless\n---\n# body\n",
+    )
+    .unwrap();
     let root = s.root.to_string_lossy().into_owned();
     assert_eq!(run(&s, &["add", &root]).0, 0);
 
@@ -81,7 +106,11 @@ fn json_is_lossless_encoding_of_text_surface() {
     // Extract the text surface's title value (after the `title:` label).
     let text_title: String = text
         .lines()
-        .find_map(|l| l.trim_start().strip_prefix("title:").map(|v| v.trim().to_string()))
+        .find_map(|l| {
+            l.trim_start()
+                .strip_prefix("title:")
+                .map(|v| v.trim().to_string())
+        })
         .expect("text info must contain a `title:` line");
 
     // Pass both strings to python and assert the JSON value decodes to the
@@ -129,5 +158,8 @@ fn json_is_lossless_encoding_of_text_surface() {
          print('desc-ok')",
         &[],
     );
-    assert!(ok, "description must round-trip verbatim\n{detail}\n--- json ---\n{jtxt}");
+    assert!(
+        ok,
+        "description must round-trip verbatim\n{detail}\n--- json ---\n{jtxt}"
+    );
 }
