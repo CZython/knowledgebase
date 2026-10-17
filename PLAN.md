@@ -12,8 +12,8 @@ core crate:
   whole file** (byte scan + byte splice, atomic save).
 
 **The workflow they form:**
-`kb search "AI deep learning"` → page path → `kb section <path> "3.2"` →
-`kb set-section <path> "3.2" --text-file patch.md` → back to search.
+`kb search "AI deep learning"` → page path → `kb show <path> "3.2"` (read) →
+`kb section --file <path> set "3.2" --from-file new.md` (write) → back to search.
 
 ## 2. Guiding principles
 
