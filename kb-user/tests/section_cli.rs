@@ -388,6 +388,70 @@ fn if_unchanged_match_proceeds_mismatch_aborts_3() {
     assert_eq!(code, 3, "stale etag → exit 3 (stderr: {err})");
 }
 
+/// Agent contract: `--json` promises stdout is exactly one JSON object on
+/// *both* the success and failure paths (the prose "apply?" prompt is
+/// suppressed under `--json`). An etag mismatch exits 3, and it must still
+/// emit a machine-readable envelope on stdout — otherwise an agent
+/// `json.loads(out.stdout)` silently returns `null` and the retry loop never
+/// sees the etag mismatch. `section_cli` pins this at the shell level.
+#[test]
+fn if_unchanged_mismatch_with_json_emits_failure_envelope() {
+    let f = temp_md("etagjson", &base_md());
+    // Capture the *current* etag of the section we will then mutate, so the
+    // value we pass in `--if-unchanged` is guaranteed to be stale by the
+    // time the guard runs.
+    let (code, cur_etag, _) = run(&["show", f.to_str().unwrap(), "Alpha", "--etag"]);
+    assert_eq!(code, 0);
+    let cur_etag = cur_etag.trim().to_string();
+    assert_eq!(cur_etag.len(), 16, "etag is 16 hex chars: {cur_etag:?}");
+    // Mutate first so the guard will definitely see a different etag.
+    let (code, _, err) = run(&[
+        "section",
+        "--file",
+        f.to_str().unwrap(),
+        "set",
+        "Alpha",
+        "--text",
+        "mutated",
+        "--keep-heading",
+        "--if-unchanged",
+        cur_etag.as_str(),
+        "--yes",
+    ]);
+    assert_eq!(code, 0, "first mutation with the matching etag must pass (stderr: {err})");
+    // Now run the same op again with the *pre*-mutation etag → guard trips.
+    let (code, out, err) = run(&[
+        "section",
+        "--file",
+        f.to_str().unwrap(),
+        "set",
+        "Alpha",
+        "--text",
+        "mutated2",
+        "--keep-heading",
+        "--if-unchanged",
+        cur_etag.as_str(),
+        "--yes",
+        "--json",
+    ]);
+    assert_eq!(code, 3, "stale etag → exit 3 even under --json (stderr: {err})");
+    // stdout must be a clean JSON object — not empty, not prose.
+    assert!(!out.trim().is_empty(), "under --json the stdout envelope must be non-empty: {out:?}");
+    assert!(out.trim_start().starts_with('{'), "under --json stdout is one JSON object: {out:?}");
+    assert!(out.contains("\"ok\": false"), "envelope signals failure: {out:?}");
+    assert!(out.contains("\"applied\": false"), "nothing was written: {out:?}");
+    assert!(out.contains("\"code\": 3"), "code 3 in the envelope: {out:?}");
+    assert!(out.contains("\"op\": \"etag_check\""), "envelope names the op: {out:?}");
+    assert!(out.contains("\"scope\": \"Alpha\""), "scope is the section ref: {out:?}");
+    assert!(out.contains("\"etag_expected\": \"") && out.contains(&format!("\"{cur_etag}\"")),
+        "both etag fields present: {out:?}");
+    // The file must be byte-for-byte unchanged (the guard blocked the write).
+    let after = std::fs::read_to_string(&f).unwrap();
+    assert!(after.contains("mutated"), "the mutation was applied by pass (b); the stale etag op must not overwrite it: {after:?}");
+    // stderr still carries the human message (backwards compat for terminals).
+    assert!(err.contains("etag mismatch"), "human message on stderr: {err:?}");
+}
+
 #[test]
 fn dry_run_prints_diff_but_writes_nothing() {
     let f = temp_md("dry", &base_md());

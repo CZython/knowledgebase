@@ -125,7 +125,9 @@ kb tui
 
 Every verb has `--help`; every write is idempotent under a matching
 `--if-unchanged`, and `--json` suppresses the interactive diff prompt so
-stdout is one clean JSON object.
+stdout is **one clean JSON object — on success and on failure alike** (an
+etag mismatch, for instance, still emits a `{"ok": false, …}` document, so
+`json.loads` never hits an empty stream).
 
 ---
 
@@ -144,7 +146,11 @@ contract. The one-paragraph version:
 * **Diff is output for review, never input**, except via the explicit
   `patch` verb.
 * **Concurrency**: `--if-unchanged <etag>` = FNV-1a 64-bit hex over the
-  target section's bytes at the time of read; mismatch → exit code **3**.
+  target section's bytes at the time of read; mismatch → exit code **3** and,
+  under `--json`, a `{"ok": false, "applied": false, "op": "etag_check",
+  "code": 3, "scope": <ref|"*">, "error": …, "etag_expected": …,
+  "etag_actual": …}` document on stdout (the human message still goes to
+  stderr); the file is left untouched.
 * **Exit codes**: `0` ok · `1` generic · `2` section/resolve ·
   `3` etag · `2` (also) unrecognized subcommand in the hardened build.
 
