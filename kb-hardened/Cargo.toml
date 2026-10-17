@@ -19,6 +19,8 @@ name = "kb-hardened"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+rust-version.workspace = true
+description = "kb-hardened — the headless, agent-facing build of `kb`: no TUI, no $EDITOR fork surface, everything pipe-able and deterministic. Package `kb-hardened`, binary `kb-hardened`."
 
 [features]
 default = []
