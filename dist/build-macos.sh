@@ -38,4 +38,4 @@ case "$(uname)" in
 esac
 
 echo
-echo "==> done. Binary: target/${TARGET}/release/kb-user"
+echo "==> done. Binary: target/${TARGET}/release/kb (package kb-user)"
