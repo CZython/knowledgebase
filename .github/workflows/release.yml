@@ -2,7 +2,7 @@
 # GitHub Release assets. Each job builds *natively* on its own OS (the bundled
 # SQLite C ABI must be compiled against that platform's libc), so:
 #   linux   → static musl single binary (distro-agnostic, no FUSE, no libs)
-#   windows → native -pc-windows-gnu .exe
+#   windows → native -pc-windows-msvc .exe (MSVC toolchain on GHA runners)
 #   macos   → native aarch64/x86_64-apple-darwin Mach-O
 name: release
 
@@ -53,9 +53,9 @@ jobs:
           rustup target add x86_64-unknown-linux-musl
           sudo apt-get update && sudo apt-get install -y musl-tools
 
-      - name: Windows prereqs (mingw target)
+      - name: Windows prereqs (MSVC toolchain ships on the runner; nothing to add)
         if: matrix.os == 'windows-latest'
-        run: rustup target add x86_64-pc-windows-gnu
+        run: echo "building for x86_64-pc-windows-msvc (MSVC — default on windows-latest)"
 
       - name: macOS prereqs (apple target)
         if: startsWith(matrix.os, 'macos')
@@ -82,7 +82,7 @@ jobs:
                 || cp "target/x86_64-unknown-linux-musl/release/kb" "dist/kb-${{ matrix.name }}"
               ;;
             x86_64-pc-windows)
-              cp "target/x86_64-pc-windows-gnu/release/kb.exe" "dist/kb-${{ matrix.name}}.exe"
+              cp "target/x86_64-pc-windows-msvc/release/kb.exe" "dist/kb-${{ matrix.name}}.exe"
               ;;
             aarch64-apple-darwin)
               cp "target/aarch64-apple-darwin/release/kb" "dist/kb-${{ matrix.name }}"
