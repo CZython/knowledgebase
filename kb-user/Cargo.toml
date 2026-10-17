@@ -16,6 +16,7 @@
 # in separate packages that share the same body file. See HARDENED_BUILD.md.
 [package]
 name = "kb-user"
+publish = false
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -33,8 +34,8 @@ path = "src/main.rs"
 
 [dependencies]
 clap = { workspace = true }
-kb-core = { path = "../kb-core" }
-kb-db   = { path = "../kb-db" }
+kb-core = { workspace = true }
+kb-db   = { workspace = true }
 dirs    = { workspace = true }
 # The CLI writes SQL directly against `Db.conn` (a `rusqlite::Connection`),
 # so it needs the crate for `params!` / `OptionalExtension` / the FTS5

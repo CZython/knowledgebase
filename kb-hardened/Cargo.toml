@@ -16,6 +16,7 @@
 # See HARDENED_BUILD.md for the full design + why two packages.
 [package]
 name = "kb-hardened"
+publish = false
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -36,8 +37,8 @@ path = "src/main.rs"
 
 [dependencies]
 clap = { workspace = true }
-kb-core = { path = "../kb-core" }
-kb-db   = { path = "../kb-db" }
+kb-core = { workspace = true }
+kb-db   = { workspace = true }
 dirs    = { workspace = true }
 rusqlite = { workspace = true }
 # TUI-only, optional, pulled in only if a caller enables `--features tui`.

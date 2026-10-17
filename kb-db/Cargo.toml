@@ -7,6 +7,6 @@ rust-version.workspace = true
 description = "kb-db — the SQLite/FTS5 shell of `kb`: page upsert, root registration + walk, refresh reconcile, and the tag-alias map. Bundled SQLite, sync (no tokio), no system lib."
 
 [dependencies]
-kb-core = { path = "../kb-core" }
+kb-core  = { workspace = true }
 rusqlite = { workspace = true }
 dirs     = { workspace = true }

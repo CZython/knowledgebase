@@ -38,6 +38,13 @@ codegen-units = 1
 panic = "abort"
 
 [workspace.dependencies]
+# --- Intra-project crates (path + version). The version is what `cargo
+# publish` / docs.rs need (path is stripped on publish); the path is what
+# the workspace build uses. Listed here once instead of repeating in each
+# member's [dependencies]. ---
+kb-core = { path = "kb-core", version = "0.1.0" }
+kb-db   = { path = "kb-db",   version = "0.1.0" }
+
 # --- Verus core ---
 # Exact pin: this machine's Verus (v0.2026.09.06 ARIA fork at
 # ~/.local/bin/verus) was built against vstd 0.0.0-2026-09-06-0133.

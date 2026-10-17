@@ -72,9 +72,13 @@ crates).
   crates.io / docs.rs state the right thing.
 
 ### Not yet
-- Publishing `kb-user` / `kb-hardened` (and `kb-core` / `kb-db`) to
-  crates.io — deferred until the workspace's path-dep graph is reworked
-  for publishing.
+- `kb-core` and `kb-db` are publish-ready (the intra-project path deps now
+  carry explicit versions and the binary packages are marked
+  `publish = false`, so only library crates attempt an index hit).
+  `kb-user` / `kb-hardened` are intentionally *not* published — they are
+  binary crates, installed via `cargo install --path kb-user` from a source
+  checkout, or via the prebuilt GitHub Release artifacts. `cargo add
+  kb-user` is not the intended install path for a binary crate.
 
 <!-- Fill in the repo base URL once a remote is added, e.g.
      https://github.com/<owner>/knowledgebase/compare/v0.1.0 -->
