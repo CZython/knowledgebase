@@ -20,7 +20,7 @@ edition = "2021"
 license = "MIT"
 # Minimum cargo/rustc; matches `rust-toolchain.toml`. Kept honest so
 # `cargo publish` / docs.rs state the true floor.
-rust-version = "1.98.0"
+rust-version = "1.98.1"
 # Fallback description (each binary package overrides this below).
 description = "kb — a single-binary Markdown knowledge base over SQLite + FTS5, with a Verus-verified zero-dependency core"
 

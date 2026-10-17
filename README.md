@@ -211,7 +211,7 @@ MIT — see [LICENSE](LICENSE).
 ## Badges / metadata
 
 * **License:** MIT
-* **Rust:** 1.98+ (see `rust-toolchain.toml`)
+* **Rust:** 1.98.1 (see `rust-toolchain.toml` — host-agnostic pin)
 * **Binary size:** ~4 MB (release, LTO, static musl)
 * **Runtime deps (Linux, musl):** none — statically linked, no `libc` at runtime
 * **Platforms:** Linux (static musl) · Windows (native) · macOS (ARM + Intel) — all via prebuilt Release binaries or CI

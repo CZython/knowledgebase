@@ -1,10 +1,14 @@
 [toolchain]
-# Pin to a concrete minor (1.98) so that a later `rustup update` doesn't
-# silently break either the Verus build (which is tied to a specific rustc
+# Pin to a concrete *version* so that a later `rustup update` doesn't silently
+# break either the Verus build (this ARIA fork is tied to a specific rustc
 # patch level) or the bundled SQLite compile (which tracks its own C
 # requirements). See PLAN.md §12 M0.
 #
-# `stable` here resolves to rustup's current stable — today that is
-# 1.98.1-x86_64-unknown-linux-gnu, which matches the installed
-# `1.98.0` toolchain Verus was built against.
-channel = "stable-x86_64-unknown-linux-gnu"
+# Deliberately host-agnostic: NO target triple, so it works on Linux, macOS,
+# and Windows CI + contributor boxes alike. `1.98.1` means rustup's
+# `1.98.1-<host-triple>` for whichever host you're on (here it resolves to
+# 1.98.1-x86_64-unknown-linux-gnu, the toolchain the ARIA Verus fork
+# `~/.local/bin/verus` was built against). CI does NOT read this file — it
+# installs `stable` and adds the cross targets it needs — so a contributor on
+# a different OS never inherits a foreign triple.
+channel = "1.98.1"
