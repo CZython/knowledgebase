@@ -6,8 +6,18 @@ the API is still moving; breaking changes are called out explicitly.
 
 ## [Unreleased]
 
-_Nothing yet._ (Add entries here as you work; promote to a numbered section
-when cutting the next tag.)
+### Changed
+- **Agent contract — `--json` now holds on the failure path too.** An
+  `--if-unchanged <etag>` mismatch (any of `section set/append/insert/replace`,
+  `patch`, `replace`, or the whole-frontmatter ops) previously exited `3` with
+  only a human line on **stderr** and an **empty** stdout. Under `--json` the
+  contract promises "stdout is one clean JSON object" on every path, and that
+  promise now actually holds: a mismatch emits
+  `{"ok": false, "applied": false, "op": "etag_check", "scope": <ref|`*`>,
+  "code": 3, "error": …, "etag_expected": …, "etag_actual": …}` on stdout (the
+  human message still goes to stderr) and leaves the file untouched. Agents
+  doing `serde_json::from_str(&stdout)` no longer get a silent empty string on
+  the retry path. See the README's agent-contract section.
 
 ## [0.1.0] — 2026-10-17
 
