@@ -79,6 +79,9 @@ There is no `kb/` package; it is a plain directory that both binaries share.
 
 ## Style
 
+- `.editorconfig` pins editor-level defaults (UTF-8, LF, 4-space indent,
+  trimmed trailing whitespace, final newline). Most editors honour it out of
+  the box; no install step needed.
 - No new dependencies without a reason in the PR description. The hardened
   build exists specifically to keep the dependency tree small; pull in a TUI
   / editor / network crate and you defeat the point.
