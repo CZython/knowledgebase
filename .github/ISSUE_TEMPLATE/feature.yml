@@ -1,0 +1,41 @@
+name: Feature request
+about: A verb, flag, or behaviour kb should have
+title: ''
+labels: [enhancement, needs-triage]
+type: Feature
+body:
+  - type: textarea
+    id: want
+    attributes:
+      label: What you want to be able to do
+      description: The task from your point of view — what are you doing with kb, and where does it stop?
+    validations:
+      required: true
+
+  - type: textarea
+    id: cmd
+    attributes:
+      label: The command you want
+      description: 'The CLI IS the API. Sketch the verb/flags. Should a --json result match the other verbs (dry-run / yes / json / if-unchanged)? User-only or hardened too?'
+      render: shell
+      placeholder: |
+        $ kb create --from-template meeting
+        $ kb export --format json
+    validations:
+      required: false
+
+  - type: textarea
+    id: why
+    attributes:
+      label: Why this shape
+      description: 'What did you try today (another tool, a shell one-liner) and what was the gap?'
+    validations:
+      required: false
+
+  - type: textarea
+    id: alt
+    attributes:
+      label: Alternatives you considered
+      placeholder: e.g. "a `kb export --format json` instead of a new verb"
+    validations:
+      required: false

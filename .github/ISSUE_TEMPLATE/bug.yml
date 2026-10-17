@@ -1,0 +1,77 @@
+name: Bug report
+about: Something kb did that you did not expect
+title: ''
+labels: [bug, needs-triage]
+type: Bug
+body:
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened
+      description: The observed behaviour, in one or two sentences.
+      placeholder: kb section set wrote a fresh frontmatter block into my file
+    validations:
+      required: true
+
+  - type: textarea
+    id: cmd
+    attributes:
+      label: Command + version
+      description: The exact reproduction, including kb --version.
+      render: shell
+      placeholder: |
+        $ kb --version
+        kb 0.1.0
+        $ kb section --file repro.md set fm.title --text NEW
+        <output>
+    validations:
+      required: true
+
+  - type: dropdown
+    id: variant
+    attributes:
+      label: Build variant
+      options:
+        - kb (user — TUI + editor)
+        - kb-hardened (headless)
+        - other / not sure
+    validations:
+      required: true
+
+  - type: dropdown
+    id: os
+    attributes:
+      label: OS / arch
+      options:
+        - Linux x86_64
+        - Linux arm64
+        - macOS Apple Silicon
+        - macOS Intel
+        - Windows x86_64
+        - other
+    validations:
+      required: true
+
+  - type: textarea
+    id: expect
+    attributes:
+      label: Expected behaviour
+    validations:
+      required: false
+
+  - type: textarea
+    id: input
+    attributes:
+      label: Input that reproduces it
+      description: A minimal .md (with frontmatter — most section bugs need it), plus the failing op.
+      render: markdown
+    validations:
+      required: false
+
+  - type: textarea
+    id: notes
+    attributes:
+      label: Notes
+      description: '$EDITOR set to something unusual, a read-only dir, a non-UTF-8 byte, a container, … Anything environment-specific.'
+    validations:
+      required: false

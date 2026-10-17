@@ -188,13 +188,16 @@ Prereq for the `verus` stage: a Verus install on `$PATH` and `z3` at
 │                        #   artifacts are git-ignored; the .sh scripts are tracked
 ├── tools/               # origin artifacts (e.g. `mdtool.py` — the Python
 │                        #   prototype `kb-core::section` was ported from)
-├── .github/workflows/   # ci.yml (build+clippy+test+musl) and release.yml
-│                        #   (3-platform matrix → GitHub Release assets)
 ├── gate.sh              # full verification (build, clippy, tests, verus, behavior)
 ├── verify.sh            # Verus + z3 stage (called by gate.sh)
 ├── HARDENED_BUILD.md    # why two packages + the lock on the hardened surface
 ├── PLAN.md              # long-form design notes, module-by-module
 ├── SECURITY_REPORT.md   # threat model + audit + resolved findings
+├── CHANGELOG.md         # per-release notes
+├── CONTRIBUTING.md      # build/test/contribute
+├── .github/             # ISSUE_TEMPLATE/ (bug + feature forms)
+│   └── workflows/       #   ci.yml (build+clippy+test+musl) and release.yml
+│                        #   (4-runner matrix → GitHub Release assets)
 └── LICENSE              # MIT
 ```
 
@@ -204,11 +207,18 @@ comments for the full rationale of the two-package split.
 
 ---
 
+## Contributing
+
+See [CONTRIBUTING.md](CONTRIBUTING.md) for the dev loop (`./gate.sh`), the
+feature-flag matrix, and the shared-body gotcha. [CHANGELOG.md](CHANGELOG.md)
+tracks every release. Report bugs / request features via the issue templates
+in `.github/ISSUE_TEMPLATE/`.
+
 ## License
 
 MIT — see [LICENSE](LICENSE).
 
-## Badges / metadata
+## Project metadata
 
 * **License:** MIT
 * **Rust:** 1.98.1 (see `rust-toolchain.toml` — host-agnostic pin)
