@@ -6,7 +6,29 @@ the API is still moving; breaking changes are called out explicitly.
 
 ## [Unreleased]
 
+### Added
+- **TUI "edit" is now a deliberate, zsh-completion-style three-stage flow
+  (renamed to `edit metadata`).** Opening the metadata editor from the
+  browse/read view now lands on a *field picker* first (a deliberate step, not
+  implicit): select one of `title` / `description` / `tags` / `search_terms`,
+  each showing a *preview* of what's on disk right now (so a field is never a
+  mystery before you edit it), then `Enter` opens that field's editor (scalars
+  pre-filled for an in-place edit; lists empty, with a live token menu), and
+  `Tab` toggles to the completion menu — type to filter, `↑`/`↓` to choose, and
+  Tab back fills the highlight into the buffer exactly like zsh. `Esc` pops one
+  stage (Completions → Editor → Picker → browse).
+- **`v` key in the browse/read views opens the selected page in `$EDITOR`**
+  (`$VISUAL` → `$EDITOR` → `vi`), reusing the existing `edit in place` path —
+  in-editor flow from the TUI without leaving it. Gated on the `editor`
+  feature (absent in the hardened build).
+
 ### Changed
+- **`edit in place` (`-e`) / `v` failures now tell you *why*.** A failed
+  *launch* (no editor found) and a non-zero *exit* are reported distinctly, and
+  the launch case names the env var tried (`$VISUAL`/`$EDITOR`) and that the
+  fallback `vi` isn't on `$PATH`, pointing at the fix instead of a bare
+  `launch …: No such file`. The file is left untouched either way.
+- **Agent contract — `--json` now holds on the failure path too.** An
 - **Agent contract — `--json` now holds on the failure path too.** An
   `--if-unchanged <etag>` mismatch (any of `section set/append/insert/replace`,
   `patch`, `replace`, or the whole-frontmatter ops) previously exited `3` with

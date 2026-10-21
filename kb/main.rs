@@ -3073,32 +3073,63 @@ fn pick_editor() -> String {
     "vi".to_string()
 }
 
+/// The *name* of the env var that chose the current editor, for a clear
+/// "set it to something you have" hint. Returns `None` when the editor is
+/// the hard `vi` fallback (neither `$VISUAL` nor `$EDITOR` was set).
+#[cfg(feature = "editor")]
+fn editor_source() -> Option<&'static str> {
+    if std::env::var("VISUAL").ok().filter(|v| !v.trim().is_empty()).is_some() {
+        Some("VISUAL")
+    } else if std::env::var("EDITOR").ok().filter(|v| !v.trim().is_empty()).is_some() {
+        Some("EDITOR")
+    } else {
+        None
+    }
+}
+
 /// Open an already-written file in the user's editor **in place** ($VISUAL,
-/// then $EDITOR, then `vi`). Used by `kb create -e`, where the scaffold on
-/// disk *is* the buffer (unlike `section edit`, which splices a temp copy
-/// back through the section ops). A non-zero editor exit is an error — the
-/// scaffold is left on disk, so nothing is lost, but nothing is indexed
-/// either (the caller unwinds before the DB write).
-/// SECURITY_REPORT 3.1: gates with `run_editor`/`pick_editor` — in a hardened
-/// build the whole editor surface (incl. `-e`, which calls here via
-/// `cmd_create`) is compiled out; clap rejects `-e` as an unexpected argument.
+/// then $EDITOR, then `vi`). Used by `kb create -e` (the scaffold on disk
+/// *is* the buffer) and the TUI `v` shortcut.
+///
+/// The two failure modes are reported distinctly because they mean
+/// different things: **launch failed** (the editor binary was not found —
+/// "you don't have `$VISUAL`/`$EDITOR`/`vi` installed") names the env var
+/// that was used and leaves the file untouched; a **non-zero exit** means
+/// the editor *ran* and aborted, leaving the file on disk as you found it.
+///
+/// SECURITY_REPORT 3.1: gates with `run_editor`/`pick_editor` — in a
+/// hardened build the whole editor surface (incl. `-e`, which calls here
+/// via `cmd_create`) is compiled out; clap rejects `-e` as unexpected.
 #[cfg(feature = "editor")]
 fn edit_in_place(path: &Path) -> Result<(), (String, i32)> {
     let editor = pick_editor();
-    let st = std::process::Command::new(&editor)
+    let res = std::process::Command::new(&editor)
         .arg(path)
-        .status()
-        .map_err(|e| (format!("launch {editor}: {e}"), EXIT_ERR))?;
-    if !st.success() {
-        return Err((
+        .status();
+    match res {
+        Ok(st) if st.success() => Ok(()),
+        Ok(st) => Err((
             format!(
-                "editor {editor} exited with {st} — {} was left with the scaffold (fix it by hand, or delete it and re-run `kb create`)",
+                "editor {editor} ran but exited with {st} — {} was left on disk as you found it (open it again to continue, or delete it)",
                 path.display()
             ),
             EXIT_ERR,
-        ));
+        )),
+        Err(e) => {
+            let hint = match editor_source() {
+                Some(k) => {
+                    format!(
+                        "$ {k}={editor} was not found / could not be launched. Set $VISUAL or $EDITOR to an editor you have installed (and make sure it is on $PATH), then retry."
+                    )
+                }
+                None => "no editor available: $VISUAL and $EDITOR are unset and the fallback `vi` is not on $PATH. Set $VISUAL or $EDITOR to an editor you have installed, then retry.".to_string(),
+            };
+            Err((
+                format!("could not launch {editor}: {e} — {hint}"),
+                EXIT_ERR,
+            ))
+        }
     }
-    Ok(())
 }
 
 /// Interactive `y/N` prompt. Non-interactive stdin (piped / no TTY) never

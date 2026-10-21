@@ -206,6 +206,41 @@ pub struct ReadState {
     pub scroll_top: usize,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[allow(dead_code)]
+/// The **stage** of the Edit-metadata screen. The Edit-mode state machine is
+/// the same "three-stage" shape a zsh completion goes through:
+///
+/// 1. **Picker** — the field list is shown (title / description / tags /
+///    search_terms, with each field's *current* value next to it). `↑`/`↓`
+///    move the highlight; `Enter` moves to the *Editor* for that field.
+/// 2. **Editor** — the value input buffer is active for the chosen field.
+///    Printable chars append, `Backspace` pops; for list fields `x` drops the
+///    last token. `Tab` moves to the *Completions* (the live menu, zsh-style).
+///    `Enter` commits the buffer. `Esc` goes back to the Picker.
+/// 3. **Completions** — the live candidate list (from `suggestions_for`) is
+///    active. `↑`/`↓` move the highlighted candidate; `Enter` accepts it (the
+///    buffer is updated, focus returns to the Editor); `Esc` / `Tab` return
+///    to the Editor with the buffer unchanged; typing / backspace filters the
+///    list live (the *menu* is a pure function of the buffer, exactly the same
+///    way a zsh completion narrows as you keep typing). `q` / `C-c` quit.
+///
+/// The split matters for UX: the user picks a field (stage 1) deliberately
+/// before touching its value (stages 2/3); the buffer and the menu are two
+/// distinct *focus states* of the same pane, toggled by `Tab` (exactly the
+/// zsh idiom the user was looking for), not two parallel panes that each
+/// steal keys from the other.
+pub enum EditStage {
+    /// Stage 1 — the field picker is active (the value buffer is not).
+    Picker,
+    /// Stage 2 — the value input buffer is active (the completion menu is
+    /// shown as a preview, not focused).
+    Editor,
+    /// Stage 3 — the completion menu is active (the buffer is read-only
+    /// *for arrow-nav*; typing still filters, exactly zsh's behaviour).
+    Completions,
+}
+
 /// A field the Edit mode can show — either a *scalar* (free text) or a
 /// *list* (the value is the next item to append). Both are edited over the
 /// already-verified `kb-core::frontmatter` ops; the TUI just composes them.
@@ -315,6 +350,22 @@ pub struct EditState {
     /// add the new tokens. For scalar fields these are always equal to
     /// `entry_bytes` (scalars don't do tail removal).
     pub working_bytes: Vec<u8>,
+    /// The current **stage** of this edit session — which of the three
+    /// zsh-style focus states the user is in. Defaults to `Editor` when we
+    /// come in from the *old* `open_edit` path (a test fixture); `open_edit`
+    /// in the TUI flow starts in `Picker`. See [EditStage].
+    pub stage: EditStage,
+    /// The currently highlighted **field** in the Picker stage (an index
+    /// into `EditField::all()`). `field` (above) is the *currently being
+    /// edited* field (the Editor/Completions stage); `field_cursor` is the
+    /// *Picker* cursor. They may legitimately differ (the user was on
+    /// `tags` in the Editor, went back to the Picker, and is now hovering
+    /// over `description`). Total: always `< EditField::all().len()`.
+    pub field_cursor: usize,
+    /// The highlighted **completion** in the Completions stage (an index
+    /// into `suggestions`). Total: always `< suggestions.len()` (clamped on
+    /// every filter change). `0` when `suggestions` is empty.
+    pub sug_cursor: usize,
 }
 
 impl EditState {
@@ -566,6 +617,50 @@ impl App {
         self.mode = Mode::Browse;
     }
 
+    /// Open the *selected page's file* directly in the user's
+    /// `$VISUAL` / `$EDITOR` / `vi` — the same `edit_in_place` the CLI uses
+    /// for `kb create -e`, so the TUI and the CLI share one editor-launch
+    /// path (one place to tweak, one error wording). The page is identified
+    /// by its *absolute path* (stable across DB re-indexes) and must exist
+    /// on disk — a missing file is an error, not a no-op (the TUI should
+    /// never select a phantom row; `kb refresh` re-syncs if it happens).
+    /// **Total** on an empty `view`: returns `Ok(())` (the user has
+    /// nothing to open).
+    ///
+    /// The *mode* is left in `Browse` / `Read` (the editor launches
+    /// synchronously — the TUI does not repaint until it returns). A
+    /// successful editor exit re-reads the page (so any `kb refresh` or
+    /// manual `Esc`-back sees the freshest body); this is the same refresh
+    /// `open_read` / `close_read` implicitly rely on.
+    #[cfg(feature = "editor")]
+    pub fn open_in_editor(&mut self) -> KbResult<()> {
+        let row = match self.selected_row() {
+            Some(r) => r.clone(),
+            None => {
+                self.set_info("nothing selected — scroll to a page, then press `v`");
+                return Ok(());
+            }
+        };
+        let path = std::path::PathBuf::from(&row.abs_path);
+        crate::edit_in_place(&path)?;
+        // Best-effort re-read: if the user edited the file, the *DB* is
+        // still on the old bytes until `kb refresh` — but the *file* is the
+        // source of truth, so we re-load the Read body if we're in Read
+        // (cheap: one fs read + one DB parse; a failure is a no-op so the
+        // TUI stays usable on a transient io error).
+        if let Mode::Read(r) = &mut self.mode {
+            if let Ok((body, outline)) = load_body(&self.db, &path.to_string_lossy()) {
+                r.body = body;
+                r.outline = outline;
+                r.scroll_top = 0;
+            }
+        }
+        // Also re-snapshot the row's file bytes (in Browse mode the row's
+        // `abs_path` is already what we'd read next — no state to update).
+        self.set_success(format!("opened {} — Esc back (the file is now source of truth; re-index with `kb refresh`)", row.abs_path));
+        Ok(())
+    }
+
     // ===================================================================
     //  M8.2 — Edit mode
     //  ===================================================================
@@ -575,6 +670,15 @@ impl App {
     /// the no-op rule), and the field's *current* values are read so the
     /// user edits in place (scalars) and sees what's there (lists).
     /// **Total**: an open on an empty `view` is a no-op.
+    ///
+    /// Enters the **Picker** stage: the *field list* is shown (title /
+    /// description / tags / search_terms, with each field's current value
+    /// next to it). `↑`/`↓` move the highlight; `Enter` moves to the
+    /// *Editor* for that field. The user must *choose* a field before
+    /// touching its value — the value buffer and the completion menu are
+    /// two *focus states* of the same pane, toggled by `Tab` (the zsh
+    /// completion idiom), not two parallel panes that steal keys from each
+    /// other.
     pub fn open_edit(&mut self) -> KbResult<()> {
         let row = match self.selected_row() {
             Some(r) => r.clone(),
@@ -587,40 +691,26 @@ impl App {
         let bytes = std::fs::read(&row.abs_path)
             .map_err(|e| (format!("read {} for edit: {e}", row.abs_path), EXIT_ERR))?;
         let field = EditField::Title;
-        let corpus = corpus_for(&self.db, field);
-        let value = if field.is_list() {
-            String::new()
-        } else {
-            fm::scalar_value(bytes.as_slice(), field.key()).unwrap_or_default()
-        };
-        let current_list = if field.is_list() {
-            fm::list_values(bytes.as_slice(), field.key()).unwrap_or_default()
-        } else {
-            Vec::new()
-        };
-        // Tab-autocomplete: on a list field the suggestions mirror the
-        // corpus (empty buffer → the full corpus, the "available tokens"
-        // hint). On a scalar there is no autocomplete (free text).
-        let suggestions = if field.is_list() {
-            suggestions_for(&corpus, "")
-        } else {
-            Vec::new()
-        };
-        let entry_list = current_list.clone();
-        let working_bytes = bytes.clone();
+        // The Picker stage shows the *field list*; it does not yet use a
+        // corpus / suggestions (no field is active). Those are loaded on
+        // demand the moment the user enters the Editor for a specific field
+        // (the `cycle_field` path).
         self.mode = Mode::Edit(EditState {
             field,
             abs_path: row.abs_path,
             id: row.id,
-            value,
-            suggestions,
-            corpus,
-            entry_bytes: bytes,
-            entry_list,
-            current_list,
-            working_bytes,
+            value: String::new(),
+            suggestions: Vec::new(),
+            corpus: Vec::new(),
+            entry_bytes: bytes.clone(),
+            entry_list: Vec::new(),
+            current_list: Vec::new(),
+            working_bytes: bytes,
+            stage: EditStage::Picker,
+            field_cursor: 0,
+            sug_cursor: 0,
         });
-        self.set_info("edit — ↑/j field · type value · Tab autocomplete (lists) · Enter commit · Esc back");
+        self.set_info("edit metadata — ↑/↓ field · Enter to edit · Esc back");
         Ok(())
     }
 
@@ -691,7 +781,187 @@ impl App {
 
     /// The human note for a field switch (the status bar after `cycle_field`).
     fn edit_field_note(field: EditField) -> String {
-        format!("editing {} — type a value · Enter commit · Esc back", field.label())
+        format!(
+            "editing {} — type value · Tab open menu (lists) · Enter commit · Esc back",
+            field.label()
+        )
+    }
+
+    /// A neutral status note for the *current* field, pulled from the
+    /// active `EditState` — used by `toggle_completions` when it flips back
+    /// to the Editor without applying a highlight (empty menu), so the
+    /// status bar reflects the field we're on.
+    fn edit_field_note_note(&self) -> String {
+        match &self.mode {
+            Mode::Edit(e) => Self::edit_field_note(e.field),
+            _ => "editing".to_string(),
+        }
+    }
+
+    /// Move the **Picker** cursor (the highlighted *field*) up or down,
+    /// wrapping at the edge. This is the *deliberate* first step: the user
+    /// navigates the field list before entering any field's value. Total:
+    /// always lands within the field list, even on a `field_cursor` at the
+    /// very first/last entry.
+    pub fn picker_move(&mut self, down: bool) {
+        if let Mode::Edit(e) = &mut self.mode {
+            if e.stage != EditStage::Picker {
+                // Coming back to the Picker preserves the cursor; moving is
+                // only meaningful here. (Defensive: a stray call in a other
+                // stage has no field to move to.)
+                return;
+            }
+            let n = EditField::all().len();
+            e.field_cursor = if down { (e.field_cursor + 1) % n } else { (e.field_cursor + n - 1) % n };
+            let hovered = EditField::all()[e.field_cursor];
+            self.set_info(format!(
+                "edit metadata — hover: {} · Enter to edit · ↑/↓ move · Esc back",
+                hovered.label()
+            ));
+        }
+    }
+
+    /// Move from the **Picker** stage into the **Editor** for the
+    /// highlighted field. Loads that field's corpus + current value (the
+    /// *same* `cycle_field` load, minus the stage flip) and seeds the value
+    /// buffer so the user edits *in place*: a scalar field is pre-filled
+    /// with its current value (an unchanged commit is a no-op), a list field
+    /// is empty (the buffer is the *new item(s)* to append). The completion
+    /// menu is *not* focused yet — `Tab` (zsh idiom) toggles to it.
+    pub fn enter_editor(&mut self) {
+        // Snapshot the *target* field from the Picker cursor (a copy of
+        // the `EditField` — a single atomic read under an `&mut` borrow).
+        let target = match &self.mode {
+            Mode::Edit(e) if e.stage == EditStage::Picker => EditField::all()[e.field_cursor],
+            _ => return, // already in the Editor/Completions for this field
+        };
+        // `cycle_field` re-reads the page's file and loads the field's
+        // current value as the buffer's *seed* (the *in-place* edit
+        // invariant — scalars pre-filled, lists empty), and sets up the
+        // live corpus / suggestions the menu needs.
+        self.cycle_field(target);
+        // Now the mode is in `Editor` (or wherever `cycle_field` left it)
+        // — *force* the stage to `Editor` so the render + input dispatch
+        // see the correct focus state, and reset the menu cursor to 0
+        // (the menu should start at the top of the just-loaded list).
+        if let Mode::Edit(e) = &mut self.mode {
+            e.stage = EditStage::Editor;
+            e.sug_cursor = 0;
+        }
+        self.set_info(Self::edit_field_note(target));
+    }
+
+    /// Toggle between the **Editor** (buffer active) and **Completions**
+    /// (menu active) stages — the zsh `Tab` idiom. This is what separates
+    /// the value buffer from the completion menu: not two parallel panes
+    /// that each steal keys, but two *focus states* of the same pane.
+    ///
+    /// Entering Completions (Editor → Completions): the menu is *focused*
+    /// (the suggestion cursor is live); the buffer is unchanged.
+    ///
+    /// Leaving Completions (Completions → Editor): the *highlighted*
+    /// suggestion is applied to the buffer (the "Tab-fill" — exactly what
+    /// zsh does when you Tab out of a completion), then the cursor is
+    /// clamped into the (possibly just-re-narrowed) list and the stage
+    /// flips to `Editor`. If the menu is empty, nothing is applied (the
+    /// buffer is left as-is).
+    ///
+    /// The **Picker** stage has no buffer to toggle; `Tab` is a no-op here
+    /// (the user should press Enter to enter a field first).
+    pub fn toggle_completions(&mut self) {
+        let from = match &self.mode {
+            Mode::Edit(e) => e.stage,
+            _ => return,
+        };
+        match from {
+            EditStage::Editor => {
+                if let Mode::Edit(e) = &mut self.mode {
+                    e.stage = EditStage::Completions;
+                    // Clamp the cursor into the (possibly empty) list so
+                    // it is always a valid index. `0` when empty (the menu
+                    // is a blank preview, not an error).
+                    e.sug_cursor = e.sug_cursor.min(e.suggestions.len().saturating_sub(1));
+                }
+                self.set_info(
+                    "completions — ↑/↓ move · Enter accept · Tab back to buffer (applies the highlight)",
+                );
+            }
+            EditStage::Completions => {
+                // Apply the highlighted suggestion (if any) to the buffer,
+                // then flip back to the Editor. The "Tab-fill" happens
+                // here, not in the input dispatch — one code path, one
+                // place to tweak, one error wording.
+                let pick = match &self.mode {
+                    Mode::Edit(e) if e.stage == EditStage::Completions => {
+                        e.suggestions.get(e.sug_cursor).cloned()
+                    }
+                    _ => None,
+                };
+                let had_pick = pick.is_some();
+                if let Some(tok) = pick {
+                    if let Mode::Edit(e) = &mut self.mode {
+                        e.value = tok;
+                        e.suggestions = suggestions_for(&e.corpus, &e.value);
+                    }
+                }
+                if let Mode::Edit(e) = &mut self.mode {
+                    e.sug_cursor = e.suggestions.len().saturating_sub(1);
+                    e.stage = EditStage::Editor;
+                }
+                if had_pick {
+                    self.set_info("filled highlight into the buffer — Tab to re-open · Enter commit");
+                } else {
+                    self.set_info(self.edit_field_note_note());
+                }
+            }
+            EditStage::Picker => {
+                // No buffer / menu in the Picker; a stray `Tab` is a no-op
+                // (the user should press Enter to enter a field). We do
+                // *not* flip the stage, and we do *not* change the cursor
+                // (the Picker cursor is the field cursor, not a completion
+                // cursor).
+                self.set_info("Picker — Enter to enter a field (Tab does nothing until a field is open)");
+            }
+        }
+    }
+
+    /// Accept the highlighted **completion** in the Completions stage:
+    /// commit it as the current field's edit (the same `commit_edit` the
+    /// Enter-to-commit path runs) and, on success, return to the **Picker**
+    /// (the user just finished one field; the natural next action is to
+    /// pick the *next* field, or Esc to back out). A commit *failure*
+    /// (e.g. the file changed on disk) leaves the user in the Editor for
+    /// the field still, so they can see + fix it — we do *not* silently
+    /// drop them back to the Picker after a refused write.
+    /// **Total**: an empty-buffer scalar / list commit is the documented
+    /// no-op path (the file is written back byte-identical).
+    pub fn accept_completion(&mut self) -> KbResult<()> {
+        let res = self.commit_edit();
+        if res.is_ok() {
+            if let Mode::Edit(e) = &mut self.mode {
+                e.stage = EditStage::Picker;
+                // The Picker cursor stays where it was (the field we just
+                // edited is still highlighted — the user can re-enter it or
+                // move on).
+                e.sug_cursor = 0;
+            }
+        }
+        res
+    }
+
+    /// Move the highlighted **completion** up or down within the live
+    /// suggestion list, wrapping at the edge (the zsh completion idiom).
+    /// No-op in any stage other than Completions (a stray `↑`/`↓` there is a
+    /// field-move or Picker-move, handled by the caller). Total: the cursor
+    /// is always clamped into `[0, suggestions.len())` (→ `0` when empty).
+    pub fn move_suggestion(&mut self, down: bool) {
+        if let Mode::Edit(e) = &mut self.mode {
+            if e.stage != EditStage::Completions || e.suggestions.is_empty() {
+                return;
+            }
+            let n = e.suggestions.len();
+            e.sug_cursor = if down { (e.sug_cursor + 1) % n } else { (e.sug_cursor + n - 1) % n };
+        }
     }
 
     /// Drop the last item from the active **list** field (the `x` key — a
@@ -2178,6 +2448,9 @@ mod tests {
             entry_list: Vec::new(),
             current_list: Vec::new(),
             working_bytes: bytes.to_vec(),
+            stage: EditStage::Editor,
+            field_cursor: 0,
+            sug_cursor: 0,
         };
         assert!(es.plan().is_empty(), "unchanged scalar → no-op plan");
 
@@ -2203,6 +2476,9 @@ mod tests {
             entry_list: vec!["mTLS".into(), "transformer".into()],
             current_list: vec!["mTLS".into(), "transformer".into()],
             working_bytes: bytes.to_vec(),
+            stage: EditStage::Editor,
+            field_cursor: 2,
+            sug_cursor: 0,
         };
         assert!(es3.plan().is_empty(), "empty buffer on a list → no-op plan");
 
@@ -2352,6 +2628,211 @@ mod tests {
         // We are still in Edit mode (the commit leaves the mode intact).
         assert!(matches!(app.mode, Mode::Edit(_)), "commit stays in Edit mode");
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // ---- Redesigned edit flow (zsh-style three-stage) --------------------
+
+    /// A small helper: seed an on-disk page + DB row + the derived
+    /// `page_tags` rows, return an `App` with that page selected. Mirrors the
+    /// fixture in `close_edit_...` but returns the temp dir so the caller can
+    /// clean it up. Seeding `page_tags` is what gives the `Tags` field a
+    /// non-empty *corpus* (the suggestions come from the DB, not the file).
+    fn seeded_app() -> (App, std::path::PathBuf) {
+        let db = Db::open_in_memory_test().unwrap();
+        db.migrate().unwrap();
+        let dir = std::env::temp_dir().join(format!("kb_tui_redesign_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("page.md");
+        std::fs::write(&path, FM_FIXTURE.as_bytes()).unwrap();
+        let abs = path.to_string_lossy().into_owned();
+        db.conn
+            .execute(
+                "INSERT INTO pages (abs_path, id, type, title, root, rel_path, search_terms,
+                                    mtime_ns, content_hash)
+                 VALUES (?1, 'note:page', 'note', 'Hello World', '/root', 'page.md', NULL, 0, 'x')",
+                rusqlite::params![abs],
+            )
+            .unwrap();
+        // The tags field's *corpus* is read from `page_tags` (the DB is the
+        // index; the file is the file). Seed the two fixture tokens so a
+        // tags-field edit has something to complete against.
+        db.conn
+            .execute(
+                "INSERT OR IGNORE INTO page_tags (abs_path, tag) VALUES (?1, 'mtls')",
+                rusqlite::params![abs],
+            )
+            .unwrap();
+        db.conn
+            .execute(
+                "INSERT OR IGNORE INTO page_tags (abs_path, tag) VALUES (?1, 'transformer')",
+                rusqlite::params![abs],
+            )
+            .unwrap();
+        (App::new(db).unwrap(), path)
+    }
+
+    /// `open_edit` now starts in the **Picker** stage: the field list is
+    /// shown, no field is entered yet, the buffer is empty, the field is
+    /// still `Title` (the first in the cycle) and `field_cursor` is 0.
+    /// This is the "deliberate first step" — entering a specific field is a
+    /// separate `Enter` action (`enter_editor`).
+    #[test]
+    fn open_edit_starts_in_the_picker_stage() {
+        let (mut app, _dir) = seeded_app();
+        assert!(app.open_edit().is_ok());
+        match &app.mode {
+            Mode::Edit(e) => {
+                assert_eq!(e.stage, EditStage::Picker, "starts in Picker");
+                assert_eq!(e.field, EditField::Title, "field defaults to the first");
+                assert_eq!(e.field_cursor, 0, "cursor on the first field");
+                assert!(e.value.is_empty(), "buffer is empty before a field is entered");
+                assert!(e.suggestions.is_empty(), "no suggestions before a field is entered");
+            }
+            _ => panic!("open_edit did not enter Edit mode"),
+        }
+    }
+
+    /// `picker_move` wraps at both ends and never leaves the field list
+    /// (the cursor is always a valid index into `EditField::all()`), and
+    /// stays in the Picker stage.
+    #[test]
+    fn picker_move_wraps_and_is_bounded() {
+        let (mut app, _dir) = seeded_app();
+        app.open_edit().unwrap();
+        let n = EditField::all().len();
+        // Down wraps forward (0 → 1).
+        app.picker_move(true);
+        assert_eq!(picker_cursor(&app), 1);
+        // Up n times from position 1 wraps to position 1 - n = position 1
+        // (full circle), and stays valid every step.
+        for _ in 0..n {
+            app.picker_move(false);
+            assert!(picker_cursor(&app) < n, "cursor is a valid index");
+        }
+        assert_eq!(picker_cursor(&app), 1, "n up-moves from 1 wraps back to 1");
+        // We never left the Picker stage.
+        assert_eq!(stage(&app), EditStage::Picker);
+    }
+
+    /// `enter_editor` loads the *highlighted* field into the Editor stage:
+    /// the buffer is seeded with the field's current value (scalar) or empty
+    /// (list), the stage flips to `Editor`, and the menu cursor resets to 0.
+    /// This is the "choose a field, then touch its value" invariant.
+    #[test]
+    fn enter_editor_loads_the_field_and_starts_in_editor() {
+        let (mut app, _dir) = seeded_app();
+        app.open_edit().unwrap();
+        // Move the cursor to `tags` (index 2) and enter it.
+        app.picker_move(true);
+        app.picker_move(true);
+        assert_eq!(picker_cursor(&app), 2);
+        app.enter_editor();
+        match &app.mode {
+            Mode::Edit(e) => {
+                assert_eq!(e.stage, EditStage::Editor, "flips to Editor");
+                assert_eq!(e.field, EditField::Tags, "the chosen field is entered");
+                assert!(e.value.is_empty(), "a list field seeds an empty buffer");
+                assert_eq!(e.sug_cursor, 0, "menu cursor resets");
+                // The existing list items are loaded (the "what's there").
+                assert_eq!(
+                    e.current_list,
+                    vec!["mTLS", "transformer"],
+                    "the field's existing items are loaded"
+                );
+            }
+            _ => panic!("not in Edit mode"),
+        }
+        // `enter_editor` on a *scalar* field seeds the buffer with the current
+        // value (the in-place edit guarantee).
+        let (mut app2, _dir2) = seeded_app();
+        app2.open_edit().unwrap();
+        app2.enter_editor(); // field_cursor 0 → Title (scalar)
+        if let Mode::Edit(ref e) = app2.mode {
+            assert_eq!(e.stage, EditStage::Editor);
+            assert_eq!(e.field, EditField::Title);
+            assert_eq!(e.value, "Hello World", "scalar seeds the current value");
+        }
+    }
+
+    /// `toggle_completions` flips Editor↔Completions and (on the way back)
+    /// applies the highlighted completion to the buffer — the zsh "Tab-fill".
+    /// With an empty menu it applies nothing and the buffer is unchanged.
+    #[test]
+    fn toggle_completions_applies_the_highlight_on_the_way_back() {
+        let (mut app, _dir) = seeded_app();
+        app.open_edit().unwrap();
+        // Enter the `tags` field (the corpus has `mTLS` / `transformer`).
+        app.picker_move(true);
+        app.picker_move(true);
+        app.enter_editor();
+        // Type a partial token so the suggestions narrow to one match.
+        app.edit_type('m');
+        app.edit_type('t');
+        // Open the menu (Editor → Completions).
+        app.toggle_completions();
+        assert_eq!(stage(&app), EditStage::Completions);
+        // The narrowed list starts at "mTLS" first.
+        if let Mode::Edit(ref e) = app.mode {
+            assert!(!e.suggestions.is_empty(), "there is a match for 'mt'");
+        }
+        // Going back (Completions → Editor) applies the highlight into the buffer.
+        app.toggle_completions();
+        assert_eq!(stage(&app), EditStage::Editor);
+        if let Mode::Edit(ref e) = app.mode {
+            assert!(!e.value.is_empty(), "the highlighted token filled the buffer");
+        }
+    }
+
+    /// `accept_completion` (Enter from the menu) commits the current field
+    /// and returns to the **Picker** on success — the user just finished one
+    /// field, the natural next action is to pick another (or Esc to leave).
+    /// A commit *failure* would leave them in the Editor, so this "return to
+    /// Picker" is specifically the success path.
+    #[test]
+    fn accept_completion_commits_and_returns_to_picker() {
+        let (mut app, _dir) = seeded_app();
+        app.open_edit().unwrap();
+        // Enter `tags`, append a new token, open the menu, accept it.
+        app.picker_move(true);
+        app.picker_move(true);
+        app.enter_editor();
+        app.edit_type('l');
+        app.edit_type('l');
+        app.edit_type('m');
+        app.toggle_completions(); // focus the menu
+        assert!(app.accept_completion().is_ok(), "accept + commit is Ok");
+        assert_eq!(stage(&app), EditStage::Picker, "success returns to the Picker");
+    }
+
+    /// `Esc` in the **Picker** leaves the Edit mode entirely (→ Browse);
+    /// `Esc` in the **Editor/Completions** pops one stage rather than leaving
+    /// edit. This is the "Esc pops back" invariant per stage.
+    #[test]
+    fn esc_pops_back_to_browse_only_from_picker() {
+        let (mut app, _dir) = seeded_app();
+        app.open_edit().unwrap();
+        assert_eq!(stage(&app), EditStage::Picker);
+        // From the Picker, Esc → Browse.
+        app.close_edit();
+        // (We invoke the state transition directly here because the Esc key
+        // dispatch is in the input layer; `close_edit` is the Picker→Browse
+        // half of that dispatch.)
+        assert!(matches!(app.mode, Mode::Browse), "Esc from Picker → Browse");
+    }
+
+    /// Helpers that read the active edit state (total: `App` state accessors
+    /// for the stage / field cursor the input + render layers rely on).
+    fn stage(app: &App) -> EditStage {
+        match &app.mode {
+            Mode::Edit(e) => e.stage,
+            _ => panic!("not in Edit mode while asserting a stage"),
+        }
+    }
+    fn picker_cursor(app: &App) -> usize {
+        match &app.mode {
+            Mode::Edit(e) => e.field_cursor,
+            _ => panic!("not in Edit mode while asserting the picker cursor"),
+        }
     }
 
     // ---- M8.3 alias + roots ---------------------------------------------

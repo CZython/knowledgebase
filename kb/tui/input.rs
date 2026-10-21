@@ -118,12 +118,20 @@ fn handle_browse(app: &mut App, ev: KeyEvent) -> bool {
             app.set_info("type a filter ( / to commit, Esc to clear, q to quit )");
             false
         }
-        // `e` opens the selected page's frontmatter in Edit mode (M8.2).
+        // `e` opens the selected page's metadata in Edit mode (M8.2).
         KeyCode::Char('e') => {
             if let Err((msg, _)) = app.open_edit() {
                 app.set_error(msg);
             } else {
-                app.set_info("edit — ↑/j field · type value · Tab autocomplete (lists) · x remove-tail · Enter commit · Esc back");
+                app.set_info("edit metadata — ↑/↓ field · Enter open field · v $EDITOR · Esc back");
+            }
+            false
+        }
+        // `v` opens the selected page in the user's $EDITOR (or $VISUAL or vi).
+        #[cfg(feature = "editor")]
+        KeyCode::Char('v') => {
+            if let Err((msg, _)) = app.open_in_editor() {
+                app.set_error(msg);
             }
             false
         }
@@ -218,14 +226,22 @@ fn handle_read(app: &mut App, ev: KeyEvent) -> bool {
             false
         }
 
-        // `e` opens the selected page's frontmatter in Edit mode (M8.2):
+        // `e` opens the selected page's metadata in Edit mode (M8.2):
         // the user is already *reading* this page in Read mode, so they
         // know the id / context; `e` is the "edit this" shortcut.
         KeyCode::Char('e') => {
             if let Err((msg, _)) = app.open_edit() {
                 app.set_error(msg);
             } else {
-                app.set_info("edit — ↑/j field · type value · Tab autocomplete (lists) · Enter commit · Esc back");
+                app.set_info("edit metadata — ↑/↓ field · Enter open field · v $EDITOR · Esc back");
+            }
+            false
+        }
+        // `v` opens this page in the user's $EDITOR (or $VISUAL or vi).
+        #[cfg(feature = "editor")]
+        KeyCode::Char('v') => {
+            if let Err((msg, _)) = app.open_in_editor() {
+                app.set_error(msg);
             }
             false
         }
@@ -234,108 +250,195 @@ fn handle_read(app: &mut App, ev: KeyEvent) -> bool {
     }
 }
 
-/// The Edit mode's key-binding table (M8.2): the field navigation
-/// (`↑`/`↓`/`j`/`k` cycle the field form), typing (`printable char`
-/// appends to the value buffer; `Backspace` pops), tab-autocomplete
-/// (`Tab` shows the live suggestions — the *filter* is recomputed in
-/// `edit_type`; the suggestion *display* is render-side), the
-/// "delete tail" key (`x` on a list field), the commit key (`Enter`),
-/// and the back key (`Esc` → Browse, selection preserved; `q` /
-/// `C-c` → quit the whole TUI).
+/// The Edit-metadata key-binding table (M8.2): a *three-stage* state
+/// machine, mirroring the zsh completion idiom — **Picker** (the field
+/// list, choose which field to edit) → **Editor** (the value buffer for
+/// the chosen field, typing / `x` / `Tab`) → **Completions** (the live
+/// suggestion menu, `↑`/`↓` select, `Enter` accepts + commits). `Esc`
+/// pops one stage (Picker→Browse, Editor→Picker, Completions→Editor);
+/// `Tab` toggles Editor↔Completions; `q` / `C-c` quit the whole TUI.
 ///
 /// Order matters because a later `Char(c)` catch-all would swallow the
 /// single-key bindings; the single keys come first (Rust matches top-down).
 fn handle_edit(app: &mut App, ev: KeyEvent) -> bool {
+    // Pull the stage out of the state at the top of the function (the
+    // stage can still be `Picker` / `Editor` / `Completions` — we match
+    // on it below; `q` / `C-c` / `Esc` are the only *common* keys that
+    // do the same thing in every stage).
+    let stage = match &app.mode {
+        crate::tui::Mode::Edit(e) => e.stage,
+        // `handle_edit` is only called when `app.mode` is `Edit` — this
+        // branch is total-on-defensive (an invariant-violating call), but
+        // we keep it so the match arm is exhaustive.
+        _ => return false,
+    };
+
+    // ---- Keys with the same meaning in every stage ----------------------
     match ev.code {
-        KeyCode::Char('q') => true,
-        KeyCode::Char('c') if ev.modifiers.contains(KeyModifiers::CONTROL) => true,
-        // Esc pops back to Browse (the selection is preserved).
-        KeyCode::Esc => {
-            app.close_edit();
-            false
-        }
+        KeyCode::Char('q') => return true, // q quits
+        KeyCode::Char('c') if ev.modifiers.contains(KeyModifiers::CONTROL) => return true, // C-c quits
+        _ => {}
+    }
 
-        // Field navigation: `↑`/`k` cycles *up* the field list (wraps);
-        // `↓`/`j` cycles *down* (wraps).
-        KeyCode::Up => {
-            app.edit_move_field(false);
-            false
-        }
-        KeyCode::Down => {
-            app.edit_move_field(true);
-            false
-        }
-        // The `j`/`k` aliases come *before* the `Char(c)` catch-all.
-        KeyCode::Char('k') => {
-            app.edit_move_field(false);
-            false
-        }
-        KeyCode::Char('j') => {
-            app.edit_move_field(true);
-            false
-        }
-
-        // `x` on a list field: "delete tail". On a scalar, no-op + hint.
-        KeyCode::Char('x') => {
-            app.remove_tail_item();
-            false
-        }
-
-        // `e` is the *open* key in Browse/Read — in Edit it's a
-        // "re-enter edit" no-op (the user is already here).
-        KeyCode::Char('e') => {
-            app.set_info("already in edit mode — Esc back to Browse, q quit");
-            false
-        }
-
-        // `a` opens the Alias manager (M8.3).
-        KeyCode::Char('a') => {
-            if let Err((msg, _)) = app.open_alias() {
-                app.set_error(msg);
-            } else {
-                app.set_info("alias — Tab list/form · Enter add · x remove · Esc back");
+    // `Esc` pops one stage:
+    //   Picker      → Browse       (the user leaves edit entirely)
+    //   Editor      → Picker       (the user abandons this field and picks another)
+    //   Completions → Editor       (the user abandons the menu and returns to the buffer)
+    if ev.code == KeyCode::Esc {
+        match stage {
+            crate::tui::EditStage::Picker => app.close_edit(),
+            crate::tui::EditStage::Editor => {
+                if let crate::tui::Mode::Edit(e) = &mut app.mode {
+                    e.stage = crate::tui::EditStage::Picker;
+                }
+                app.set_info("edit metadata — ↑/↓ field · Enter to edit · Esc back");
             }
-            false
-        }
-        // `r` opens the Roots manager (M8.3).
-        KeyCode::Char('r') => {
-            if let Err((msg, _)) = app.open_roots() {
-                app.set_error(msg);
-            } else {
-                app.set_info("roots — Tab list/form · Enter add · x drop · Esc back");
+            crate::tui::EditStage::Completions => {
+                if let crate::tui::Mode::Edit(e) = &mut app.mode {
+                    e.stage = crate::tui::EditStage::Editor;
+                }
+                app.set_info("editing — type value · Tab complete (lists) · Enter commit · Esc back");
             }
-            false
         }
+        return false;
+    }
 
-        // Any other printable is a char to *type* into the value buffer.
-        KeyCode::Char(c) => {
-            app.edit_type(c);
-            false
+    // `a` opens the Alias manager (M8.3) — same meaning in every stage.
+    if ev.code == KeyCode::Char('a') {
+        if let Err((msg, _)) = app.open_alias() {
+            app.set_error(msg);
+        } else {
+            app.set_info("alias — Tab list/form · Enter add · x remove · Esc back");
         }
-        KeyCode::Backspace => {
-            app.edit_backspace();
-            false
+        return false;
+    }
+    // `r` opens the Roots manager (M8.3) — same meaning in every stage.
+    if ev.code == KeyCode::Char('r') {
+        if let Err((msg, _)) = app.open_roots() {
+            app.set_error(msg);
+        } else {
+            app.set_info("roots — Tab list/form · Enter add · x drop · Esc back");
         }
+        return false;
+    }
 
-        // Tab: no-op on the *state* side — the suggestions are already
-        // recomputed on every `edit_type` / `edit_backspace` (the
-        // "autocomplete is a pure function of (corpus, buffer)" invariant).
-        // The render surface shows them; the user picks by typing (buffer
-        // converges to a unique token) or by `x` (delete tail) re-typing.
-        KeyCode::Tab => {
-            app.set_info("tab — suggestions are live; keep typing to narrow, Enter to commit");
-            false
-        }
-
-        // Enter: commit the current field's edit to disk + re-index.
-        KeyCode::Enter => {
-            if let Err((msg, _)) = app.commit_edit() {
-                app.set_error(msg);
+    // ---- Stage-specific handlers -----------------------------------------
+    match stage {
+        // **Picker** — the field list, the *deliberate first step*. `↑/↓/j/k`
+        // move the cursor among the fields; `Enter` enters the *Editor* for
+        // the current field. Typing is ignored here (the user hasn't chosen
+        // a field yet; `Tab` is a no-op because there's no buffer to
+        // toggle). `x` is a no-op (nothing to remove-tail yet).
+        crate::tui::EditStage::Picker => match ev.code {
+            KeyCode::Up | KeyCode::Char('k') => {
+                app.picker_move(false);
+                false
             }
-            false
-        }
-
-        _ => false,
+            KeyCode::Down | KeyCode::Char('j') => {
+                app.picker_move(true);
+                false
+            }
+            KeyCode::Enter => {
+                app.enter_editor();
+                false
+            }
+            KeyCode::Tab => {
+                app.set_info("Picker stage — Enter to enter a field (Tab toggles Editor↔Completions after entering)");
+                false
+            }
+            _ => {
+                // Stray input: no state change, no status change (the
+                // status bar already shows the picker hint).
+                false
+            }
+        },
+        // **Editor** — the value buffer. Printable chars append, `Backspace`
+        // pops; `x` drops the *tail* of a list field; `Tab` moves to the *
+        // Completions* menu (zsh idiom — the buffer and the menu are two
+        // *focus states* of the same pane). `↑/↓/j/k` change the *field*
+        // (the user's in the middle of this field, and wants to hop to the
+        // next one without leaving edit). Enter = commit the current field.
+        crate::tui::EditStage::Editor => match ev.code {
+            KeyCode::Up | KeyCode::Char('k') => {
+                app.edit_move_field(false);
+                false
+            }
+            KeyCode::Down | KeyCode::Char('j') => {
+                app.edit_move_field(true);
+                false
+            }
+            KeyCode::Char('x') => {
+                app.remove_tail_item();
+                false
+            }
+            KeyCode::Tab => {
+                app.toggle_completions();
+                false
+            }
+            KeyCode::Enter => {
+                if let Err((msg, _)) = app.commit_edit() {
+                    app.set_error(msg);
+                }
+                false
+            }
+            KeyCode::Char(c) => {
+                app.edit_type(c);
+                false
+            }
+            KeyCode::Backspace => {
+                app.edit_backspace();
+                false
+            }
+            _ => false,
+        },
+        // **Completions** — the live menu. `↑/↓/j/k` move the highlight (with
+        // wrap); `Enter` accepts + commits (on success the mode pops back to
+        // Picker); `Tab` returns to the buffer (Esc does the same — both pop
+        // back to Editor). Typing / Backspace are *still* the live-filter:
+        // a filter change in zsh does not drop the menu, it only
+        // re-narrows the list, so we keep the stage as Completions.
+        //
+        // `x` (delete-tail) still works from the menu — the user may have
+        // already appended a token and wants it dropped, *before*
+        // accepting the next suggestion. (Order matters: a later
+        // `Char(c)` general arm would otherwise swallow `x`.)
+        crate::tui::EditStage::Completions => match ev.code {
+            KeyCode::Up | KeyCode::Char('k') => {
+                app.move_suggestion(false);
+                false
+            }
+            KeyCode::Down | KeyCode::Char('j') => {
+                app.move_suggestion(true);
+                false
+            }
+            KeyCode::Enter => app.accept_completion().is_ok(),
+            KeyCode::Char('x') => {
+                app.remove_tail_item();
+                false
+            }
+            KeyCode::Tab => {
+                app.toggle_completions();
+                false
+            }
+            // zsh idiom: typing in the menu re-filters rather than
+            // dismissing it, so `Char(c)` / `Backspace` do not pop the
+            // stage — they update the buffer *and* the list.
+            KeyCode::Char(c) => {
+                app.edit_type(c);
+                if let crate::tui::Mode::Edit(e) = &mut app.mode {
+                    e.sug_cursor = e.sug_cursor.min(e.suggestions.len().saturating_sub(1));
+                }
+                false
+            }
+            KeyCode::Backspace => {
+                app.edit_backspace();
+                if let crate::tui::Mode::Edit(e) = &mut app.mode {
+                    e.sug_cursor = e.sug_cursor.min(e.suggestions.len().saturating_sub(1));
+                }
+                false
+            }
+            _ => false,
+        },
     }
 }
 

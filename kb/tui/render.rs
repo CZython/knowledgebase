@@ -84,16 +84,21 @@ fn draw_browse(f: &mut Frame, app: &App, area: ratatui::layout::Rect) {
         .collect();
 
     let title = if app.filter_text.is_empty() {
-        format!(" {} page(s) — ↑↓/jk move · / filter · Enter open · a alias · r roots · e edit · q quit", app.view.len())
+        let hint = if cfg!(feature = "editor") {
+            String::from(" e edit metadata · v $EDITOR · q quit")
+        } else {
+            String::from(" e edit metadata · q quit")
+        };
+        format!(" {} page(s) — ↑↓/jk move · / filter · Enter open · a alias · r roots ·{}", app.view.len(), hint)
     } else {
         format!(" {} page(s) of {} match '{}' — / to edit filter · Esc to clear",
                 app.view.len(), app.rows.len(), app.filter_text)
     };
-    // REVERSED flips the selected row's fg/bg so it stands out (the default
-    // list has no highlight, so the selection was only implied by scroll).
+    // White-on-black (inverted default) so the selected row stands out
+    // regardless of the terminal's own fg/bg colors.
     let widget = RatList::new(items)
         .block(Block::default().borders(Borders::ALL).title(title))
-        .highlight_style(Style::default().add_modifier(Modifier::REVERSED));
+        .highlight_style(Style::default().fg(Color::Black).bg(Color::White));
 
     let mut list_state = ListState::default();
     if !app.view.is_empty() {
@@ -212,93 +217,96 @@ fn draw_read(f: &mut Frame, app: &App, rs: &ReadState, area: ratatui::layout::Re
 /// └────────────────────────────────┴──────────────────┘
 ///  status bar (colored by severity)
 /// ```
-fn draw_edit(f: &mut Frame, app: &App, es: &crate::tui::EditState, area: ratatui::layout::Rect) {
-    let chunks = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([
-            Constraint::Length(1), // header
-            Constraint::Min(1),    // form + suggestions side-by-side
-            Constraint::Length(1), // status
-        ])
-        .split(area);
-
-    let header = Paragraph::new(format!(
-        "  kb tui — editing {} · field {} · Esc back, q quit",
-        es.id,
-        es.field.label(),
-    ))
-    .style(Style::default().fg(Color::Gray).add_modifier(Modifier::BOLD));
-    f.render_widget(header, chunks[0]);
-
-    let panes = Layout::default()
-        .direction(Direction::Horizontal)
-        .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
-        .split(chunks[1]);
-
-    // LEFT: the form. For a scalar: the typed value. For a list: the
-    // current items, the new value (typed), and the pending commit plan.
-    let form_lines = build_form_lines(es);
-    let form_widget = Paragraph::new(form_lines.join("\n"))
-        .block(
-            Block::default()
-                .borders(Borders::ALL)
-                .title(format!(
-                    " {} (↑/j field · Tab suggest(list) · x remove-tail(list) · Enter commit)",
-                    es.field.label()
-                )),
-        )
-        .wrap(ratatui::widgets::Wrap { trim: false });
-    f.render_widget(form_widget, panes[0]);
-
-    // RIGHT: the live suggestions. Empty for scalar; a dim hint when the
-    // buffer matches nothing.
-    let sug_text = if es.suggestions.is_empty() {
-        String::from("  (no matches — keep typing)")
-    } else {
-        let mut s = String::new();
-        for (i, t) in es.suggestions.iter().take(50).enumerate() {
-            if i > 0 {
-                s.push('\n');
-            }
-            s.push_str(&format!("  • {}", truncate(t.as_str(), 60)));
+/// The form pane for any field on the *Picker* list: the field's *label*
+/// and a *preview* of what's there right now (the scalar value, or the
+/// comma-joined list items). A pure function of `EditState` — testable
+/// without a DB / Frame. This is the "what will be on screen" preview
+/// the user sees *before* choosing a field, so the field is not a mystery
+/// (they don't have to enter it to know if it's empty / what value is in
+/// there).
+fn picker_row(es: &crate::tui::EditState, field: crate::tui::EditField) -> String {
+    // `entry_bytes` is the file-as-we-saw-it (the baseline); `entry_list`
+    // mirrors its list fields. We use the raw bytes + a fresh parse (not
+    // the cached `current_list`) so the user sees what's *on disk*, never
+    // a stale working copy (which only ever differs after an `x` and only
+    // once they're already in that field's Editor).
+    let bytes = es.entry_bytes.as_slice();
+    let preview = if field.is_list() {
+        let items: Vec<String> = kb_core::frontmatter::list_values(bytes, field.key())
+            .unwrap_or_default();
+        if items.is_empty() {
+            String::from("(none)")
+        } else {
+            format!("[{}]", items.iter().map(|t| truncate(t.as_str(), 30)).collect::<Vec<_>>().join(" · "))
         }
-        s
+    } else {
+        let v = kb_core::frontmatter::scalar_value(bytes, field.key()).unwrap_or_default();
+        if v.is_empty() {
+            String::from("(none)")
+        } else {
+            format!("'{}'", truncate(v.as_str(), 50))
+        }
     };
-    let sug_widget = Paragraph::new(sug_text)
-        .block(
-            Block::default()
-                .borders(Borders::ALL)
-                .title(format!(" suggestions — {} match(es)", es.suggestions.len())),
-        )
-        .wrap(ratatui::widgets::Wrap { trim: false });
-    f.render_widget(sug_widget, panes[1]);
-
-    render_status_bar(f, app, chunks[2]);
+    format!("  {:<12}  {}", field.label(), preview)
 }
 
-/// Assemble the form-lines for the active field (a pure function of
-/// `EditState` — testable without a DB / Frame). The "pending plan"
-/// footer is the one source of truth for "what will Enter apply"; it is
-/// the same `build_ops` + `apply_op` pair `commit_edit` runs, surfaced
-/// one step earlier so the user isn't surprised by a write.
-fn build_form_lines(es: &crate::tui::EditState) -> Vec<String> {
+/// The full *field list* the Picker shows — one row per field in the
+/// stable `EditField::all()` order, with a `▶` marker on the current
+/// highlight. This is the visual "field picker" pane.
+fn build_picker_rows(es: &crate::tui::EditState) -> Vec<String> {
+    let fields = crate::tui::EditField::all();
+    let mut out = Vec::new();
+    for (i, field) in fields.iter().enumerate() {
+        let row = picker_row(es, *field);
+        let marker = if i == es.field_cursor { "▶ " } else { "  " };
+        out.push(format!("{}{}", marker, row));
+    }
+    out
+}
+
+/// Draw the whole **Picker** stage pane (the field list). The layout is a
+/// *single* bordered pane (no side-by-side suggestions in the Picker —
+/// the suggestions are loaded + shown in the Editor stage, not yet); on a
+/// scalar the *preview* is the current scalar value, and on a list the
+/// *preview* is the existing items.
+fn draw_picker_pane(f: &mut Frame, es: &crate::tui::EditState, rect: ratatui::layout::Rect) {
+    let rows = build_picker_rows(es);
+    let items: Vec<ListItem> = rows.into_iter().map(ListItem::new).collect();
+    let highlight = Style::default().fg(Color::Black).bg(Color::White);
+    let widget = RatList::new(items)
+        .highlight_style(highlight)
+        .block(Block::default().borders(Borders::ALL).title(
+            " pick a field — ↑/↓ move · Enter open field · Esc back · q quit",
+        ));
+    let mut state = ListState::default();
+    state.select(Some(es.field_cursor));
+    f.render_stateful_widget(widget, rect, &mut state);
+}
+
+/// The form pane for the **Editor** + **Completions** stages: the field
+/// label, the live value buffer (for a list: the *new* item(s) being
+/// appended, and the *existing* items from `current_list`), and the
+/// pending commit plan (which ops `Enter` will apply). The pane
+/// *title* reflects the *stage* so the user sees at a glance whether they
+/// are in the buffer (Editor) or the menu (Completions).
+fn build_editor_lines(es: &crate::tui::EditState) -> Vec<String> {
     let mut out: Vec<String> = Vec::new();
     if es.field.is_list() {
-        out.push(format!(
-            "  current: [{}]",
+        let current = if es.current_list.is_empty() {
+            "(none)".to_string()
+        } else {
             es.current_list
                 .iter()
-                .map(|t| truncate(t.as_str(), 60))
+                .map(|t| truncate(t.as_str(), 50))
                 .collect::<Vec<_>>()
                 .join(" · ")
-        ));
-        out.push(format!("  new:     '{}'", es.value));
+        };
+        out.push(format!("  existing: [{}]", current));
+        out.push(format!("  new:      '{}'", es.value));
     } else {
-        out.push(format!("  value:   '{}'", es.value));
+        out.push(format!("  value:    '{}'", es.value));
     }
     out.push(String::new());
-    // The pending commit plan. (See `crate::tui::build_ops`; empty on a
-    // no-op commit, which the form renders as "no-op commit (no changes)".)
     let plan = crate::tui::EditState::plan(es);
     if plan.is_empty() {
         out.push(String::from("  → no-op commit (no changes)"));
@@ -308,6 +316,176 @@ fn build_form_lines(es: &crate::tui::EditState) -> Vec<String> {
         }
     }
     out
+}
+
+/// The live menu pane for the **Completions** stage (and also used as a
+/// "preview" in the Editor stage — it's *always* a pure function of
+/// `suggestions` + `sug_cursor`, so the menu is never stale). Empty for a
+/// scalar, or for a list whose buffer matches no token — the same hint
+/// zsh would show (nothing to pick).
+fn build_menu_lines(es: &crate::tui::EditState) -> Vec<String> {
+    if es.suggestions.is_empty() {
+        return vec![String::from("  (no matches — keep typing)")];
+    }
+    let mut out = Vec::new();
+    for (i, t) in es.suggestions.iter().take(50).enumerate() {
+        let marker = if i == es.sug_cursor { "▶ " } else { "  " };
+        out.push(format!("{}• {}", marker, truncate(t.as_str(), 60)));
+    }
+    out
+}
+
+/// Draw the Edit-metadata screen — a *three-stage* state machine that
+/// mirrors the zsh completion idiom:
+///
+/// ```text
+///  kb tui — editing metadata for <id> · <stage>
+/// ┌────────────────────────────────────────────────────┐
+/// │  <stage-appropriate pane>                          │
+/// └────────────────────────────────────────────────────┘
+///  status bar (colored by severity)
+/// ```
+///
+/// The stage determines which *single* pane is on screen (we deliberately
+/// avoid two side-by-side panes because they'd each steal `↑/↓`/`Enter`
+/// from the other — zsh doesn't do that, neither do we):
+///
+/// * **Picker** — the field list (one row per field, with the current
+///   *preview* of what's there). The highlight is `es.field_cursor`;
+///   `↑/↓` move it, `Enter` enters the *Editor* for the highlighted field.
+///
+/// * **Editor** — the value buffer for the chosen field. For a *list*
+///   field we also show the *existing* items (so appending is
+///   non-destructive) and the pending commit plan (`→` lines). A
+///   *second* pane (the "menu") is shown as a *preview* (the list of live
+///   matches, with the `sug_cursor` highlighted — but not focused, so
+///   `↑/↓` moves the *buffer*, not the menu). `Tab` flips to the
+///   Completions stage, where the *roles reverse*.
+///
+/// * **Completions** — the live menu is now the primary pane (one line
+///   per suggestion, with the `sug_cursor` highlighted + an explicit
+///   "▶" marker — the zsh visual focus idiom). Typing still filters the
+///   list (the *same* buffer drives the list — zsh idiom); `Enter`
+///   *accepts + commits*.
+fn draw_edit(f: &mut Frame, app: &App, es: &crate::tui::EditState, area: ratatui::layout::Rect) {
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(1), // header
+            Constraint::Min(1),    // stage pane (or panes, for Editor)
+            Constraint::Length(1), // status
+        ])
+        .split(area);
+
+    let stage_label: String = match es.stage {
+        crate::tui::EditStage::Picker => String::from("picking field"),
+        crate::tui::EditStage::Editor => format!("editing {} (buffer)", es.field.label()),
+        crate::tui::EditStage::Completions => format!("completing {}", es.field.label()),
+    };
+    let header = Paragraph::new(format!(
+        "  kb tui — edit metadata for {} · {} · Esc back, q quit",
+        es.id, stage_label
+    ))
+    .style(Style::default().fg(Color::Gray).add_modifier(Modifier::BOLD));
+    f.render_widget(header, chunks[0]);
+
+    match es.stage {
+        crate::tui::EditStage::Picker => {
+            // Single pane: the field list (the *deliberate first step* —
+            // the user chooses a field before touching its value).
+            draw_picker_pane(f, es, chunks[1]);
+        }
+        crate::tui::EditStage::Editor => {
+            // Two panes: the buffer (primary, ~70%) + the menu (a
+            // *preview* — shown but not focused, so `↑/↓` move the
+            // buffer's *suggestion cursor* only if the user presses
+            // Tab; otherwise `↑/↓` change the *field*).
+            let panes = Layout::default()
+                .direction(Direction::Horizontal)
+                .constraints([Constraint::Percentage(60), Constraint::Percentage(40)])
+                .split(chunks[1]);
+            let form_lines = build_editor_lines(es);
+            let form_widget = Paragraph::new(form_lines.join("\n"))
+                .block(
+                    Block::default()
+                        .borders(Borders::ALL)
+                        .title(format!(
+                            " {} — buffer (↑/j change field · x remove-tail · Tab open menu · Enter commit)",
+                            es.field.label()
+                        )),
+                )
+                .wrap(ratatui::widgets::Wrap { trim: false });
+            f.render_widget(form_widget, panes[0]);
+            // The menu preview (not focused — its cursor is *just a
+            // hint*, `sug_cursor` is the one that matters).
+            let menu_lines = build_menu_lines(es);
+            let menu_widget = Paragraph::new(menu_lines.join("\n"))
+                .block(
+                    Block::default()
+                        .borders(Borders::ALL)
+                        .title(format!(" menu — {} match(es) (not focused; Tab to focus)", es.suggestions.len())),
+                )
+                .wrap(ratatui::widgets::Wrap { trim: false });
+            f.render_widget(menu_widget, panes[1]);
+        }
+        crate::tui::EditStage::Completions => {
+            // Two panes, but *reversed*: the menu is now the primary pane
+            // (~60%) AND focused (the cursor is in it); the buffer is on
+            // the right as a *context* pane (~40%) — the user still sees
+            // what they've typed while picking a completion.
+            let panes = Layout::default()
+                .direction(Direction::Horizontal)
+                .constraints([Constraint::Percentage(60), Constraint::Percentage(40)])
+                .split(chunks[1]);
+            // The menu, focused.
+            let menu_lines = build_menu_lines(es);
+            use ratatui::widgets::{List as RatList, ListItem, ListState};
+            let items: Vec<ListItem> = menu_lines.into_iter().map(ListItem::new).collect();
+            let list = RatList::new(items).highlight_style(
+                Style::default().fg(Color::Black).bg(Color::White),
+            );
+            let mut state = ListState::default();
+            if !es.suggestions.is_empty() {
+                state.select(Some(es.sug_cursor));
+            }
+            let list_block = Block::default()
+                .borders(Borders::ALL)
+                .title(format!(
+                    " {} — menu (focused: ↑/↓ move · Enter accept · Tab back) · {} match(es)",
+                    es.field.label(), es.suggestions.len()
+                ));
+            let widget = list.block(list_block);
+            f.render_stateful_widget(widget, panes[0], &mut state);
+            // The buffer pane (context only, for "what did I type").
+            let form_lines = build_editor_lines(es);
+            let form_widget = Paragraph::new(form_lines.join("\n"))
+                .block(
+                    Block::default()
+                        .borders(Borders::ALL)
+                        .title(format!(
+                            " {} — buffer (type to filter · Enter accept · Tab back)",
+                            es.field.label()
+                        )),
+                )
+                .wrap(ratatui::widgets::Wrap { trim: false });
+            f.render_widget(form_widget, panes[1]);
+        }
+    }
+
+    render_status_bar(f, app, chunks[2]);
+}
+
+/// Assemble the form-lines for the active field (a pure function of
+/// `EditState` — testable without a DB / Frame). The "pending plan"
+/// footer is the one source of truth for "what will Enter apply"; it is
+/// the same `build_ops` + `apply_op` pair `commit_edit` runs, surfaced
+/// one step earlier so the user isn't surprised by a write.
+///
+/// (Retained for *backward* callers — the new `build_editor_lines` is
+/// the canonical path for the Editor/Completions panes.)
+#[allow(dead_code)]
+fn build_form_lines(es: &crate::tui::EditState) -> Vec<String> {
+    build_editor_lines(es)
 }
 
 /// A human-readable one-line for an `EditOp` — the "what will the commit
