@@ -335,14 +335,14 @@ pub struct EditState {
     ///      `entry_list` (derived from these bytes, cached separately).
     pub entry_bytes: Vec<u8>,
     /// The items currently on the active **list** field **on entry**
-    /// (the list we saw when we opened this page). Used by `plan()` to
-    /// enumerate the `RemoveItem` ops for any tail items removed via `x`.
+    /// (the list we saw when we opened this page). The baseline that
+    /// `commit_edit`'s "file changed on disk" guard checks against.
     /// Empty for scalar fields.
     pub entry_list: Vec<String>,
     /// The items on the active **list** field **in the working state**
-    /// (after any `x` removals). This is the "what's there now" the user
-    /// sees, and the dedup baseline for `AppendItem` ops. Empty for
-    /// scalar fields.
+    /// (after any tail-removals via the smart `Backspace`). This is the
+    /// "what's there now" the user sees, and the dedup baseline for the
+    /// `AppendItem` ops `plan()` derives. Empty for scalar fields.
     pub current_list: Vec<String>,
     /// The file bytes **in the working state** (updated by `remove_tail_item`).
     /// `commit_edit` applies ops to this, not to `entry_bytes`, so that
@@ -381,8 +381,8 @@ impl EditState {
     /// footer, so the display + commit paths cannot diverge. For a scalar
     /// field the no-op rule compares the buffer against the field's value
     /// *on entry* (the `build_ops` "original"); for a list field the
-    /// dedup rule compares against the *current* list (after any `x`
-    /// removals tracked in `current_list`). Total.
+    /// dedup rule compares against the *current* list (after any
+    /// tail-removals tracked in `current_list`). Total.
     pub fn plan(&self) -> Vec<EditOp> {
         if self.field.is_list() {
             build_ops(self.field, &self.value, "", &self.current_list)
@@ -998,9 +998,11 @@ impl App {
         }
     }
 
-    /// Drop the last item from the active **list** field (the `x` key — a
-    /// "delete tail" semantic, like Backspace on the last item of a list
-    /// editor). No-op on a scalar field or an empty list. The removal
+    /// Drop the last item from the active **list** field (a "delete tail"
+    /// semantic, like Backspace on the last item of a list editor —
+    /// reached in the Value stage by the *smart* `Backspace` on an empty
+    /// buffer, see `edit_backspace_or_tail`). No-op on a scalar field or an
+    /// empty list. The removal
     /// is reflected in `current_list` + `original_bytes` (the baseline is
     /// updated so the next `commit_edit` re-derives ops from the *new*
     /// bytes) — `suggestions` is untouched (still anchored to the full
@@ -1100,9 +1102,10 @@ impl App {
             ));
         }
         // Apply in order over the *working* bytes (which already include
-        // any tail-removals from `x` — they are "baked in"). `apply_op`
-        // never mutates its input, so a mid-way failure leaves the disk
-        // untouched (the write below is the only thing that changes bytes).
+        // any tail-removals from the smart `Backspace` — they are
+        // "baked in"). `apply_op` never mutates its input, so a mid-way
+        // failure leaves the disk untouched (the write below is the only
+        // thing that changes bytes).
         let working_snap = match &self.mode {
             Mode::Edit(e) => e.working_bytes.clone(),
             _ => Vec::new(),
@@ -1113,7 +1116,13 @@ impl App {
             acc = apply_op(&acc, op).map_err(|e| (e, EXIT_ERR))?;
             applied += 1;
         }
-        if acc != working_snap {
+        // Write when the *result* differs from what's **on disk** (we just
+        // verified `on_disk == entry_bytes`). Comparing to `working_snap`
+        // instead would skip a pure tail-removal commit, because that
+        // removal was already baked into the working copy. Comparing to
+        // the disk also keeps the "open then commit → byte-identical"
+        // guarantee (no net change → no write), now for *every* op mix.
+        if acc != on_disk {
             // The *same* atomic-write path the CLI `commit` uses.
             crate::atomic_write(std::path::Path::new(&abs_path), &acc)
                 .map_err(|e| (format!("write {} atomically: {e}", abs_path), EXIT_ERR))?;
@@ -2974,6 +2983,137 @@ mod tests {
         // The file on disk is unchanged (no commit fired).
         let contents = std::fs::read_to_string(&page).unwrap();
         assert_eq!(contents, FM_FIXTURE, "no commit fired — the file is untouched");
+    }
+
+    /// **Smart `Backspace`** (a zsh list-editor idiom): while the buffer
+    /// *has* text, `Backspace` pops the last char (re-narrowing the live
+    /// menu); once the buffer is **empty** on a **list** field, `Backspace`
+    /// drops the field's *tail item* (the "delete the last thing I added"
+    /// semantic), mutating `current_list` + `working_bytes` but NOT writing
+    /// to disk. The *old* dedicated `x` key is gone — this path is now
+    /// discoverable via a single well-known key.
+    ///
+    /// This is the test the "letter-safety" change was designed around
+    /// (the user can now `Backspace` to remove "transformer" and it works
+    /// without a magic `x` key competing with the letters they type).
+    #[test]
+    fn smart_backspace_pops_char_while_buffer_has_text_drops_tail_when_empty() {
+        let (mut app, page) = seeded_app();
+        app.open_edit().unwrap();
+        app.picker_move(true); // description
+        app.picker_move(true); // tags
+        app.enter_editor();
+        // Sanity: `tags` starts with an empty buffer and two existing items
+        // (the corpus is the file's list on entry; `entry_list` is set on
+        // the *commit* refresh, not on entry).
+        if let Mode::Edit(ref e) = app.mode {
+            assert!(e.value.is_empty());
+            assert_eq!(e.current_list, vec!["mTLS", "transformer"]);
+        }
+        // Type "se" — the buffer has text.
+        app.edit_type('s');
+        app.edit_type('e');
+        if let Mode::Edit(ref e) = app.mode {
+            assert_eq!(e.value, "se");
+        }
+        // First Backspace on a NON-empty buffer: pops a char, not the tail.
+        app.edit_backspace_or_tail();
+        if let Mode::Edit(ref e) = app.mode {
+            assert_eq!(e.value, "s", "Backspace pops a char (buffer non-empty)");
+            assert_eq!(e.current_list, vec!["mTLS", "transformer"], "tail NOT dropped");
+        }
+        // Pop the remaining char — the buffer is now empty.
+        app.edit_backspace_or_tail();
+        if let Mode::Edit(ref e) = app.mode {
+            assert!(e.value.is_empty(), "buffer is now empty");
+        }
+        // Second Backspace on an EMPTY buffer: drops the list tail
+        // ("transformer").
+        app.edit_backspace_or_tail();
+        if let Mode::Edit(ref e) = app.mode {
+            assert_eq!(
+                e.current_list,
+                vec!["mTLS"],
+                "the tail 'transformer' was dropped from `current_list`"
+            );
+            assert_ne!(e.current_list, e.entry_list, "working state diverged from entry state");
+            assert!(e.value.is_empty(), "the buffer stays empty after a tail drop");
+        }
+        // No disk write has happened (the commit is still pending).
+        let contents = std::fs::read_to_string(&page).unwrap();
+        assert_eq!(contents, FM_FIXTURE, "no commit fired — disk unchanged before commit");
+        // Now commit — the working bytes (tail already dropped) are the
+        // baseline for the write.
+        assert!(app.commit_edit().is_ok(), "commit after a tail drop is Ok");
+        let after = std::fs::read_to_string(&page).unwrap();
+        let tags_now: Vec<String> =
+            kb_core::frontmatter::list_values(after.as_bytes(), "tags").unwrap_or_default();
+        assert_eq!(tags_now, vec!["mTLS"], "the committed file has the tail removed");
+    }
+
+    /// Smart `Backspace` on an **empty list** (no tail to drop) is a clean
+    /// no-op + a *status note* (not an error): the "list already empty"
+    /// invariant, no state change, no panic. This is the *other* tail of
+    /// the smart `Backspace` path — the "nothing left to remove" branch.
+    #[test]
+    fn smart_backspace_with_no_tail_is_a_clean_noop() {
+        // Use a fresh empty page (no pre-seeded tags) — the fixture seeds
+        // [mTLS, transformer]; here we open the `search_terms` field which
+        // is empty on the fixture, exercising the "no tail to drop" path.
+        let (mut app, page) = seeded_app();
+        app.open_edit().unwrap();
+        app.picker_move(true); // description
+        app.picker_move(true); // tags
+        app.picker_move(true); // search_terms
+        app.enter_editor();
+        // Sanity: search_terms is an empty list.
+        if let Mode::Edit(ref e) = app.mode {
+            assert_eq!(e.field, EditField::SearchTerms, "we're on search_terms");
+            assert!(e.value.is_empty(), "buffer is empty");
+            assert!(e.current_list.is_empty(), "no existing items");
+        }
+        // Backspace on an empty buffer + empty list → the "nothing to
+        // remove" branch (a status note, not an error, no state change).
+        let before = std::fs::read_to_string(&page).unwrap();
+        app.edit_backspace_or_tail();
+        if let Mode::Edit(ref e) = app.mode {
+            assert!(e.value.is_empty(), "buffer still empty");
+            assert!(e.current_list.is_empty(), "list still empty");
+        }
+        let after = std::fs::read_to_string(&page).unwrap();
+        assert_eq!(after, before, "no commit fired — disk unchanged");
+    }
+
+    /// **`remove_tail_item`** is the underlying primitive (exposed for the
+    /// test surface). It mutates `working_bytes` + `current_list` and sets
+    /// a *green* status (the "removed … — Enter to commit" preview). No
+    /// disk write, no mode change, no field change.
+    #[test]
+    fn remove_tail_item_is_live_and_does_not_commit() {
+        let (mut app, page) = seeded_app();
+        app.open_edit().unwrap();
+        app.picker_move(true); // description
+        app.picker_move(true); // tags
+        app.enter_editor();
+        // Baseline.
+        if let Mode::Edit(ref e) = app.mode {
+            assert_eq!(e.current_list, vec!["mTLS", "transformer"]);
+        }
+        let before = std::fs::read_to_string(&page).unwrap();
+        app.remove_tail_item();
+        // `current_list` is updated in memory; `working_bytes` diverges;
+        // the file on disk is unchanged (this is a *live* preview).
+        if let Mode::Edit(ref e) = app.mode {
+            assert_eq!(e.current_list, vec!["mTLS"]);
+            assert_eq!(e.stage, EditStage::Value, "still on the Value stage");
+            assert_eq!(e.field, EditField::Tags, "field unchanged");
+        }
+        let after = std::fs::read_to_string(&page).unwrap();
+        assert_eq!(after, before, "no write to disk — `remove_tail_item` is live");
+        // Status is green (a *success* preview, not an error) or at least
+        // not a red error (the user will see it and commit with Enter).
+        assert_ne!(app.status.kind, crate::tui::StatusKind::Error,
+            "remove_tail_item sets a non-error status");
     }
 
     /// `Esc` in the **Value** stage pops back to the **Picker** (the

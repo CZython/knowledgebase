@@ -225,11 +225,11 @@ fn draw_read(f: &mut Frame, app: &App, rs: &ReadState, area: ratatui::layout::Re
 /// (they don't have to enter it to know if it's empty / what value is in
 /// there).
 fn picker_row(es: &crate::tui::EditState, field: crate::tui::EditField) -> String {
-    // `entry_bytes` is the file-as-we-saw-it (the baseline); `entry_list`
-    // mirrors its list fields. We use the raw bytes + a fresh parse (not
-    // the cached `current_list`) so the user sees what's *on disk*, never
-    // a stale working copy (which only ever differs after an `x` and only
-    // once they're already in that field's Editor).
+    // `entry_bytes` is the file-as-we-saw-it (the baseline). We use the raw
+    // bytes + a fresh parse (not the cached `current_list`) so the user sees
+    // what's *on disk*, never a stale working copy (which only ever differs
+    // after a tail-removal via the smart `Backspace`, and only while they're
+    // already in that field's Value stage).
     let bytes = es.entry_bytes.as_slice();
     let preview = if field.is_list() {
         let items: Vec<String> = kb_core::frontmatter::list_values(bytes, field.key())
