@@ -250,86 +250,89 @@ fn handle_read(app: &mut App, ev: KeyEvent) -> bool {
     }
 }
 
-/// The Edit-metadata key-binding table (M8.2): a *three-stage* state
-/// machine, mirroring the zsh completion idiom — **Picker** (the field
-/// list, choose which field to edit) → **Editor** (the value buffer for
-/// the chosen field, typing / `x` / `Tab`) → **Completions** (the live
-/// suggestion menu, `↑`/`↓` select, `Enter` accepts + commits). `Esc`
-/// pops one stage (Picker→Browse, Editor→Picker, Completions→Editor);
-/// `Tab` toggles Editor↔Completions; `q` / `C-c` quit the whole TUI.
+/// The Edit-metadata key-binding table (M8.2): a *two-stage* state machine
+/// mirroring the zsh `type → live-filter → arrows-select → Enter-adopts`
+/// idiom exactly.
 ///
-/// Order matters because a later `Char(c)` catch-all would swallow the
-/// single-key bindings; the single keys come first (Rust matches top-down).
+/// * **Picker** — the field list (title / description / tags /
+///   search_terms). `↑`/`↓` move the highlight; `Enter` enters **Value**
+///   for that field. The manager keys live *only* here: `q` quits the TUI,
+///   `a` opens the alias manager, `r` the roots manager (each also
+///   reachable from Browse / Read). **No letter types here** — the user
+///   hasn't chosen a field yet.
+///
+/// * **Value** — the value buffer for the chosen field. **Every letter is
+///   a literal** — `q`, `a`, `r`, `x`, `e`, `v` all go straight into the
+///   buffer, so "security", "query", "data", "tax" all type. `Tab` is a
+///   *pure* focus toggle between the buffer and the live candidate list;
+///   typing always goes to the buffer and re-narrows the list (zsh
+///   idiom). `↑`/`↓` move the candidate when the list is focused, else
+///   move to the next field. `Backspace` pops the buffer (or, on an empty
+///   list-field buffer, drops the list's tail item). `Enter` — with the
+///   list focused — adopts the highlighted candidate + commits + stays on
+///   the field; with the buffer focused, just commits. `Esc` pops to the
+///   Picker; `C-c` quits the TUI.
+///
+/// Order matters: `C-c` + `Esc` are the only *common* keys; the manager
+/// keys (`q`/`a`/`r`) are scoped to the **Picker** stage (so they can't
+/// steal letters in a Value buffer); and the `Char(c)` catch-all is always
+/// the last arm in the Value dispatch.
 fn handle_edit(app: &mut App, ev: KeyEvent) -> bool {
-    // Pull the stage out of the state at the top of the function (the
-    // stage can still be `Picker` / `Editor` / `Completions` — we match
-    // on it below; `q` / `C-c` / `Esc` are the only *common* keys that
-    // do the same thing in every stage).
     let stage = match &app.mode {
         crate::tui::Mode::Edit(e) => e.stage,
         // `handle_edit` is only called when `app.mode` is `Edit` — this
-        // branch is total-on-defensive (an invariant-violating call), but
-        // we keep it so the match arm is exhaustive.
+        // branch is total-on-defensive (an invariant-violating call), kept
+        // so the match arm is exhaustive.
         _ => return false,
     };
 
     // ---- Keys with the same meaning in every stage ----------------------
-    match ev.code {
-        KeyCode::Char('q') => return true, // q quits
-        KeyCode::Char('c') if ev.modifiers.contains(KeyModifiers::CONTROL) => return true, // C-c quits
-        _ => {}
+    if ev.modifiers.contains(KeyModifiers::CONTROL) && matches!(ev.code, KeyCode::Char('c')) {
+        return true; // C-c quits
     }
 
     // `Esc` pops one stage:
-    //   Picker      → Browse       (the user leaves edit entirely)
-    //   Editor      → Picker       (the user abandons this field and picks another)
-    //   Completions → Editor       (the user abandons the menu and returns to the buffer)
+    //   Picker → Browse (the user leaves edit entirely)
+    //   Value  → Picker (abandon this field, pick another)
     if ev.code == KeyCode::Esc {
         match stage {
             crate::tui::EditStage::Picker => app.close_edit(),
-            crate::tui::EditStage::Editor => {
+            crate::tui::EditStage::Value => {
                 if let crate::tui::Mode::Edit(e) = &mut app.mode {
                     e.stage = crate::tui::EditStage::Picker;
+                    e.menu_focus = false;
                 }
-                app.set_info("edit metadata — ↑/↓ field · Enter to edit · Esc back");
+                app.set_info("edit metadata — ↑/↓ field · Enter to edit · a alias · r roots · Esc back · q quit");
             }
-            crate::tui::EditStage::Completions => {
-                if let crate::tui::Mode::Edit(e) = &mut app.mode {
-                    e.stage = crate::tui::EditStage::Editor;
-                }
-                app.set_info("editing — type value · Tab complete (lists) · Enter commit · Esc back");
-            }
-        }
-        return false;
-    }
-
-    // `a` opens the Alias manager (M8.3) — same meaning in every stage.
-    if ev.code == KeyCode::Char('a') {
-        if let Err((msg, _)) = app.open_alias() {
-            app.set_error(msg);
-        } else {
-            app.set_info("alias — Tab list/form · Enter add · x remove · Esc back");
-        }
-        return false;
-    }
-    // `r` opens the Roots manager (M8.3) — same meaning in every stage.
-    if ev.code == KeyCode::Char('r') {
-        if let Err((msg, _)) = app.open_roots() {
-            app.set_error(msg);
-        } else {
-            app.set_info("roots — Tab list/form · Enter add · x drop · Esc back");
         }
         return false;
     }
 
     // ---- Stage-specific handlers -----------------------------------------
     match stage {
-        // **Picker** — the field list, the *deliberate first step*. `↑/↓/j/k`
-        // move the cursor among the fields; `Enter` enters the *Editor* for
-        // the current field. Typing is ignored here (the user hasn't chosen
-        // a field yet; `Tab` is a no-op because there's no buffer to
-        // toggle). `x` is a no-op (nothing to remove-tail yet).
+        // **Picker** — the field list, the *deliberate first step*. Here and
+        // only here do the single-letter manager keys fire: `q` quit,
+        // `a` alias, `r` roots. `↑/↓/j/k` move the cursor among the fields;
+        // `Enter` enters **Value** for the current field. Typing (other
+        // than those three) is a no-op — no field is chosen yet.
         crate::tui::EditStage::Picker => match ev.code {
+            KeyCode::Char('q') => true,
+            KeyCode::Char('a') => {
+                if let Err((msg, _)) = app.open_alias() {
+                    app.set_error(msg);
+                } else {
+                    app.set_info("alias — Tab list/form · Enter add · x remove · Esc back");
+                }
+                false
+            }
+            KeyCode::Char('r') => {
+                if let Err((msg, _)) = app.open_roots() {
+                    app.set_error(msg);
+                } else {
+                    app.set_info("roots — Tab list/form · Enter add · x drop · Esc back");
+                }
+                false
+            }
             KeyCode::Up | KeyCode::Char('k') => {
                 app.picker_move(false);
                 false
@@ -343,102 +346,72 @@ fn handle_edit(app: &mut App, ev: KeyEvent) -> bool {
                 false
             }
             KeyCode::Tab => {
-                app.set_info("Picker stage — Enter to enter a field (Tab toggles Editor↔Completions after entering)");
+                app.set_info("Picker — Enter to enter a field (Tab opens the menu once a field is open)");
                 false
             }
-            _ => {
-                // Stray input: no state change, no status change (the
-                // status bar already shows the picker hint).
-                false
-            }
+            _ => false, // stray input; the status bar already shows the hint
         },
-        // **Editor** — the value buffer. Printable chars append, `Backspace`
-        // pops; `x` drops the *tail* of a list field; `Tab` moves to the *
-        // Completions* menu (zsh idiom — the buffer and the menu are two
-        // *focus states* of the same pane). `↑/↓/j/k` change the *field*
-        // (the user's in the middle of this field, and wants to hop to the
-        // next one without leaving edit). Enter = commit the current field.
-        crate::tui::EditStage::Editor => match ev.code {
-            KeyCode::Up | KeyCode::Char('k') => {
-                app.edit_move_field(false);
-                false
-            }
-            KeyCode::Down | KeyCode::Char('j') => {
-                app.edit_move_field(true);
-                false
-            }
-            KeyCode::Char('x') => {
-                app.remove_tail_item();
-                false
-            }
-            KeyCode::Tab => {
-                app.toggle_completions();
-                false
-            }
-            KeyCode::Enter => {
-                if let Err((msg, _)) = app.commit_edit() {
-                    app.set_error(msg);
+        // **Value** — the value buffer. Every character (including `q` / `a`
+        // / `r` / `x` / `e` / `v`) types straight in — the single-letter
+        // manager keys are *only* in the stage above. The only special keys
+        // are the arrows / Tab / Enter / Backspace / (already-handled) Esc
+        // / C-c. A `Char(c)` catch-all is the last arm so nothing else
+        // can swallow a letter.
+        crate::tui::EditStage::Value => {
+            let menu_focus = match &app.mode {
+                crate::tui::Mode::Edit(e) => e.menu_focus,
+                _ => false,
+            };
+            match ev.code {
+                // Arrows: contextual. Menu focused → move the candidate;
+                // buffer focused → move the *field* (cycle).
+                KeyCode::Up | KeyCode::Char('k') => {
+                    if menu_focus {
+                        app.move_suggestion(false);
+                    } else {
+                        app.edit_move_field(false);
+                    }
+                    false
                 }
-                false
-            }
-            KeyCode::Char(c) => {
-                app.edit_type(c);
-                false
-            }
-            KeyCode::Backspace => {
-                app.edit_backspace();
-                false
-            }
-            _ => false,
-        },
-        // **Completions** — the live menu. `↑/↓/j/k` move the highlight (with
-        // wrap); `Enter` accepts + commits (on success the mode pops back to
-        // Picker); `Tab` returns to the buffer (Esc does the same — both pop
-        // back to Editor). Typing / Backspace are *still* the live-filter:
-        // a filter change in zsh does not drop the menu, it only
-        // re-narrows the list, so we keep the stage as Completions.
-        //
-        // `x` (delete-tail) still works from the menu — the user may have
-        // already appended a token and wants it dropped, *before*
-        // accepting the next suggestion. (Order matters: a later
-        // `Char(c)` general arm would otherwise swallow `x`.)
-        crate::tui::EditStage::Completions => match ev.code {
-            KeyCode::Up | KeyCode::Char('k') => {
-                app.move_suggestion(false);
-                false
-            }
-            KeyCode::Down | KeyCode::Char('j') => {
-                app.move_suggestion(true);
-                false
-            }
-            KeyCode::Enter => app.accept_completion().is_ok(),
-            KeyCode::Char('x') => {
-                app.remove_tail_item();
-                false
-            }
-            KeyCode::Tab => {
-                app.toggle_completions();
-                false
-            }
-            // zsh idiom: typing in the menu re-filters rather than
-            // dismissing it, so `Char(c)` / `Backspace` do not pop the
-            // stage — they update the buffer *and* the list.
-            KeyCode::Char(c) => {
-                app.edit_type(c);
-                if let crate::tui::Mode::Edit(e) = &mut app.mode {
-                    e.sug_cursor = e.sug_cursor.min(e.suggestions.len().saturating_sub(1));
+                KeyCode::Down | KeyCode::Char('j') => {
+                    if menu_focus {
+                        app.move_suggestion(true);
+                    } else {
+                        app.edit_move_field(true);
+                    }
+                    false
                 }
-                false
-            }
-            KeyCode::Backspace => {
-                app.edit_backspace();
-                if let crate::tui::Mode::Edit(e) = &mut app.mode {
-                    e.sug_cursor = e.sug_cursor.min(e.suggestions.len().saturating_sub(1));
+                // `Tab` is a pure focus toggle between buffer and menu;
+                // it never touches the buffer text.
+                KeyCode::Tab => {
+                    app.toggle_menu();
+                    false
                 }
-                false
+                // `Enter`: adopt the highlighted candidate (if the menu is
+                // focused and a candidate is highlighted), then commit, then
+                // stay on the Value stage for the same field.
+                KeyCode::Enter => {
+                    if let Err((msg, _)) = app.accept_completion() {
+                        app.set_error(msg);
+                    }
+                    false
+                }
+                // `Backspace`: smart — pop a char, or drop the list tail if
+                // the buffer is empty.
+                KeyCode::Backspace => {
+                    app.edit_backspace_or_tail();
+                    false
+                }
+                // *Any* other character types straight into the buffer (so
+                // "security", "query", "data", "tax", "tax", "q", "a", "r"
+                // all work).
+                KeyCode::Char(c) => {
+                    app.edit_type(c);
+                    false
+                }
+                _ => false,
             }
-            _ => false,
-        },
+        }
     }
 }
 
