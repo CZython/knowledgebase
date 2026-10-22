@@ -297,7 +297,7 @@ enum Cmd {
     },
     /// FTS search over indexed pages: `type:/language:` column filters,
     /// `tag:` (alias-expanded) filters, `~a ~b` OR, `-c` NOT, phrases —
-    /// plus the `search_terms` gate rule (gated pages hidden unless the
+    /// plus the `search_required_phrase` gate rule (gated pages hidden unless the
     /// query contains the full gate entry).
     Search {
         /// The raw query (one argument; quote it if it contains spaces).
@@ -310,7 +310,7 @@ enum Cmd {
         limit: Option<usize>,
     },
     /// Numbered per-page list under `[path]` (default: all roots): location,
-    /// title, tags, search_terms, link count; label pages expand to their
+    /// title, tags, search_required_phrase, link count; label pages expand to their
     /// referenced files/folder.
     Browse {
         /// Restrict to pages under this directory (relative to a root, or
@@ -378,7 +378,7 @@ enum Cmd {
         json: bool,
     },
     /// Show one page's record: id, type, title, description, tags,
-    /// search_terms, links, mtime.
+    /// search_required_phrase, links, mtime.
     Info {
         path: PathBuf,
         /// Emit the page record as a JSON object (the full union, incl.
@@ -401,7 +401,7 @@ enum Cmd {
         json: bool,
     },
     /// Open the interactive TUI (M8). Browses the corpus, opens a page to
-    /// read it, edits frontmatter (title / description / tags / search_terms)
+    /// read it, edits frontmatter (title / description / tags / search_required_phrase)
     /// with autocomplete, and manages tag aliases + roots. In-process —
     /// shares the same `Db` handle and the same `kb-core` + `kb-db` as every
     /// other verb.
@@ -823,7 +823,7 @@ fn cmd_create(dbpath: Option<&Path>, filename: &str, a: &CreateArgs) -> Kb {
 
     // ---- the scaffold (PLAN §4: `type:` + `title:`, no H1 required) -------
     let scaffold = format!(
-        "---\ntype: {kind}\ntitle: {title}\ndescription:\ntags: []\nsearch_terms: []\n---\n\n# {title}\n\n"
+        "---\ntype: {kind}\ntitle: {title}\ndescription:\ntags: []\nsearch_required_phrase: []\n---\n\n# {title}\n\n"
     );
     let d = diff::unified_diff("", &scaffold, "/dev/null", &target.display().to_string());
 
@@ -1127,7 +1127,7 @@ struct SearchRow {
     description: Option<String>,
     root: String,
     rel_path: String,
-    search_terms: Option<String>,
+    search_required_phrase: Option<String>,
     score: Option<f64>,
 }
 
@@ -1273,7 +1273,7 @@ fn cmd_search(dbpath: Option<&Path>, query: &str, json: bool, limit: usize) -> K
         sql.push_str(
             "SELECT pages.abs_path, pages.id, pages.type,\n\
               pages.title, pages.description, pages.root, pages.rel_path,\n\
-              pages.search_terms, bm25(pages_fts) AS score\n"
+              pages.search_required_phrase, bm25(pages_fts) AS score\n"
         );
         sql.push_str(
             "FROM pages\n\
@@ -1283,7 +1283,7 @@ fn cmd_search(dbpath: Option<&Path>, query: &str, json: bool, limit: usize) -> K
         sql.push_str(
             "SELECT pages.abs_path, pages.id, pages.type,\n\
              pages.title, pages.description, pages.root, pages.rel_path,\n\
-             pages.search_terms, NULL AS score\n"
+             pages.search_required_phrase, NULL AS score\n"
         );
         sql.push_str("FROM pages\n");
     }
@@ -1309,7 +1309,7 @@ fn cmd_search(dbpath: Option<&Path>, query: &str, json: bool, limit: usize) -> K
                 description: r.get::<_, Option<String>>(4)?,
                 root: r.get::<_, String>(5)?,
                 rel_path: r.get::<_, String>(6)?,
-                search_terms: r.get::<_, Option<String>>(7)?,
+                search_required_phrase: r.get::<_, Option<String>>(7)?,
                 score: r.get::<_, Option<f64>>(8)?,
             })
         })
@@ -1410,7 +1410,7 @@ impl PageJson {
             o.push_str(&format!(",\n    \"tags\": [{}]", items.join(",")));
         }
         if !self.gates.is_empty() {
-            o.push_str(&format!(",\n    \"search_terms\": {}", jstr(&self.gates)));
+            o.push_str(&format!(",\n    \"search_required_phrase\": {}", jstr(&self.gates)));
         }
         if let Some(n) = self.links {
             o.push_str(&format!(",\n    \"links\": {n}"));
@@ -1521,7 +1521,7 @@ fn cmd_browse(dbpath: Option<&Path>, path: Option<&Path>, json: bool) -> Kb {
                 let like = format!("{prefix}/%");
                 let mut stmt = db.conn
                     .prepare(
-                        "SELECT abs_path, id, type, title, root, rel_path, search_terms\n\
+                        "SELECT abs_path, id, type, title, root, rel_path, search_required_phrase\n\
                          FROM pages\n\
                          WHERE abs_path LIKE ?1 OR abs_path = ?2\n\
                          ORDER BY abs_path",
@@ -1537,7 +1537,7 @@ fn cmd_browse(dbpath: Option<&Path>, path: Option<&Path>, json: bool) -> Kb {
             None => {
                 let mut stmt = db.conn
                     .prepare(
-                        "SELECT abs_path, id, type, title, root, rel_path, search_terms\n\
+                        "SELECT abs_path, id, type, title, root, rel_path, search_required_phrase\n\
                          FROM pages\n\
                          ORDER BY root, rel_path",
                     )
@@ -1557,14 +1557,14 @@ fn cmd_browse(dbpath: Option<&Path>, path: Option<&Path>, json: bool) -> Kb {
             println!("[ ]");
         } else {
             let mut items = Vec::new();
-            for (abs_path, id, pt, title, _root, rel_path, search_terms) in pages.iter() {
+            for (abs_path, id, pt, title, _root, rel_path, search_required_phrase) in pages.iter() {
                 let tags: Vec<String> = page_tags_str(&db, abs_path).split(',')
                     .filter(|s| !s.trim().is_empty()).map(|s| s.trim().to_string()).collect();
                 let refs = if pt == "label" { Some(label_expand(&db, abs_path)) } else { None };
                 let gj = PageJson {
                     id: id.clone(), pt: pt.clone(),
                     title: title.clone(), abs: abs_path.clone(), rel: rel_path.clone(),
-                    tags, gates: search_terms.clone().unwrap_or_default(),
+                    tags, gates: search_required_phrase.clone().unwrap_or_default(),
                     links: Some(page_link_count(&db, abs_path)),
                     refs, description: None,
                 };
@@ -1580,10 +1580,10 @@ fn cmd_browse(dbpath: Option<&Path>, path: Option<&Path>, json: bool) -> Kb {
         return Ok(EXIT_OK);
     }
 
-    for (i, (abs_path, id, pt, title, _root, rel_path, search_terms)) in pages.iter().enumerate() {
+    for (i, (abs_path, id, pt, title, _root, rel_path, search_required_phrase)) in pages.iter().enumerate() {
         let tags = page_tags_str(&db, abs_path);
         let link_count = page_link_count(&db, abs_path);
-        let gate_str = search_terms.as_deref().unwrap_or("");
+        let gate_str = search_required_phrase.as_deref().unwrap_or("");
 
         let mut line = format!("{:>3}  {:<20} {}", i + 1, id, title.as_deref().unwrap_or(""));
         if !rel_path.is_empty() {
@@ -2255,7 +2255,7 @@ fn cmd_info(dbpath: Option<&Path>, path: &Path, json: bool) -> Kb {
     let row: Option<InfoRow> = db.conn
         .query_row(
             "SELECT abs_path, id, type, title, root, rel_path,\n\
-             description, mtime_ns, created_at, search_terms\n\
+             description, mtime_ns, created_at, search_required_phrase\n\
              FROM pages WHERE abs_path = ?1",
             // mtime_ns is INTEGER NOT NULL; created_at is TEXT (ISO-8601).
             params![abs],
@@ -2270,7 +2270,7 @@ fn cmd_info(dbpath: Option<&Path>, path: &Path, json: bool) -> Kb {
     let Some(rec) = row else {
         return Err((format!("no indexed page for {abs}"), EXIT_ERR));
     };
-    let (abs_path, id, pt, title, _root, _rel_path, description, mtime_ns, created_at, search_terms) = rec;
+    let (abs_path, id, pt, title, _root, _rel_path, description, mtime_ns, created_at, search_required_phrase) = rec;
     let tags = page_tags_str(&db, &abs_path);
     let fwd_count = db.conn
         .query_row(
@@ -2286,19 +2286,19 @@ fn cmd_info(dbpath: Option<&Path>, path: &Path, json: bool) -> Kb {
         ).unwrap_or(0);
     let secs_f = (mtime_ns as f64) / 1e9;
     let mtime_str = format!("{secs_f:.1}s since unix epoch");
-    let search_terms = search_terms.unwrap_or_default();
+    let search_required_phrase = search_required_phrase.unwrap_or_default();
     if json {
         let tag_arr: Vec<String> = tags.split(',')
             .filter(|s| !s.trim().is_empty()).map(|s| jstr(s.trim())).collect();
         println!(
-            "{{\n  \"id\": {},\n  \"type\": {},\n  \"title\": {},\n  \"abs_path\": {},\n  \"rel_path\": {},\n  \"description\": {},\n  \"search_terms\": {},\n  \"tags\": [{}],\n  \"links\": {{\n    \"out\": {},\n    \"in\": {}\n  }},\n  \"mtime\": {},\n  \"created_at\": {}\n}}",
+            "{{\n  \"id\": {},\n  \"type\": {},\n  \"title\": {},\n  \"abs_path\": {},\n  \"rel_path\": {},\n  \"description\": {},\n  \"search_required_phrase\": {},\n  \"tags\": [{}],\n  \"links\": {{\n    \"out\": {},\n    \"in\": {}\n  }},\n  \"mtime\": {},\n  \"created_at\": {}\n}}",
             jstr(&id),
             jstr(&pt),
             jstr_opt(&title),
             jstr(&abs_path),
             jstr(&_rel_path),
             jstr_opt(&description),
-            jstr(&search_terms),
+            jstr(&search_required_phrase),
             tag_arr.join(","),
             fwd_count,
             back_count,
@@ -2316,8 +2316,8 @@ fn cmd_info(dbpath: Option<&Path>, path: &Path, json: bool) -> Kb {
     if !description.as_deref().unwrap_or("").is_empty() {
         println!("desc:    {}", description.as_deref().unwrap_or(""));
     }
-    if !search_terms.is_empty() {
-        println!("gates:   {search_terms}");
+    if !search_required_phrase.is_empty() {
+        println!("gates:   {search_required_phrase}");
     }
     if !tags.is_empty() { println!("tags:    {tags}"); }
     println!("links:   {fwd_count} out / {back_count} in");
@@ -3288,7 +3288,7 @@ assert d['id']          == 'note:with "quotes" and a\\backslash', d['id']
 assert d['title']       == 'line-one\nline-two\ttabbed', d['title']
 assert d['description'] == 'a "q" and a \\ and \x01', d['description'].encode()
 assert d['tags']        == ['with"quote', 'back\\slash', 'uni-é'], d['tags']
-assert d['search_terms']== 'two\\back\ttabs', d['search_terms'].encode()
+assert d['search_required_phrase']== 'two\\back\ttabs', d['search_required_phrase'].encode()
 assert d['links']       == 3, d['links']
 assert d['refs']        == ['x\ny'], d['refs']
 print('round-trip-ok')

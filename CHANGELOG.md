@@ -10,7 +10,7 @@ the API is still moving; breaking changes are called out explicitly.
 - **The TUI "edit" flow is now a clean two-stage, zsh-style model (renamed to
   `edit metadata`).** Opening the metadata editor from the browse/read view
   lands on a *field picker* first (a deliberate step): select one of
-  `title` / `description` / `tags` / `search_terms`, each showing a *preview*
+  `title` / `description` / `tags` / `search_required_phrase`, each showing a *preview*
   of what's on disk (a field is never a mystery before you edit it), then
   `Enter` opens that field's **value** (scalars pre-filled for an in-place
   edit; lists start empty with a live token menu). Once a field is open, the
@@ -77,6 +77,22 @@ the API is still moving; breaking changes are called out explicitly.
   (`$VISUAL` → `$EDITOR` → `vi`), reusing the existing `edit in place` path —
   in-editor flow from the TUI without leaving it. Gated on the `editor`
   feature (absent in the hardened build).
+
+### Renamed
+- **The `search_terms` frontmatter field is now `search_required_phrase`.**
+  The old name read as "extra keywords/synonyms that *broaden* recall," which
+  is the opposite of what the field does: a page *with* entries is **hidden**
+  from general search and appears only once the query text contains **any one**
+  entry as a contiguous span (a restriction, not a recall signal — a "secret
+  unlock phrase"). The new name states that. **Singular** on purpose: the gate
+  is an `OR`/`EXISTS` over the entries (any one phrase suffices), so the
+  plural "phrases" would misread as an AND (satisfy-all) requirement. This is
+  a pre-public rename with no compatibility shim — every occurrence was changed
+  (frontmatter key, `NoteMeta` / `Frontmatter` fields, the `pages` DB column,
+  the `--json` output key, the TUI field `SearchTerms` →
+  `SearchRequiredPhrase`, all docs/fixtures/tests). The internal gate mechanism
+  (`page_gates`, `GateClass`, "gated page") is unchanged. `SCHEMA_VERSION` is
+  2 (marker; no on-disk DBs existed to migrate).
 
 ### Changed
 - **`edit in place` (`-e`) / `v` failures now tell you *why*.** A failed

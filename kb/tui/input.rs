@@ -255,7 +255,7 @@ fn handle_read(app: &mut App, ev: KeyEvent) -> bool {
 /// idiom exactly.
 ///
 /// * **Picker** — the field list (title / description / tags /
-///   search_terms). `↑`/`↓` move the highlight; `Enter` enters **Value**
+///   search_required_phrase). `↑`/`↓` move the highlight; `Enter` enters **Value**
 ///   for that field. The manager keys live *only* here: `q` quits the TUI,
 ///   `a` opens the alias manager, `r` the roots manager (each also
 ///   reachable from Browse / Read). **No letter types here** — the user
@@ -354,7 +354,7 @@ fn handle_edit(app: &mut App, ev: KeyEvent) -> bool {
         //   - **scalar** (title / description): `←/→` move the *text cursor*
         //     (insert / delete at a mid-buffer position), `Backspace`
         //     deletes the char immediately before the cursor.
-        //   - **list** (tags / search_terms): `←/→` enter *Selection mode*
+        //   - **list** (tags / search_required_phrase): `←/→` enter *Selection mode*
         //     (a sub-mode that walks the existing items + a trailing
         //     `<new>`); in Selection mode, `←/→/↑/↓` move the highlight,
         //     `Backspace`/`Del` remove the highlighted item, `Enter`

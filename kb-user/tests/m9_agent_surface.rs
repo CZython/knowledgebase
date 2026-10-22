@@ -617,7 +617,7 @@ fn search_json_still_works() {
     write_page(
         &s,
         "a.md",
-        "type: note\ntitle: Unique-Slug\nsearch_terms:\n  - gatedword\n",
+        "type: note\ntitle: Unique-Slug\nsearch_required_phrase:\n  - gatedword\n",
         "gatedword text\n",
     );
     let (code, _, _) = run(&s, &["add", &root]);

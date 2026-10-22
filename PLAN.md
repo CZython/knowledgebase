@@ -54,9 +54,9 @@ core crate:
 | Tag aliasing | A **DB-level tag-string→tag-string map** (`tag_aliases` table), managed by `kb tag-alias`, not in frontmatter. Lets different spellings ("Czechia"/"Czech Republic") resolve to the same conceptual tag at query time. |
 | Labels | A `type: label` page is a **small proxy note**: it carries `tags:` **and** references the real **files/folder** those tags describe (via a `## files` list, a leading path-list body, or a folder-wide default). Searching a tag finds the label, but the tool **displays the referenced files/folder** (read from the label note on disk), not the label page itself. |
 | Non-MD resources | **Not in the DB at all.** Non-md files are never indexed as rows. They are only ever surfaced by expanding a label's file/folder reference (read live from disk). |
-| `search_terms` | **Visibility gate.** A page *with* `search_terms` is **hidden from general search**; it appears only when the **entire** entry (an unquoted word or a quoted multi-word phrase, e.g. `"deep learning"`) occurs, as a contiguous span, *somewhere* in the query text (case-insensitive). Pages *without* are always visible (if content matches). **Zero results allowed & informative.** |
+| `search_required_phrase` | **Visibility gate.** A page *with* `search_required_phrase` is **hidden from general search**; it appears only when the **entire** entry (an unquoted word or a quoted multi-word phrase, e.g. `"deep learning"`) occurs, as a contiguous span, *somewhere* in the query text (case-insensitive). Pages *without* are always visible (if content matches). **Zero results allowed & informative.** |
 | Grammar | `key:value` = filter (incl. `tag:<x>`) · bare = AND · `~term` = OR group · `-term` = NOT · `"phrase"` = phrase. **Order irrelevant.** |
-| Frontmatter | Permissive YAML-subset parser: scalars + string lists + `#`. Nested maps out of v1. **`type:` is required to be indexed — a `.md` without it is skipped** (see §4). `type:` is matched **case-insensitively** (`Wiki`/`WIKI` = `wiki`); the **canonical lowercase** form is stored (in the `type` column and the display id). Known optional scalar fields: `description` (≤255 chars, see below), `search_terms` (gate list), `tags` (list). FTS scans title + description + body + frontmatter scalars. |
+| Frontmatter | Permissive YAML-subset parser: scalars + string lists + `#`. Nested maps out of v1. **`type:` is required to be indexed — a `.md` without it is skipped** (see §4). `type:` is matched **case-insensitively** (`Wiki`/`WIKI` = `wiki`); the **canonical lowercase** form is stored (in the `type` column and the display id). Known optional scalar fields: `description` (≤255 chars, see below), `search_required_phrase` (gate list), `tags` (list). FTS scans title + description + body + frontmatter scalars. |
 | Description | `description:` — **optional** one-line summary: a short answer to *"what is actually in this page?"*. **Hard limit ≤255 characters** (violations are warned and the field is dropped; the page still indexes). Stored in `pages.description`, part of the FTS index, and **displayed** in `kb search`/`kb browse` output when present. Limit is enforced at index time (not at render time), so it's never silently truncated in output. |
 | Extensions | **`.md` only by default.** Add more via `kb add --ext <ext>` (repeatable) / config. Files with a non-listed extension, or **no** extension, are not indexed. The parser must survive **binary content** and a **missing trailing newline** without corrupting (§9). |
 | Walk / skip rules | Walk **does not follow symlinks — permanent** (never overridable; prevents infinite loops over the filesystem). **Dot-directories** (`.git/`, `.obsidian/`, etc.) are **skipped by default**; **dot-files** (`.notes.md`, etc.) **are scanned normally**. `kb add --include-hidden` turns off dot-*directory* skipping only; it does not change the symlink rule. |
@@ -115,12 +115,12 @@ Examples:
 - `type:wiki apple english` → `type='wiki' AND fts('apple AND english')`
 - `type:label ~llm ~mllm -gpt` → `type='label' AND fts((llm OR mllm) AND NOT gpt)`
 
-### `search_terms` gate (the "reverse whitelist")
+### `search_required_phrase` gate (the "reverse whitelist")
 
-A page's `search_terms` are **secret unlock phrases** — a marker that the page is a **deeper
+A page's `search_required_phrase` are **secret unlock phrases** — a marker that the page is a **deeper
 topic** and should be *hidden* from general search:
 
-- **`kb search "AI"`** → returns pages that content-match "AI" **and have no `search_terms`**.
+- **`kb search "AI"`** → returns pages that content-match "AI" **and have no `search_required_phrase`**.
   Deep pages stay hidden. Clean surface.
 - **`kb search "AI deep learning"`** → unlocks a page whose gate contains the **full phrase**
   `"deep learning"`. **Gate matching is whole-phrase substring, case-insensitive** (an entry
@@ -130,7 +130,7 @@ topic** and should be *hidden* from general search:
   unlocked by `kb search "mTLS"`.
 - **Zero results** → valid signal the query was too strict; the tool says so.
 
-So `search_terms` partitions the corpus into **always-visible** (gateless) and **gated** (opt-in
+So `search_required_phrase` partitions the corpus into **always-visible** (gateless) and **gated** (opt-in
 deep dive). This reduces cross-domain clutter from shared vocabulary.
 
 ### SQL shape (rusqlite / FTS5)
@@ -168,7 +168,7 @@ alias expansion via `tag_aliases`), keyed on `abs_path`, e.g. `tag:llm` →
 with **case-insensitive** comparison per §6 (SQLite `IN` is case-sensitive, so compare via
 `lower()` or a `LOWER(tag)` expression index).
 `kb search tag:llm …` and `kb tag llm` share the same tag expansion, but differ otherwise:
-`kb search` still requires FTS content match and applies the `search_terms` gate, and shows
+`kb search` still requires FTS content match and applies the `search_required_phrase` gate, and shows
 page hits; `kb tag` lists **all** tagged pages (no FTS content match, no gate) and expands
 labels to their referenced files.
 
@@ -233,7 +233,7 @@ CREATE TABLE pages  (
   rel_path TEXT NOT NULL,       -- path relative to that root
   title TEXT, language TEXT,    -- title = resolved slug/display name (frontmatter `title` > H1 > filename)
   description TEXT,            -- optional, ≤255 chars; short answer to "what is actually in this page?"; NULL if absent
-  search_terms TEXT,           -- gate entries verbatim, '\n'-joined; multi-word entries carry their
+  search_required_phrase TEXT,           -- gate entries verbatim, '\n'-joined; multi-word entries carry their
                                -- quotes, e.g. 'mTLS\n"deep learning"'; nullable if gateless
   frontmatter_text TEXT,        -- flattened scalar values (for FTS + filters)
   body TEXT,
@@ -296,7 +296,7 @@ CREATE INDEX idx_links_to ON links(to_path);
 
 **Proven in `kb-core` (pure, no IO/async/FFI):**
 - `meta` — `NoteType` enum invariants; `NoteMeta` (incl. `tags: Vec<String>`,
-  `search_terms: Vec<String>`, `description: Option<String>`) well-formed; **`description` ≤ 255 chars**
+  `search_required_phrase: Vec<String>`, `description: Option<String>`) well-formed; **`description` ≤ 255 chars**
   (or `None`)
 - `frontmatter` — parse→struct; **`type:` required (else the page is not indexable, §4)**; `type:`
   matched case-insensitively, canonical lowercase stored; `description` length-checked (≤255, else
@@ -341,7 +341,7 @@ knowledgebase/    (Cargo workspace)
 │   ├── Cargo.toml
 │   └── src/
 │       ├── lib.rs
-    │       ├── meta.rs               # NoteType {label,wiki,note}, NoteMeta (tags: Vec<String>, search_terms: Vec<String>, description: Option<String> ≤255, …)
+    │       ├── meta.rs               # NoteType {label,wiki,note}, NoteMeta (tags: Vec<String>, search_required_phrase: Vec<String>, description: Option<String> ≤255, …)
 │       ├── frontmatter.rs        # YAML-subset bytes→NoteMeta      [proven]
 │       ├── identity.rs           # abs_path (PK) + display id `type:<slug>` (slug=title→H1→filestem); slug→abs_path resolution (§4 order) [proven]
 │       ├── links.rs              # extract wikilink/rel/absolute   [proven]
@@ -412,9 +412,9 @@ kb drop-root <path>                  # unroot — but the page survives if it's 
 kb refresh [--full]                  # reconcile all roots by (mtime_ns, content_hash); --full = rebuild. Walk options (`--ext`/`--include-hidden`) are read from each root's stored `roots` row (§8) — not re-passed here — so a refreshed root uses the same rules it was added with
 kb full-rebuild                      # alias for refresh --full
 kb create <name> [--path <dir>] [--type wiki|note|label] [-e] [--dry-run] [--yes] [--json]
-    # scaffold a new `.md` page — full frontmatter frame (`type:` `title:` `description:` `tags:` `search_terms:`) + matching H1 — then index it with the *same* `build_page`/`upsert_page` pair `refresh` uses, so the row reconciles byte-identically later. `.md` is appended when `<name>` has no extension; `--path` is the target directory (created if missing) and only a `.md` target is accepted (§3 Extensions); an existing file is never clobbered. `-e/--edit` opens the *written* page in `$VISUAL`/`$EDITOR` (fallback `vi`) and indexes the saved bytes — a non-zero editor exit leaves the scaffold on disk, unindexed. Indexing is skipped **with a stderr note, never an error** when no roots are registered, when the page is outside every registered root, or when the final bytes aren't indexable (the §3/§4 no-`type:` warning contract). `-e --json` is rejected (an editor flow is not JSON — §13p), matching `section edit --json`.
+    # scaffold a new `.md` page — full frontmatter frame (`type:` `title:` `description:` `tags:` `search_required_phrase:`) + matching H1 — then index it with the *same* `build_page`/`upsert_page` pair `refresh` uses, so the row reconciles byte-identically later. `.md` is appended when `<name>` has no extension; `--path` is the target directory (created if missing) and only a `.md` target is accepted (§3 Extensions); an existing file is never clobbered. `-e/--edit` opens the *written* page in `$VISUAL`/`$EDITOR` (fallback `vi`) and indexes the saved bytes — a non-zero editor exit leaves the scaffold on disk, unindexed. Indexing is skipped **with a stderr note, never an error** when no roots are registered, when the page is outside every registered root, or when the final bytes aren't indexable (the §3/§4 no-`type:` warning contract). `-e --json` is rejected (an editor flow is not JSON — §13p), matching `section edit --json`.
 kb search <query> [--json] [--limit N]
-kb browse [path]                     # numbered per-page list under [path]: location, title, tags, search_terms, link count; `description` shown when present; label pages expand to their referenced files/folder
+kb browse [path]                     # numbered per-page list under [path]: location, title, tags, search_required_phrase, link count; `description` shown when present; label pages expand to their referenced files/folder
 kb tag <tag>                         # expand tag (incl. aliasing) → tagged pages; label pages render as their referenced files/folder
 kb tag-alias --add <alias> --canonical <tag>     # alias map (Czechia → czech)
 kb tag-alias --list
@@ -492,10 +492,10 @@ kb replace <file> --find X --new Y [--scope REF] [--count N] <flags>
 | **M5** ✅ | `kb-db`: `migrate` (full idempotent schema + 3 FTS5 sync triggers), `walk_snapshot` (real `std::fs` tree walk feeding the pure `kb-core::fs_snapshot` walker), `index` (per-page `build_page`→`upsert_page` over the pure `identity`/`frontmatter`/`tags`/`links` core, 4-way row derivation + FTS via trigger, no-type skip+count, FNV-1a `etag`), and `refresh` (incremental by `(mtime_ns, content_hash)`, full-rebuild, GC of orphaned rows). All over the verified M0–M6b core; **12 unit + 7 integration tests** in `kb-db`, incl. FTS-trigger sync, nested-root innermost-wins dedupe & `drop_root` survival, incremental-skip / change / delete-GC, and full-rebuild wipe-and-rewrite. `./verify.sh` still **317 verified / 0 errors**. **All green — see §13h.** |
 | **M6** ✅ | `kb` **single-file namespace** (the agent read/write surface, §11): `toc` + `show` (scoped, `--body`/`--full`/`--json`/`--etag`) + `section set/append/insert/replace/edit` (3-way text source, `--keep-heading`) + `replace` (scoped substring) — all over the pure `kb-core::section` ops, with a **zero-depend standard `diff -u` renderer + parser** (byte-identical to `diff -u`, reverse-applicable by `patch(1)`), **etag (FNV-1a 64) optimistic concurrency**, `--dry-run`/`--yes`/`--diff`, **atomic save** (tmp+rename + hash guard), and an **editor flow** ($VISUAL/$EDITOR→vi, no-op detection). Exit codes 0/1/2/3. **21 integration tests** in `kb/tests/section_cli.rs` (binary-as-subprocess, incl. the `diff -u` body reverse-applied by GNU `patch(1)`) + **9 diff-module unit tests** (incl. the pre-generated `testdata/standard.diff` round-trip through the parser + applier). Multi-file ns remains M7 stubs (clean exit-1). **All green — see §13f.** |
  | **M6b** ✅ | Frontmatter kernel ops + `fm`/`fm.<key>` surface (over M6, no new subcommand): pure byte-level total field rewrites in `kb-core::frontmatter` (`find_fm`/`scalar_value`/`list_values` + `set_scalar`/`append_list_item`/`remove_field`/`remove_list_item`, `FmError` total) + CLI `section set/append/rm --value` + `show fm`/`fm.<key>` (whole-file etag, atomic save). **33 new `fm_tests`** + **13 new `section_cli.rs`** integration tests (incl. the block-list-collapse trailing-newline bug pinned) + **37 further proofs verified via `verus`** (`fm_ops_spec.rs`: frame bounds / body preservation / byte-account / field-classification / key-space partitions). `./verify.sh` **317 verified / 0 errors**. **All green — see §13g.** |
-    | **M7** ✅ | `kb` **multi-file namespace** over the M5 `kb-db` index (§11/§13i): `add` (+ `--ext`/`--include-hidden`), `roots`, `drop-root`, `refresh`/`full-rebuild`, `search` (FTS5 + `type:`/`language:` column filters, **alias-expanded `tag:`** filters, `~` OR, `-` NOT, phrases, the `search_terms` *gate* rule, `bm25` ranking via a trigger-maintained `pages_fts`, `--json`/`--limit`), `browse` (`[path]` scoped, label pages expand to their referenced files), `tag` (alias-expanded, label-expanded), `tag-alias --add/--rm/--list`, `links <id|path>` (forward + backlinks), `resolve <query>` (candidate list, no hard error on collision — §4), `info <path>` (full page record), `stats` (per-root counts + db size), `cron` (paste-ready line) — plus the **bare-string dispatch** ergonomics (one non-flag token that is not itself a subcommand → `info` for an existing `.md`, else `search`, preserving any `--db` flag). Zero-depend over the already-verified M0–M6b core; **20 integration tests** in `kb/tests/m7_multifile.rs` (binary-as-subprocess over a throwaway root + `--db`). `cargo test --workspace` **green, 0 failures** (279 total at M7 close). `./verify.sh` **317 verified / 0 errors**. **All green — see §13i.** |
+    | **M7** ✅ | `kb` **multi-file namespace** over the M5 `kb-db` index (§11/§13i): `add` (+ `--ext`/`--include-hidden`), `roots`, `drop-root`, `refresh`/`full-rebuild`, `search` (FTS5 + `type:`/`language:` column filters, **alias-expanded `tag:`** filters, `~` OR, `-` NOT, phrases, the `search_required_phrase` *gate* rule, `bm25` ranking via a trigger-maintained `pages_fts`, `--json`/`--limit`), `browse` (`[path]` scoped, label pages expand to their referenced files), `tag` (alias-expanded, label-expanded), `tag-alias --add/--rm/--list`, `links <id|path>` (forward + backlinks), `resolve <query>` (candidate list, no hard error on collision — §4), `info <path>` (full page record), `stats` (per-root counts + db size), `cron` (paste-ready line) — plus the **bare-string dispatch** ergonomics (one non-flag token that is not itself a subcommand → `info` for an existing `.md`, else `search`, preserving any `--db` flag). Zero-depend over the already-verified M0–M6b core; **20 integration tests** in `kb/tests/m7_multifile.rs` (binary-as-subprocess over a throwaway root + `--db`). `cargo test --workspace` **green, 0 failures** (279 total at M7 close). `./verify.sh` **317 verified / 0 errors**. **All green — see §13i.** |
 | **M7b** ✅ | **Cross-page link resolution** — the §4 5-stage waterfall moved from a shell-string hack into a pure, *verified* kb-core primitive (`kb-core::resolve`: `Page`, `Resolution`, `resolve(query,pages)`, `split_type_slug`, `path_matches`), so the same corpus-identity logic powers all three verbs that need it (`resolve`, `links` forward-annotation, `links` true-backlink) rather than three different SQL queries that happened to disagree. The `resolve` verb now returns **`type:slug`** display ids (not paths); a bare-slug collision renders a candidate list (no hard error — §4 contract); a type-qualified id disambiguates to a unique page. `cmd_links` now *resolves* each forward edge's raw `to_path` against the corpus (rendering `→ type:slug` for a hit, `(unresolved)` for a dead link), and the **backlink set is computed by inverting resolved edges** — i.e. a page B appears as a backlink of A only when one of A's forward targets *resolves to* B's `abs_path`, not when the raw stored text happens to string-match. **17 further proofs** verified via `verus` (`resolve_spec.rs`: 3-way outcome partition, stage-1 / stage-2 precedence, determinism, candidate-set well-formedness, empty-outcome total). 6 new integration tests in `kb/tests/m7_multifile.rs` (wikilink-backlinks-resolve, resolve-type-qualified-unique, resolve-bare-slug-collision, resolve-bare-slug-unique, resolve-substring-unique-and-ambiguous, resolve-missing-slug-is-empty-no-error). `cargo test --workspace` **green, 0 failures** (297 total). `./verify.sh` **334 verified / 0 errors**. **All green — see §13j.** |
 | **M7c** ✅ | **Tag-alias import/export (recovery table)** — the M8 "(optional) export/import `tag_aliases` to a file to recover alias knowledge after a DB wipe" item, landed early as the M7b namespace's one *non-derivable* state pathway (§2: `roots` + `tag_aliases` are the only DB-resident state that does not rebuild from the tree). A new pure, **verified** kb-core module owns the byte↔row codec so the shell only owns the file + the DB: `kb-core::aliases` — `to_text` (export: sort by `(alias,canonical)`, dedup, `alias\tcanonical` per line, empty set → empty string, deterministic over the set not the row order), `parse_line` (split on *first* tab, trim, reject empty fields, `None` = per-line skip not fatal), `line_is_ignorable` (blank / `#`-comment), `from_text` (import: last-wins on a repeated alias **matching the `--add` upsert**, first-occurrence order of survivors preserved). New CLI surface on `tag-alias`: `--export` (to `--file`, or **stdout** so `kb tag-alias --export > backup.tsv` works), `--import` (from `--file`, or **stdin** so `kb tag-alias --import < backup.tsv` works), with the skip count (blank/comment/malformed) reported on import so a partially-typed backup is never silently truncated. **16 new proofs** in `spec/alias_spec.rs` (separator is a real single token distinct from the newline terminator; data line decomposes as `alias ++ TAB ++ canonical ++ NL` with the alias a recoverable *prefix* and the canonical a recoverable *suffix*; alias is a strict prefix of the line so a line never degenerates to a bare alias; the export contains the separator; the per-line partition is clean+disjoint of ignorable vs data vs candidate; well-formed-pair guard; empty-set export is the empty sequence). 4 new integration tests in `kb/tests/m7_multifile.rs` (export-then-**wipe-the-DB**-then-import recovers the map and the alias still *resolves*; export-empty renders to the empty byte string and importing it is a no-op; import is idempotent / no row duplication; import skips malformed + blank + comment lines without losing the good rows). `cargo test --workspace` **green, 0 failures**. `./verify.sh` **350 verified / 0 errors** (14 spec files). **All green — see §13k.** |
-| **M8** | **Interactive TUI** — `kb tui`, an in-process ratatui + crossterm surface over the same `Db` / `kb-core` / `kb-db` the CLI uses (single binary; shares the connection, no fork, no IPC). Split into four increments: **M8.0** scaffold + *browse* ✅ (`App` state machine, event loop + raw-mode/alt-screen restore via a `Drop` guard, key bindings ↑↓/jk/Home-End, `/`/`Enter`/`a` reserved-but-reported, a colored status bar, `list_pages` snapshot) — **see §13l**. **M8.1** *read* + *filter* ✅ (open a page by `abs_path` in a scrollable two-pane view — body left, `heading_of` outline right — with `PgUp`/`PgDn`/`g`/`G` scroll; `/` opens a case-insensitive substring filter over `id`/`title`/`rel_path` — **see §13m**). **M8.2** *edit* + *autocomplete* ✅ (`e` opens a page's frontmatter into `Edit` mode over the verified `kb-core::frontmatter` ops — `title` / `description` in-place scalars, `tags` / `search_terms` lists with **tab-autocomplete** (`suggestions_for` substring-filtering the corpus's known tokens) and `x` remove-tail live preview; the render's "pending plan" and the commit both call the *same* `build_ops` so they cannot diverge; commit = on-disk hash-guard → `apply_op` → same `atomic_write` as the CLI → single-page re-index + browse refresh → green `StatusKind::Success`) — **see §13n**. **M8.3** *alias + roots* manager ✅ (`a`/`r` open the `tag_aliases` + `roots` registries; a shared "form vs. list" `Tab` contract — type into the add form (`Enter` upsert / registers) or move the list selection (`x` removes / drops) — reusing the *same* `Db::add_root` / `drop_root` + `ON CONFLICT(alias) DO UPDATE` + `kb-db::refresh` as `cmd_add` / `cmd_tag_alias` / `cmd_drop_root`) — **see §13o**. **M8 complete — every `kb tui` binding (Browse, Read, Edit, alias, roots) lands.** |
+| **M8** | **Interactive TUI** — `kb tui`, an in-process ratatui + crossterm surface over the same `Db` / `kb-core` / `kb-db` the CLI uses (single binary; shares the connection, no fork, no IPC). Split into four increments: **M8.0** scaffold + *browse* ✅ (`App` state machine, event loop + raw-mode/alt-screen restore via a `Drop` guard, key bindings ↑↓/jk/Home-End, `/`/`Enter`/`a` reserved-but-reported, a colored status bar, `list_pages` snapshot) — **see §13l**. **M8.1** *read* + *filter* ✅ (open a page by `abs_path` in a scrollable two-pane view — body left, `heading_of` outline right — with `PgUp`/`PgDn`/`g`/`G` scroll; `/` opens a case-insensitive substring filter over `id`/`title`/`rel_path` — **see §13m**). **M8.2** *edit* + *autocomplete* ✅ (`e` opens a page's frontmatter into `Edit` mode over the verified `kb-core::frontmatter` ops — `title` / `description` in-place scalars, `tags` / `search_required_phrase` lists with **tab-autocomplete** (`suggestions_for` substring-filtering the corpus's known tokens) and `x` remove-tail live preview; the render's "pending plan" and the commit both call the *same* `build_ops` so they cannot diverge; commit = on-disk hash-guard → `apply_op` → same `atomic_write` as the CLI → single-page re-index + browse refresh → green `StatusKind::Success`) — **see §13n**. **M8.3** *alias + roots* manager ✅ (`a`/`r` open the `tag_aliases` + `roots` registries; a shared "form vs. list" `Tab` contract — type into the add form (`Enter` upsert / registers) or move the list selection (`x` removes / drops) — reusing the *same* `Db::add_root` / `drop_root` + `ON CONFLICT(alias) DO UPDATE` + `kb-db::refresh` as `cmd_add` / `cmd_tag_alias` / `cmd_drop_root`) — **see §13o**. **M8 complete — every `kb tui` binding (Browse, Read, Edit, alias, roots) lands.** |
  | **M9** ✅ | **Agent-facing surface** — Part A (every TUI feature has a plain-CLI bypass), Part B (**every** CLI verb carries `--json`, with the JSON the *only* thing on stdout), Part C (`--db` global flag, already present — now re-asserted for the write path). **Part A**: browse→`browse`, read→`show`, filter→`search`, edit→`section … fm.<key>`/`replace`, alias→`tag-alias`, roots→`add`/`roots`/`drop-root`, cron→`cron` (all already CLI). **Part B**: new `--json` on `add`, `roots`, `drop-root`, `refresh`, `full-rebuild`, `browse`, `tag`, `tag-alias` (`--list`/`--add`/`--rm`/`--import`; `--export` stays the TSV recovery codec), `links`, `resolve`, `info`, `stats`, `cron`, plus the whole write path (`section …` + `replace` + `section edit` rejected). **All 25 CLI verbs** are now `--json`-able (the only exception is `tui`, which is inherently terminal-only). Hand-rolled JSON (zero serde): list verbs emit `[...]`, record/mutation verbs emit `{...}`, one top-level value, nothing else on stdout; human noise (diffs, "applied" notes) is *routed to stderr* under `--json`. New `PageJson` + `jbool` helpers + a `commit(...)` path that forces non-interactive and emits `{file,changed,dry_run,applied,bytes_before,bytes_after,diff}`. **12 integration tests** in `kb/tests/m9_agent_surface.rs` (binary-as-subprocess; each verb's stdout parsed by `python3 json` for shape + required keys, incl. an empty-`[]`/empty-`{}` fallthrough and `section edit --json` clean-reject). `cargo test --workspace` **green, 0 failures** (356 total at M9 close, up from 344). `./verify.sh` **350 verified / 0 errors** (unchanged — M9 is shell). **All green — see §13p.** |
  | **M9.5** ✅ | **`kb patch` — import an external unified diff** — the last single-file-namespace verb parked in §13f as *"~20 lines of `main.rs`: the parser + applier are already built and pinned"*. `Cmd::Patch` takes a target `FILE` plus a 3-way patch source (exactly one of `--patch-file [PATH|-]`, `--patch-stdin`, `--patch-text` — `allow_hyphen_values` on `--patch-text` so a `--- ...` leading line isn't misread as a flag); the shared write contract (`--dry-run` / `--yes` / `--if-unchanged` / `--json`) is inherited via the same `WriteFlags` + `commit()` as `section` / `replace`. The pure core does the work: `diff::apply_patch` consumes the *exact* standard unified diff output (cross-tested against GNU `patch(1)` on `testdata/standard.diff`; the `parse_unified` / `apply_patch` pair is unchanged this milestone). Result: a standard `diff -u` or `git diff` hunk is *consumed*, not re-derived — the write path closes the loop (every write verb already emits standard `diff -u` via `--diff`; `patch` imports that byte-identically). **8 new integration tests** in `kb/tests/section_cli.rs` (binary-as-subprocess over `testdata/*`: real `diff -u` byte-identical output vs. `section_new.md`, `--patch-stdin` via a pipe, `--patch-text` inline, `--dry-run` no-write, `--json` well-formed uniform envelope, 0-source / 2-source clean-reject, identity patch = "no changes" no-op). `--json` sweep extended from **25** to **26** verbs (all valid JSON). `cargo test --workspace` **green, 0 failures** (368 total, up from 360). **All green — see §13q.** |
 
@@ -602,7 +602,7 @@ no-frontmatter → `Frontmatter::none`), the `type:` gate (case-insensitive,
 `Label`/`Wiki`/`Note`; typo → `unknown_type_present`), `description:`
 ≤255-char *flag* (value retained, `description_too_long: true`, drop applied by
 the M5 indexer), `tags:` trimmed + unquoted + deduped (first-occurrence order),
-`search_terms:` verbatim (quotes/case/space retained — the gate contract), and
+`search_required_phrase:` verbatim (quotes/case/space retained — the gate contract), and
 `frontmatter_text` / `body` extraction. Pinned by `spec/fm_spec.rs`.
 
 **`kb-core::identity` (exec, `src/identity.rs`, 18 unit tests):**
@@ -620,7 +620,7 @@ the M5 indexer), `tags:` trimmed + unquoted + deduped (first-occurrence order),
 **Spec files (verified, `kb-core/spec/`):**
 - `fm_spec.rs` (19 proofs): kind partition (pairwise disjoint + satisfiable +
   `indexable_iff_known`), description bound (total + disjoint), tag hygiene
-  (usable/empty partition), and the `search_terms` unlock predicate (non-empty
+  (usable/empty partition), and the `search_required_phrase` unlock predicate (non-empty
   + contiguous prefix/suffix/exact — the hidden→unlocked gate shape).
 - `identity_spec.rs` (20 proofs): the slug-priority *decision* as a total
   mutually-exclusive 4-branch choice (title/h1/filename/none) — proving the
@@ -632,7 +632,7 @@ the M5 indexer), `tags:` trimmed + unquoted + deduped (first-occurrence order),
 `note.example.md`, `label.example.md`, `no-type.example.md`. The smoke test
 `kb-core/tests/frontmatter_smoke.rs` runs each through the **real** parser and
 asserts the full contract: indexability, kind, tag dedupe, verbatim
-`search_terms` (`token bucket` / `mTLS` case-and-space exact), and that the
+`search_required_phrase` (`token bucket` / `mTLS` case-and-space exact), and that the
 no-type page parses but is `!is_indexable` with `unknown_type_present == false`
 (absent, not a typo). Every indexable page is additionally resolved to its
 `type:slug` display id through the real identity pipeline.
@@ -1122,7 +1122,7 @@ claim per lemma, `&str`/`u8`/`bool`/`Seq<char>` only:
   Missing, list-nonempty vs ValueAbsent, are total + disjoint boundary
   predicates;
 - (S) **key space** — known scalar keys {type,title,description} and list
-  keys {tags,search_terms} are each a clean membership set and *mutually
+  keys {tags,search_required_phrase} are each a clean membership set and *mutually
   disjoint* (a key routes to exactly one helper); `fm`-ref vs `fm.<k>`-ref
   is total + disjoint.
 
@@ -1287,7 +1287,7 @@ isolation (throwaway DB, throwaway root).
   - **`tag:` filters** (alias-expanded through `tag_aliases` + the corpus,
     `canonicalize` from the M2 core, case-insensitive IN-list over
     `page_tags`), and
-  - the **`search_terms` gate rule** (a page with gate terms is hidden unless
+  - the **`search_required_phrase` gate rule** (a page with gate terms is hidden unless
     the rendered FTS text contains the full entry — the §8 "gated" behavior,
     computed on the *rendered query* not the raw word set).
   A **documented v1 limitation** pinned by test: a NOT-only query (`-beta`)
@@ -1301,7 +1301,7 @@ isolation (throwaway DB, throwaway root).
   title, which is what keeps the `bm25(pages_fts)` column from being
   referenced without the `JOIN` that only exists under `MATCH`).
 - **browse** — a numbered, per-root per-page list over all registered roots
-  (or under a `[path]` when given), showing id / title / tags / `search_terms`
+  (or under a `[path]` when given), showing id / title / tags / `search_required_phrase`
   / link count. **Label pages are expanded to their referenced files**
   (`kb-core::labels::classify`), not listed as themselves — the §10
   "a label is a pointer" contract.
@@ -1335,7 +1335,7 @@ isolation (throwaway DB, throwaway root).
   the M0–M6 single-file surface is text-only, so `info` is where the indexed
   identity becomes user-visible.
 - **stats** — per-root page counts (most-recent root first), totals
-  (pages, tags, `search_terms`/gate rows), plus a line for the DB's file
+  (pages, tags, `search_required_phrase`/gate rows), plus a line for the DB's file
   size and the latest `MAX(updated_at)`/`MAX(created_at)` (the "is this DB
   alive?" diagnostic).
 - **cron** — prints a paste-ready `<exe> <db> refresh` line (the DB's
@@ -1476,7 +1476,7 @@ do `type:slug` *fuzzy* matching (only the exact 5-stage waterfall); the
 
 ## Appendix A — Example note files (frontmatter + body)
 
-Concrete examples anchoring the schema, identity rules, tags, labels, and the `search_terms`
+Concrete examples anchoring the schema, identity rules, tags, labels, and the `search_required_phrase`
 gate. These are the shapes the parser (`kb-core::frontmatter`) and indexer
 (`kb-db::index`) must accept. All three types live under **different registered roots** to show
 multi-root identity.
@@ -1484,7 +1484,7 @@ multi-root identity.
 > **Convention:** frontmatter is delimited by `---` on the first line. Allowed values in v1:
 > scalars (string / int / bool), inline lists `[a, b]`, block lists (`- item`), and `#` comments.
 > **No nested maps** in v1.
-> Multi-word `search_terms` entries are **double-quoted** (`"token bucket"`). In `pages`,
+> Multi-word `search_required_phrase` entries are **double-quoted** (`"token bucket"`). In `pages`,
 > entries are stored verbatim (quotes included); in `page_gates`, quotes are stripped so the
 > matching unit is the whole phrase `token bucket`.
 
@@ -1522,7 +1522,7 @@ and became the basis of modern LLMs.
 ```
 
 **What this exercises:**
-- **Visible (gateless)**: no `search_terms` in frontmatter → it appears in a general
+- **Visible (gateless)**: no `search_required_phrase` in frontmatter → it appears in a general
   `kb search "transformer"` (clean surface). It is the *explanatory* page.
 - `wiki:Transformer (architecture)` display id; slug from frontmatter `title` (no H1 required).
 - **Mentions a term** ("transformer", "attention", "LLM") — the link that matters is the
@@ -1575,12 +1575,12 @@ the design. The actual implementation lives in `../rust/gateway/`.
 
 ---
 
-### A.2a — same note, *gated* (the `search_terms` version)
+### A.2a — same note, *gated* (the `search_required_phrase` version)
 
 If the same gateway note were a deep-dive page, its frontmatter would additionally carry:
 
 ```yaml
-search_terms:
+search_required_phrase:
   - mTLS
   - "token bucket"
 ```
@@ -1732,7 +1732,7 @@ string→string map managed by `kb tag-alias`.
 
 `pages` (keyed by `abs_path` — truncated for width; full values are the `description:` frontmatter from each example; `Transformer (papers)` is intentionally **without** a `description`, showing the optional case):
 ```
-abs_path                                type    search_terms  description (first ~50 chars)
+abs_path                                type    search_required_phrase  description (first ~50 chars)
 --------------------------------------  ------  -----------  -------------------------------------------------
 ~/notes/wiki/transformer.md              wiki    NULL         How the Transformer works — self-attention, posi…
 ~/work/projects/api-gateway/README.md    note    NULL         Internal design notes — gRPC vs REST, JWT auth, …
@@ -1741,7 +1741,7 @@ abs_path                                type    search_terms  description (first
 ~/library/transformer.md                 label   NULL         NULL
 ```
 
-> All 5 pages are **visible** (gateless). If a future page needs the `search_terms` gate,
+> All 5 pages are **visible** (gateless). If a future page needs the `search_required_phrase` gate,
 > it would *not* show in `kb search "transformer"` (general) until the query contains one
 > of its full gate entries (word or quoted phrase, e.g. A.2a's `"token bucket"`).
 > **Non-md files are not rows.** `papers/*.pdf`, `books/*.epub`, and the non-MD content a
@@ -2026,10 +2026,10 @@ Browse → `Enter` → Read (body + `L1`-tagged outline render) → `Esc` →
 non-TTY soft-fails with "could not enable raw mode" and exit 1.
 
 **Next up — M8.2.** The `Edit` mode: frontmatter `title` / `description`
-/ `tags` / `search_terms` over the *already-verified* `kb-core::frontmatter`
+/ `tags` / `search_required_phrase` over the *already-verified* `kb-core::frontmatter`
 ops (`set_scalar`, `append_list_item`, `remove_list_item`, `remove_field`,
 `list_values`, `scalar_value`), with **tab-autocomplete** listing matching
-tags/search_terms from the corpus, and a green/red commit status (the first
+tags/search_required_phrase from the corpus, and a green/red commit status (the first
 consumer of `StatusKind::{Success, Error}` — the contract locked in
 §13l). This is the milestone that may add a small spec file if the
 autocomplete matching predicate turns out to need a proof.
@@ -2038,7 +2038,7 @@ autocomplete matching predicate turns out to need a proof.
 
 **Scope.** M8.2 is the first TUI verb that *writes*: it lets the user edit
 a page's frontmatter — `title` / `description` (scalars) and `tags` /
-`search_terms` (lists) — in place, with **tab-autocomplete** over the
+`search_required_phrase` (lists) — in place, with **tab-autocomplete** over the
 corpus's known tokens, and commit the change atomically. It is still
 **shell-only**: every byte-level frontmatter op delegates to the *already
 verified* `kb-core::frontmatter` (`set_scalar`, `append_list_item`,

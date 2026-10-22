@@ -212,7 +212,7 @@ pub struct ReadState {
 /// zsh *type → live-filter → arrows-select → Enter-adopts* idiom exactly:
 ///
 /// * **Picker** — the field list (title / description / tags /
-///   search_terms, with each field's *current* value next to it). `↑/↓`
+///   search_required_phrase, with each field's *current* value next to it). `↑/↓`
 ///   move the highlight; `Enter` moves to the **Value** stage for that
 ///   field. The manager keys (`a` alias, `r` roots) are reachable *only*
 ///   from here (and from Browse / Read) — never from a value buffer, so a
@@ -247,7 +247,7 @@ pub enum EditField {
     Title,
     Description,
     Tags,
-    SearchTerms,
+    SearchRequiredPhrase,
 }
 
 impl EditField {
@@ -257,7 +257,7 @@ impl EditField {
             EditField::Title => "title",
             EditField::Description => "description",
             EditField::Tags => "tags",
-            EditField::SearchTerms => "search_terms",
+            EditField::SearchRequiredPhrase => "search_required_phrase",
         }
     }
     /// A short, human label for the render surface (the "title:" / "tags:"
@@ -267,19 +267,19 @@ impl EditField {
             EditField::Title => "title",
             EditField::Description => "description",
             EditField::Tags => "tags",
-            EditField::SearchTerms => "search_terms",
+            EditField::SearchRequiredPhrase => "search_required_phrase",
         }
     }
     /// Whether the field's value is a comma/list-style *item* (so the
     /// "append an item" semantic + tab-autocomplete applies) vs. a scalar
     /// (so "set the value" applies). Title/description are scalars;
-    /// tags/search_terms are lists.
+    /// tags/search_required_phrase are lists.
     pub fn is_list(self) -> bool {
-        matches!(self, EditField::Tags | EditField::SearchTerms)
+        matches!(self, EditField::Tags | EditField::SearchRequiredPhrase)
     }
     /// The ordered field list the Edit mode shows. Total + stable.
     pub fn all() -> &'static [EditField] {
-        &[EditField::Title, EditField::Description, EditField::Tags, EditField::SearchTerms]
+        &[EditField::Title, EditField::Description, EditField::Tags, EditField::SearchRequiredPhrase]
     }
 }
 
@@ -310,7 +310,7 @@ pub struct EditState {
     /// across the corpus, or all search-terms seen), loaded once when the
     /// field is entered. Empty for scalar fields and when the corpus has no
     /// tokens. This is the autocomplete source (PLAN M8.2 "list all matching
-    /// tags/search_terms from the corpus").
+    /// tags/search_required_phrase from the corpus").
     pub corpus: Vec<String>,
     /// The page's file bytes **on entry** (fixed for the lifetime of the
     /// edit session, overwritten only after a successful commit). Two roles:
@@ -691,7 +691,7 @@ impl App {
     /// **Total**: an open on an empty `view` is a no-op.
     ///
     /// Enters the **Picker** stage: the *field list* is shown (title /
-    /// description / tags / search_terms, with each field's current value
+    /// description / tags / search_required_phrase, with each field's current value
     /// next to it). `↑`/`↓` move the highlight; `Enter` moves to the
     /// *Editor* for that field. The user must *choose* a field before
     /// touching its value — the value buffer and the completion menu are
@@ -930,7 +930,7 @@ impl App {
     /// kind:
     /// - **Scalar** (title / description): `←/→` move the text cursor,
     ///   `Backspace` deletes before it, `Enter` commits.
-    /// - **List** (tags / search_terms): `←/→` enter the *selection* sub-
+    /// - **List** (tags / search_required_phrase): `←/→` enter the *selection* sub-
     ///   mode (the existing items, plus a trailing `<new>`); there, `←/→/↑/↓`
     ///   move the highlight, `Backspace`/`Del` remove the highlighted item,
     ///   `Enter` loads it into the buffer (or return to `<new>`), and typing
@@ -1169,7 +1169,7 @@ impl App {
             _ => return, // total on a stray non-Edit call
         };
         if !field.is_list() {
-            self.set_info("x — not on a list field (arrow to tags / search_terms)");
+            self.set_info("x — not on a list field (arrow to tags / search_required_phrase)");
             return;
         }
         let last = match last_opt {
@@ -2075,7 +2075,7 @@ pub fn apply_op(
 
 /// The corpus for tab-autocomplete: for a **list** field, the distinct
 /// tokens across all pages (all tags on `page_tags` for `EditField::Tags`;
-/// all search-terms on `page_gates` for `EditField::SearchTerms`). For a
+/// all search-terms on `page_gates` for `EditField::SearchRequiredPhrase`). For a
 /// **scalar** field the corpus is empty (no autocomplete on free text).
 /// Total: an empty DB returns an empty Vec (the field still shows no
 /// suggestions; the user types freely).
@@ -2087,7 +2087,7 @@ pub fn corpus_for(db: &Db, field: EditField) -> Vec<String> {
     // migrate: "lowercase ASCII tag"). A simple DISTINCT query suffices.
     let sql = match field {
         EditField::Tags => "SELECT DISTINCT tag FROM page_tags ORDER BY tag",
-        EditField::SearchTerms => {
+        EditField::SearchRequiredPhrase => {
             "SELECT DISTINCT term FROM page_gates ORDER BY term"
         }
         _ => return Vec::new(),
@@ -2354,7 +2354,7 @@ mod tests {
             let id = format!("note:P{i}");
             let rel = format!("p{i}.md");
             db.conn.execute(
-                "INSERT INTO pages (abs_path, id, type, title, root, rel_path, search_terms, mtime_ns, content_hash)
+                "INSERT INTO pages (abs_path, id, type, title, root, rel_path, search_required_phrase, mtime_ns, content_hash)
                  VALUES (?1, ?2, 'note', ?3, '/root', ?4, NULL, 0, 'x')",
                 rusqlite::params![p, id, format!("P{i}"), rel],
             )
@@ -2422,7 +2422,7 @@ mod tests {
         let id = format!("note:{name}");
         db.conn
             .execute(
-                "INSERT INTO pages (abs_path, id, type, title, root, rel_path, search_terms,
+                "INSERT INTO pages (abs_path, id, type, title, root, rel_path, search_required_phrase,
                                     body, frontmatter_text, mtime_ns, content_hash)
                  VALUES (?1, ?2, 'note', ?3, '/root', ?4, NULL, ?5, '---\ntype: note\n---\n', 0, 'x')",
                 rusqlite::params![abs, id, title, format!("{name}.md"), body],
@@ -2645,7 +2645,7 @@ mod tests {
 
     /// A well-formed frontmatter + body fixture: a scalar `title`, a list
     /// `tags`, an *absent* `description` (so the scalar-clear path has
-    /// nothing to clear), and an *absent* `search_terms`. The bytes are
+    /// nothing to clear), and an *absent* `search_required_phrase`. The bytes are
     /// used directly as the `EditState::entry_bytes` in the pure-helper
     /// tests (no file IO; `plan()` + `apply_op` are pure).
     const FM_FIXTURE: &str =
@@ -3019,7 +3019,7 @@ mod tests {
         let id = "note:page".to_string();
         db.conn
             .execute(
-                "INSERT INTO pages (abs_path, id, type, title, root, rel_path, search_terms,
+                "INSERT INTO pages (abs_path, id, type, title, root, rel_path, search_required_phrase,
                                     mtime_ns, content_hash)
                  VALUES (?1, ?2, 'note', 'Page', '/root', 'page.md', NULL, 0, 'x')",
                 rusqlite::params![abs, id],
@@ -3058,7 +3058,7 @@ mod tests {
         let abs = path.to_string_lossy().into_owned();
         db.conn
             .execute(
-                "INSERT INTO pages (abs_path, id, type, title, root, rel_path, search_terms,
+                "INSERT INTO pages (abs_path, id, type, title, root, rel_path, search_required_phrase,
                                     mtime_ns, content_hash)
                  VALUES (?1, 'note:page', 'note', 'Hello World', '/root', 'page.md', NULL, 0, 'x')",
                 rusqlite::params![abs],
@@ -3130,7 +3130,7 @@ mod tests {
         let abs = path.to_string_lossy().into_owned();
         db.conn
             .execute(
-                "INSERT INTO pages (abs_path, id, type, title, root, rel_path, search_terms,
+                "INSERT INTO pages (abs_path, id, type, title, root, rel_path, search_required_phrase,
                                     mtime_ns, content_hash)
                  VALUES (?1, 'note:page', 'note', 'Hello World', '/root', 'page.md', NULL, 0, 'x')",
                 rusqlite::params![abs],
@@ -3571,17 +3571,17 @@ mod tests {
     #[test]
     fn smart_backspace_with_no_tail_is_a_clean_noop() {
         // Use a fresh empty page (no pre-seeded tags) — the fixture seeds
-        // [mTLS, transformer]; here we open the `search_terms` field which
+        // [mTLS, transformer]; here we open the `search_required_phrase` field which
         // is empty on the fixture, exercising the "no tail to drop" path.
         let (mut app, page) = seeded_app();
         app.open_edit().unwrap();
         app.picker_move(true); // description
         app.picker_move(true); // tags
-        app.picker_move(true); // search_terms
+        app.picker_move(true); // search_required_phrase
         app.enter_editor();
-        // Sanity: search_terms is an empty list.
+        // Sanity: search_required_phrase is an empty list.
         if let Mode::Edit(ref e) = app.mode {
-            assert_eq!(e.field, EditField::SearchTerms, "we're on search_terms");
+            assert_eq!(e.field, EditField::SearchRequiredPhrase, "we're on search_required_phrase");
             assert!(e.value.is_empty(), "buffer is empty");
             assert!(e.current_list.is_empty(), "no existing items");
         }
