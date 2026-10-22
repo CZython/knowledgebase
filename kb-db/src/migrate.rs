@@ -22,7 +22,7 @@
 use rusqlite::{Connection, Result};
 
 /// Current schema version (recorded in `meta.version` for future upgrades).
-pub const SCHEMA_VERSION: &str = "1";
+pub const SCHEMA_VERSION: &str = "2";
 
 /// The complete v0 schema (PLAN §8 + FTS5 sync triggers). Idempotent.
 const SCHEMA_SQL: &str = r#"
@@ -43,7 +43,7 @@ CREATE TABLE IF NOT EXISTS pages (
   title            TEXT,
   language         TEXT,
   description      TEXT,
-  search_terms     TEXT,
+  search_required_phrase TEXT,
   frontmatter_text TEXT,
   body             TEXT,
   mtime_ns         INTEGER NOT NULL,

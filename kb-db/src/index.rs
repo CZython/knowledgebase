@@ -9,7 +9,7 @@
 //!
 //! 1. read the file bytes;
 //! 2. `frontmatter::parse` → `Frontmatter` (title?, description?, tags,
-//!    search_terms, frontmatter_text, body);
+//!    search_required_phrase, frontmatter_text, body);
 //! 3. **indexable?** — `fm.page_type.is_some()`. If not, the page is
 //!    *skipped-and-counted* (the §3 warning, not an error);
 //! 4. `identity::resolve_slug(fm.title, identity::find_h1(body),
@@ -46,8 +46,8 @@ pub struct PageRecord {
     pub language: Option<String>,
     pub description: Option<String>,
     /// Gate entries verbatim ('\n'-joined) — quotes **retained**; this is
-    /// the display/FM view (PLAN §8 page.search_terms).
-    pub search_terms_verbatim: Option<String>,
+    /// the display/FM view (PLAN §8 page.search_required_phrase).
+    pub search_required_phrase_verbatim: Option<String>,
     pub frontmatter_text: Option<String>,
     pub body: String,
     pub mtime_ns: i64,
@@ -197,15 +197,15 @@ pub fn build_page(
     let page_type = page_type_str(&kind).to_string();
     let id = identity::display_id(kind.clone(), &slug);
 
-    // Gate terms: `frontmatter::search_terms` carries verbatim (quotes
-    // retained); the `page_gates` column requires the *unquoted* form (PLAN
-    // §8 comment + §4 gate matching).
-    let gate_terms: Vec<String> = kb_core_search_terms_unquoted(&fm.search_terms);
-    let search_terms_verbatim: Option<String> = {
-        if fm.search_terms.is_empty() {
+    // Gate phrases: `frontmatter::search_required_phrase` carries verbatim
+    // (quotes retained); the `page_gates` column requires the *unquoted* form
+    // (PLAN §8 comment + §4 gate matching).
+    let gate_terms: Vec<String> = kb_core_search_required_phrase_unquoted(&fm.search_required_phrase);
+    let search_required_phrase_verbatim: Option<String> = {
+        if fm.search_required_phrase.is_empty() {
             None
         } else {
-            Some(fm.search_terms.join("\n"))
+            Some(fm.search_required_phrase.join("\n"))
         }
     };
 
@@ -262,7 +262,7 @@ pub fn build_page(
         title: Some(slug),
         language,
         description,
-        search_terms_verbatim,
+        search_required_phrase_verbatim,
         frontmatter_text: if fm.frontmatter_text.is_empty() {
             None
         } else {
@@ -278,9 +278,9 @@ pub fn build_page(
 }
 
 /// Strip a single layer of surrounding double/single quotes from each
-/// search-term entry (PLAN §8 page_gates: "exact entry as written, minus
+/// gate phrase (PLAN §8 page_gates: "exact entry as written, minus
 /// surrounding double quotes"). Non-quoted entries are unchanged.
-fn kb_core_search_terms_unquoted(terms: &[String]) -> Vec<String> {
+fn kb_core_search_required_phrase_unquoted(terms: &[String]) -> Vec<String> {
     terms
         .iter()
         .map(|t| {
@@ -380,7 +380,7 @@ pub fn upsert_page(db: &Db, rec: &PageRecord) -> Result<usize> {
         r#"
         INSERT INTO pages (
           abs_path, id, type, root, rel_path, title, language,
-          description, search_terms, frontmatter_text, body,
+          description, search_required_phrase, frontmatter_text, body,
           mtime_ns, content_hash, created_at, updated_at
         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?14)
         ON CONFLICT (abs_path) DO UPDATE SET
@@ -391,7 +391,7 @@ pub fn upsert_page(db: &Db, rec: &PageRecord) -> Result<usize> {
           title = excluded.title,
           language = excluded.language,
           description = excluded.description,
-          search_terms = excluded.search_terms,
+          search_required_phrase = excluded.search_required_phrase,
           frontmatter_text = excluded.frontmatter_text,
           body = excluded.body,
           mtime_ns = excluded.mtime_ns,
@@ -407,7 +407,7 @@ pub fn upsert_page(db: &Db, rec: &PageRecord) -> Result<usize> {
             rec.title,
             rec.language,
             rec.description,
-            rec.search_terms_verbatim,
+            rec.search_required_phrase_verbatim,
             rec.frontmatter_text,
             rec.body,
             { rec.mtime_ns },
@@ -525,7 +525,7 @@ mod tests {
             "\"token bucket\"".to_string(),
             "'a b'".to_string(),
         ];
-        let out = kb_core_search_terms_unquoted(&src);
+        let out = kb_core_search_required_phrase_unquoted(&src);
         assert_eq!(
             out,
             vec![
@@ -595,7 +595,7 @@ mod tests {
             "language: en\n",
             "description: the note\n",
             "tags:\n  - rust\n  - http\n",
-            "search_terms:\n  - mTLS\n  - \"token bucket\"\n",
+            "search_required_phrase:\n  - mTLS\n  - \"token bucket\"\n",
             "---\n",
             "\n# My Note — H1\n\n[[Some Wiki]]  papers/final.pdf\n",
         );
@@ -610,9 +610,9 @@ mod tests {
             vec!["mTLS".to_string(), "token bucket".to_string()]
         );
         assert!(rec.gate_terms.iter().all(|t| !t.starts_with('"')));
-        // verbatim search_terms keeps the quotes (the pages column contract)
+        // verbatim search_required_phrase keeps the quotes (the pages column contract)
         assert_eq!(
-            rec.search_terms_verbatim.as_deref(),
+            rec.search_required_phrase_verbatim.as_deref(),
             Some("mTLS\n\"token bucket\"")
         );
         // language extracted

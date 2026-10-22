@@ -84,12 +84,12 @@ fn write_page(root: &Path, rel: &str, fm: &str, body: &str) {
 fn index_derives_all_row_tables_and_fts() {
     let s = Setup::new("derive");
     // A fully-specified note: title (slug source), language, description,
-    // 2 tags, 2 search_terms (a lone word + a quoted phrase), body with a
-    // wikilink + a relative path ref.
+    // 2 tags, 2 search_required_phrase entries (a lone word + a quoted
+    // phrase), body with a wikilink + a relative path ref.
     write_page(
         &s.root,
         "notes/note.md",
-        "type: note\ntitle: Attention API\nlanguage: en\ndescription: how it works\ntags:\n  - llm\n  - mTLS\nsearch_terms:\n  - mTLS\n  - \"token bucket\"\n",
+        "type: note\ntitle: Attention API\nlanguage: en\ndescription: how it works\ntags:\n  - llm\n  - mTLS\nsearch_required_phrase:\n  - mTLS\n  - \"token bucket\"\n",
         "# Attention API\n\nSee [[Transformer (architecture)]] and papers/attention.pdf for details.\n",
     );
     // A no-type page → skipped + counted.
