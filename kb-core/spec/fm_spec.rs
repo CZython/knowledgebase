@@ -5,7 +5,7 @@
 //     verus kb-core/spec/fm_spec.rs
 //
 // Mirrors PLAN.md §3 (Frontmatter) / §4 (identity — the `type:` gate) /
-// §7 (`search_terms` gate). The *code* is `src/frontmatter.rs`; the concrete
+// §7 (`search_required_phrase` gate). The *code* is `src/frontmatter.rs`; the concrete
 // boundary cases (255/256 description, token-bucket gate, tag dedupe,
 // no-frontmatter framing) are pinned by the unit tests there. This file
 // proves the *shape* — the logical structure the parser + indexer rely on.
@@ -131,9 +131,9 @@ verus! {
         ensures !((a == "rust") && (a == "http"))
     {}
 
-    // ===================== `search_terms` gate (§7) =======================
+    // ===================== `search_required_phrase` gate (§7) =======================
     //
-    // A page *with* `search_terms` is hidden from general search and is
+    // A page *with* `search_required_phrase` is hidden from general search and is
     // unlocked only when the *entire* entry occurs as a contiguous span in
     // the query (case-insensitive). Provable shape: unlock := (entry is
     // non-empty) AND (entry ⊑ query). The exec compares

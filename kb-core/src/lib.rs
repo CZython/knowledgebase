@@ -36,7 +36,7 @@
 //!   exec behaviour to the spec's shape (Appendix A examples).
 //! - `frontmatter` — the permissive YAML-subset parser (M1): scalars,
 //!   inline + block lists, `#` comments; `type:` gate, `description:`
-//!   ≤255 flag, tag dedupe, verbatim `search_terms`.
+//!   ≤255 flag, tag dedupe, verbatim `search_required_phrase`.
 //! - `identity` — slug resolution (title → H1 → filename) and the
 //!   `type:slug` display-id assembly (M1).
 //! - `tags` — tag-string normalization (store: trim / drop-empty /
@@ -66,7 +66,7 @@
 //! - `spec/meta_spec.rs` — the display-id invariants (prefix distinctness,
 //!   decomposition, suffix recovery) with proofs. (M0.)
 //! - `spec/fm_spec.rs` — the frontmatter contract (kind partition, description
-//!   bound, tag hygiene, `search_terms` gate shape) with proofs. (M1.)
+//!   bound, tag hygiene, `search_required_phrase` gate shape) with proofs. (M1.)
 //! - `spec/identity_spec.rs` — the slug-priority decision + display-id
 //!   assembly + well-formedness shape with proofs. (M1.)
 //! - `spec/tags_spec.rs` — normalize is idempotent / duplicate-free /

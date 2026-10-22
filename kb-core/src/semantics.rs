@@ -1,17 +1,18 @@
-//! semantics — the *meaning* of a parsed query: the `search_terms` gate
+//! semantics — the *meaning* of a parsed query: the `search_required_phrase` gate
 //! (the "reverse whitelist") and the commutativity / structure invariants of
 //! the filter + FTS-content lanes (M3).
 //!
-//! §5 (Search model — `search_terms` gate) + §9 (Verification):
+//! §5 (Search model — `search_required_phrase` gate) + §9 (Verification):
 //!
-//! > `semantics` — **gate = gateless ∨ ∃ whole gate entry occurring in query
+//! > `semantics` — **gate = gateless ∨ ∃ whole `search_required_phrase` entry occurring in query
 //! > text (case-insensitive)**; **filter commutativity** (= "order doesn't
 //! > matter"); AND/OR/NOT structure preserved.
 //!
 //! ## The gate (the "reverse whitelist")
 //!
-//! A page's `search_terms` are *secret unlock phrases*: a page **with**
-//! `search_terms` is hidden from general search and is **unlocked** only when
+//! A page's `search_required_phrase` entries are *secret unlock phrases*: a
+//! page **with** `search_required_phrase` is hidden from general search and is
+//! **unlocked** only when
 //! the **entire** gate entry occurs as a **contiguous span, case-insensitive,
 //! somewhere** in the query's FTS content text. A page **without** gate
 //! entries (gateless) is always visible (given a content match).
@@ -64,7 +65,7 @@
 /// The page class with respect to the gate (§5).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum GateClass {
-    /// No `search_terms` — always visible to a (content-matching) query.
+    /// No `search_required_phrase` — always visible to a (content-matching) query.
     Gateless,
     /// Has one or more gate entries — visible only when an entry is unlocked.
     Gated,

@@ -4,7 +4,7 @@ title: API Gateway — notes
 tags:
   - gateway
   - http
-search_terms:
+search_required_phrase:
   - token bucket
   - mTLS
 ---

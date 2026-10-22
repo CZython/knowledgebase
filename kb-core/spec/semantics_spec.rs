@@ -4,7 +4,7 @@
 //
 //     verus kb-core/spec/semantics_spec.rs
 //
-// Mirrors PLAN.md §5 (Search model — `search_terms` gate) + §9 (Verification):
+// Mirrors PLAN.md §5 (Search model — `search_required_phrase` gate) + §9 (Verification):
 //
 //   > `semantics` — **gate = gateless ∨ ∃ whole gate entry occurring in query
 //   > text (case-insensitive)**; **filter commutativity** (= "order doesn't
@@ -39,7 +39,7 @@ use vstd::prelude::*;
 verus! {
     // ===================== (G) the gate: gateless ∨ ∃ entry (§5) ============
     //
-    // A page's `search_terms` gate classifies the page into one of two
+    // A page's `search_required_phrase` gate classifies the page into one of two
     // classes; the visibility decision is the disjunction "gateless" OR
     // "some entry occurs". We model the class (a u8 tag) and the entry
     // predicate (booleans) and prove the disjunction is total + the classes

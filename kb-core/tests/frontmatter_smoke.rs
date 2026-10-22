@@ -5,7 +5,7 @@
 //! These pin the *contract* the M5 indexer relies on, end-to-end:
 //!
 //!   - `wiki.example.md`  → indexable, kind `wiki`, tags deduped, body present.
-//!   - `note.example.md`  → indexable, kind `note`, `search_terms` verbatim (the
+//!   - `note.example.md`  → indexable, kind `note`, `search_required_phrase` verbatim (the
 //!     gate words — `token bucket` / `mTLS` — kept exactly as written).
 //!   - `label.example.md` → indexable, kind `label`.
 //!   - `no-type.example.md` → NOT indexable (no `type:`) but still parses,
@@ -57,14 +57,14 @@ fn wiki_example_indexes_and_pops_fields() {
 }
 
 #[test]
-fn note_example_keeps_search_terms_verbatim() {
+fn note_example_keeps_search_required_phrase_verbatim() {
     let p = parse(&read("note.example.md"));
     assert!(p.is_indexable());
     assert_eq!(p.page_type, Some(NoteType::Note));
     // The gate words must be preserved verbatim (case as written): `mTLS`
     // keeps its mixed case, `token bucket` keeps its space. This is the
-    // whole "search_terms hidden gate" contract (§7).
-    assert_eq!(p.search_terms, vec!["token bucket", "mTLS"]);
+    // whole "search_required_phrase hidden gate" contract (§7).
+    assert_eq!(p.search_required_phrase, vec!["token bucket", "mTLS"]);
     assert_eq!(p.tags, vec!["gateway", "http"]);
     assert_eq!(p.title.as_deref(), Some("API Gateway — notes"));
 }

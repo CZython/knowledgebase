@@ -88,8 +88,8 @@ verus! {
     fn description_is_content_not_filter()
         ensures is_content_key("description") && !is_filter_key("description") {}
     #[verifier::proof]
-    fn search_terms_is_content_not_filter()
-        ensures is_content_key("search_terms") && !is_filter_key("search_terms") {}
+    fn search_required_phrase_is_content_not_filter()
+        ensures is_content_key("search_required_phrase") && !is_filter_key("search_required_phrase") {}
 
     // (F3) the whitelist is exactly 3-element: every filter-key is one of the
     //      three (totality — no fourth filter key exists), and the three

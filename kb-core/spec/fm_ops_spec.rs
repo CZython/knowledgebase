@@ -34,7 +34,7 @@
 //        unambiguous), and the scalar / list addressing predicates are
 //        total + disjoint.
 //   (S)  **key space**: known scalar keys {title, description, type} and
-//        known list keys {tags, search_terms} are each a clean total set;
+//        known list keys {tags, search_required_phrase} are each a clean total set;
 //        a key is at most one class (scalar XOR list).
 
 use vstd::prelude::*;
@@ -250,7 +250,7 @@ verus! {
     // ===================== (S) key space =================================
     //
     // Known scalar keys {type, title, description}; known list keys
-    // {tags, search_terms}. Pin: each known set is a total membership,
+    // {tags, search_required_phrase}. Pin: each known set is a total membership,
     // and a key is in *at most one* class (scalar XOR list) — so the
     // dispatch is unambiguous and a rewrite helper is applied to exactly
     // one field.
@@ -259,7 +259,7 @@ verus! {
         k == "type" || k == "title" || k == "description"
     }
     pub open spec fn is_list_key(k: &str) -> bool {
-        k == "tags" || k == "search_terms"
+        k == "tags" || k == "search_required_phrase"
     }
 
     // (S1) the two known-key classes are disjoint — a key can be scalar
@@ -280,7 +280,7 @@ verus! {
     #[verifier::proof]
     fn tags_is_list_key()       ensures is_list_key("tags") {}
     #[verifier::proof]
-    fn search_terms_is_list()   ensures is_list_key("search_terms") {}
+    fn search_required_phrase_is_list()   ensures is_list_key("search_required_phrase") {}
 
     // (S3) an arbitrary / unknown key is in *neither* class (a `fm.<k>`
     //      op on an unknown key is a *create* for scalar-ops and a

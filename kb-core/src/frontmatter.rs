@@ -29,9 +29,11 @@
 //! - **`tags:`** — trimmed, deduplicated (first-occurrence order), empty
 //!   entries dropped. Surrounding quotes (single or double) are stripped
 //!   from each entry.
-//! - **`search_terms:`** — entries kept **verbatim** (a multi-word phrase
-//!   like `"token bucket"` retains its double quotes in this field). The
-//!   *gate* (M3) compares the unquoted whole text case-insensitively.
+//! - **`search_required_phrase:`** — entries kept **verbatim** (a multi-word
+//!   phrase like `"token bucket"` retains its double quotes in this field).
+//!   The *gate* (M3) compares the unquoted whole text case-insensitively:
+//!   a page is hidden from general search until a query's FTS text
+//!   contains **any one** entry as a contiguous substring.
 //!
 //! ## What `from_page` returns
 //!
@@ -68,7 +70,9 @@ pub struct Frontmatter {
     /// wrapping quotes removed. Order = first occurrence.
     pub tags: Vec<String>,
     /// Verbatim (quotes retained where present), trimmed. Non-empty only.
-    pub search_terms: Vec<String>,
+    /// A page with one or more entries is *gated*: hidden from general
+    /// search until a query's FTS text contains any one entry (M3 gate).
+    pub search_required_phrase: Vec<String>,
     /// The raw frontmatter block (between the two `---` delimiters), newlines
     /// preserved. Stored for the FTS `frontmatter_text` column (§8).
     pub frontmatter_text: String,
@@ -90,7 +94,7 @@ impl Frontmatter {
             description: None,
             description_too_long: false,
             tags: Vec::new(),
-            search_terms: Vec::new(),
+            search_required_phrase: Vec::new(),
             frontmatter_text: String::new(),
             body: text.to_string(),
         }
@@ -173,7 +177,7 @@ pub fn parse(text: &str) -> Frontmatter {
         description: None,
         description_too_long: false,
         tags: Vec::new(),
-        search_terms: Vec::new(),
+        search_required_phrase: Vec::new(),
         // Filled in after we're done reading `fm_lines` (which borrows `raw`).
         frontmatter_text: String::new(),
         body,
@@ -308,7 +312,7 @@ fn apply_key(fm: &mut Frontmatter, key: &str, kind: KeyKind, items: Vec<String>)
             }
             fm.tags = seen;
         }
-        ("search_terms", KeyKind::List) => {
+        ("search_required_phrase", KeyKind::List) => {
             // Verbatim: trim, drop empties, keep quotes. (Dedupe is *not*
             // required for gates; the M3 matching compares the whole text,
             // so duplicates would just be redundant work, not wrong.)
@@ -319,7 +323,7 @@ fn apply_key(fm: &mut Frontmatter, key: &str, kind: KeyKind, items: Vec<String>)
                     out.push(t);
                 }
             }
-            fm.search_terms = out;
+            fm.search_required_phrase = out;
         }
         _ => {
             // Unknown key — ignored. Lenient.
@@ -1056,15 +1060,15 @@ mod tests {
         assert_eq!(p.tags, vec!["a", "b", "c", "d"]);
     }
 
-    // ---- search_terms: verbatim, quotes retained -------------------------
+    // ---- search_required_phrase: verbatim, quotes retained ---------------
     #[test]
-    fn search_terms_keep_quotes() {
+    fn search_required_phrase_keep_quotes() {
         let p = page(
-            "type: note\nsearch_terms:\n  - mTLS\n  - \"token bucket\"\n",
+            "type: note\nsearch_required_phrase:\n  - mTLS\n  - \"token bucket\"\n",
             "body",
         );
         assert_eq!(
-            p.search_terms,
+            p.search_required_phrase,
             vec!["mTLS".to_string(), "\"token bucket\"".to_string()]
         );
     }
@@ -1073,8 +1077,8 @@ mod tests {
     /// unquoted* phrase case-insensitively; `token` alone does not.
     #[test]
     fn gate_token_bucket_phrase() {
-        let p = page("type: note\nsearch_terms:\n  - \"token bucket\"\n", "x");
-        let entry = p.search_terms[0].trim_matches('"').to_ascii_lowercase();
+        let p = page("type: note\nsearch_required_phrase:\n  - \"token bucket\"\n", "x");
+        let entry = p.search_required_phrase[0].trim_matches('"').to_ascii_lowercase();
         assert_eq!(entry, "token bucket");
         assert!(query_unlocks("gateway token bucket", &entry));
         assert!(query_unlocks("gateway TOKEN BUCKET", &entry));

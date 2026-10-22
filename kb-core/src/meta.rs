@@ -39,7 +39,7 @@
 //! - `description:` — optional, **≤ 255 chars** (PLAN.md §3), FTS-
 //!   indexed, shown in `search` and `browse`.
 //! - `tags:` — optional, trimmed, deduplicated, non-empty entries only.
-//! - `search_terms:` — optional; whole-entry, case-insensitive substring
+//! - `search_required_phrase:` — optional; whole-entry, case-insensitive substring
 //!   match against the FTS portion of a query (PLAN.md §7).
 //!
 //! ## The display-id
@@ -105,7 +105,9 @@ pub struct NoteMeta {
     /// Trimmed, deduped, non-empty. (Parser enforces the rules.)
     pub tags: Vec<String>,
     /// Non-empty entries as written (multi-word entries keep quotes).
-    pub search_terms: Vec<String>,
+    /// A page with one or more entries is gated: hidden from general
+    /// search until a query text contains any one entry (M3 gate).
+    pub search_required_phrase: Vec<String>,
 }
 
 impl NoteMeta {
@@ -144,7 +146,7 @@ mod tests {
             slug: slug.to_string(),
             description: None,
             tags: vec![],
-            search_terms: vec![],
+            search_required_phrase: vec![],
         }
     }
 
@@ -255,12 +257,12 @@ mod tests {
                 "A proxy note pointing at /src/papers/acl_2017/transformer.pdf".to_string(),
             ),
             tags: vec!["rust".to_string(), "architecture".to_string()],
-            search_terms: vec!["rust async".to_string(), "grpc".to_string()],
+            search_required_phrase: vec!["rust async".to_string(), "grpc".to_string()],
         };
         assert_eq!(m.as_display_id(), "label:Transformers (architecture)");
         assert!(m.slug_is_well_formed());
         assert!(m.tags.len() == 2);
-        assert!(m.search_terms.len() == 2);
+        assert!(m.search_required_phrase.len() == 2);
         let d = m.description.as_ref().unwrap();
         assert!(d.len() <= 255); // PLAN.md §3
     }
