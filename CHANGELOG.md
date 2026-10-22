@@ -13,15 +13,21 @@ the API is still moving; breaking changes are called out explicitly.
   `title` / `description` / `tags` / `search_terms`, each showing a *preview*
   of what's on disk (a field is never a mystery before you edit it), then
   `Enter` opens that field's **value** (scalars pre-filled for an in-place
-  edit; lists start empty with a live token menu). From there:
-  - **Typing narrows the live menu in place** (a pure function of the buffer),
-    whether or not the menu has focus — a filter change never closes the menu.
-  - **`Tab` is a *pure* focus toggle** between the buffer and the menu: it
-    never fills or mutates the buffer (the old "Tab autocompletes the first
-    match" is gone — pressing `Tab` mid-type no longer yanks a token you
-    haven't asked for).
-  - **`Enter` adopts the highlighted candidate** (if the menu is focused),
-    commits, and *stays on the same field* for the next token — the tag-list
+  edit; lists start empty with a live token menu). Once a field is open, the
+  choice is **final** — the zsh *type → arrows-pick → Tab-fill → Enter-commit*
+  idiom applies and the field never changes under you:
+  - **Typing narrows the live menu in place** (a pure function of the buffer)
+    — a filter change never drops the list, it just re-anchors it.
+  - **`↑/↓` move the highlight across the candidates** (wrapping). They are
+    *always* this — they no longer jump to the next/previous field (that was
+    the source of the "I already picked this field, why did it change?"
+    complaint). On a scalar field (no candidates) they are a clean no-op.
+  - **`Tab` autocompletes the buffer with the highlighted candidate** (fills
+    it with the full known token, zsh-style, and re-narrows the list — the
+    highlight stays put so a second `Tab` / `Enter` is stable). On a scalar
+    (no candidates) `Tab` is a clean no-op, leaving your text exactly as typed.
+  - **`Enter` commits the buffer as typed** (with candidate-aware dedup for
+    lists) and *stays on the same field* for the next token — the tag-list
     workflow (add `security`, then `data`, then `mtls`) flows without
     re-picking the field. A scalar `Enter` commits and stays.
   - **Every letter is just a letter in the value stage.** The old command-letter
@@ -68,6 +74,14 @@ the API is still moving; breaking changes are called out explicitly.
   (equal to the entry baseline at that point), which correctly writes for
   *any* op mix — appends, removals, and mixed — while still honoring the
   "open then commit → byte-identical" no-op guarantee. Regression-tested.
+- **The TUI edit-metadata tests now each own an on-disk page (no more
+  cross-test flake).** Every `seeded_app()` call keyed its temp dir on
+  `process::id()` alone, but all tests in the binary share one pid — so
+  parallel test threads read/wrote the *same* `page.md`, and one test's commit
+  raced another test's re-seed, intermittently failing the "the committed file
+  has the tail removed" assertion (it passed in isolation). `seeded_app` now
+  mints a per-call unique dir (atomic sequence + pid) and removes any stale one
+  first, fully isolating each call.
 
 ## [0.1.0] — 2026-10-17
 

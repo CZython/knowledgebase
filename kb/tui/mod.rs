@@ -219,27 +219,25 @@ pub struct ReadState {
 ///   `q` / `a` / `r` typed into "query" or "security" is a *letter*, not a
 ///   command.
 ///
-/// * **Value** — the value buffer for the chosen field. **Typing is always
-///   to the buffer, regardless of the menu's focus state** (the menu is a
-///   pure, live function of the buffer — type and it re-narrows, zsh-style).
-///   `Tab` is a *pure* focus toggle between the buffer and the live
-///   candidate list (it never injects a candidate); `↑/↓` move the menu
-///   cursor when the list is focused, else move to the next field;
-///   `Backspace` pops the buffer (or, on an empty list-field buffer, drops
-///   the list's tail item); `Enter` — with the list focused — adopts the
-///   highlighted candidate into the buffer, then commits, then stays on the
-///   field; with the buffer focused, it just commits. `Esc` pops back to the
-///   Picker. `C-c` quits the TUI. Hard-quit is a control key, *not* a
-///   letter — every letter types through.
-pub enum EditStage {
-    /// The field picker is active (the value buffer is not).
-    Picker,
-    /// The value buffer for the chosen field is active. The live candidate
-    /// list's *focus* is a separate flag on `EditState` (`menu_focus`), not
-    /// a stage — so typing goes to the buffer no matter what, and `Tab` is
-    /// a pure focus toggle.
-    Value,
-}
+    /// * **Value** — the value buffer for the chosen field (a *final* choice —
+    ///   `↑/↓` no longer switch fields here). **Typing always goes to the
+    ///   buffer** and re-narrows the live candidate list in place (a pure,
+    ///   live function of the buffer — the zsh filter idiom). `↑/↓` move the
+    ///   highlight across the candidates; `Tab` **fills the buffer with the
+    ///   highlighted candidate** (autocomplete); `Backspace` pops the buffer
+    ///   (or, on an empty list-field buffer, drops the list's tail item);
+    ///   `Enter` **commits the buffer** (with candidate-aware append for list
+    ///   fields) and stays on the field for the next token. `Esc` pops back to
+    ///   the Picker. `C-c` quits the TUI. Hard-quit is a control key, *not* a
+    ///   letter — every letter types through.
+    pub enum EditStage {
+        /// The field picker is active (the value buffer is not).
+        Picker,
+        /// The value buffer for the chosen field is active. `sug_cursor`
+        /// highlights a candidate; `Tab` adopts it into the buffer, `Enter`
+        /// commits, `↑/↓` move the highlight.
+        Value,
+    }
 
 /// A field the Edit mode can show — either a *scalar* (free text) or a
 /// *list* (the value is the next item to append). Both are edited over the
@@ -279,21 +277,9 @@ impl EditField {
     pub fn is_list(self) -> bool {
         matches!(self, EditField::Tags | EditField::SearchTerms)
     }
-    /// The ordered field list the Edit mode cycles through. Total + stable.
+    /// The ordered field list the Edit mode shows. Total + stable.
     pub fn all() -> &'static [EditField] {
         &[EditField::Title, EditField::Description, EditField::Tags, EditField::SearchTerms]
-    }
-    /// The next field in the cycle (down), or the first (wrap). Total.
-    pub fn next(self) -> EditField {
-        let all = Self::all();
-        let i = all.iter().position(|f| f == &self).expect("EditField is in its own list");
-        all[(i + 1) % all.len()]
-    }
-    /// The previous field in the cycle (up), or the last (wrap). Total.
-    pub fn prev(self) -> EditField {
-        let all = Self::all();
-        let i = all.iter().position(|f| f == &self).expect("EditField is in its own list");
-        all[(i + all.len() - 1) % all.len()]
     }
 }
 
@@ -353,15 +339,6 @@ pub struct EditState {
     /// The current **stage** of this edit session — the two zsh-style modes
     /// (`Picker` or `Value`). See [EditStage].
     pub stage: EditStage,
-    /// Whether the **live candidate list** has focus (in the `Value` stage),
-    /// as opposed to the value buffer. This is the zsh "completion menu is
-    /// open vs. closed" bit; it is *not* a separate stage — the buffer is
-    /// *always* the thing typing appends to, and the menu is always a pure
-    /// function of the buffer (see `suggestions`). `Tab` toggles this bit;
-    /// it never touches the buffer text. When `false`, `↑/↓` in the Value
-    /// stage cycle the *field*; when `true`, they move the *candidate*.
-    /// `false` by default when a field is entered / after a commit.
-    pub menu_focus: bool,
     /// The currently highlighted **field** in the Picker stage (an index
     /// into `EditField::all()`). `field` (above) is the *currently being
     /// edited* field (the Editor/Completions stage); `field_cursor` is the
@@ -714,7 +691,6 @@ impl App {
             current_list: Vec::new(),
             working_bytes: bytes,
             stage: EditStage::Picker,
-            menu_focus: false,
             field_cursor: 0,
             sug_cursor: 0,
         });
@@ -751,10 +727,8 @@ impl App {
             e.suggestions = suggestions;
             e.corpus = corpus;
             e.current_list = current_list;
-            // Entering a field always arms the **buffer**, not the menu —
-            // `Tab` is what opens the live list. The menu cursor starts at
-            // the top so a re-open is stable.
-            e.menu_focus = false;
+            // Entering a field (re-)anchors the candidate highlight at the
+            // top, so a fresh field starts with a stable, known menu.
             e.sug_cursor = 0;
             self.set_info(Self::edit_field_note(field));
         }
@@ -826,23 +800,22 @@ impl App {
         }
     }
 
-    /// Cycle to the next field (down) or previous (up). Wraps at the edge.
-    pub fn edit_move_field(&mut self, down: bool) {
-        if let Mode::Edit(e) = &self.mode {
-            let f = if down { e.field.next() } else { e.field.prev() };
-            self.cycle_field(f);
-        }
-    }
-
-    /// The human note for a field switch (the status bar after `cycle_field`
-    /// / `enter_editor`). Every letter in the value buffer is a literal; the
-    /// only special keys here are `Tab` (menu), arrows (field / candidate),
+    /// The human note for the status bar after `enter_editor`. Every letter
+    /// in the value buffer is a literal; the only special keys here are the
+    /// arrows (pick a candidate), `Tab` (autocomplete into the buffer),
     /// `Enter` (commit), `Esc` (back to Picker) and `C-c` (quit).
     fn edit_field_note(field: EditField) -> String {
-        format!(
-            "editing {} — type (letters are literal) · Tab open/close menu (lists) · Enter commit · Esc back · C-c quit",
-            field.label()
-        )
+        if field.is_list() {
+            format!(
+                "editing {} — type · ↑/↓ pick · Tab fill · Enter commit · Esc back · C-c quit",
+                field.label()
+            )
+        } else {
+            format!(
+                "editing {} — type (letters are literal) · Enter commit · Esc back · C-c quit",
+                field.label()
+            )
+        }
     }
 
     /// Move the **Picker** cursor (the highlighted *field*) up or down,
@@ -893,104 +866,51 @@ impl App {
         self.set_info(Self::edit_field_note(target));
     }
 
-    /// Toggle the **`menu_focus`** bit inside the Value stage — the zsh
-    /// `Tab` idiom: a *focus* change between the buffer and the live
-    /// candidate list, *not* a stage change. **Pure**: it only flips the
-    /// bit; it never touches the value buffer. That is the correction to
-    /// the earlier "Tab fills the first candidate" behaviour — a *focus*
-    /// change must not silently mutate the text the user is composing.
+    /// **`Tab`** in the Value stage — the zsh *autocomplete* idiom: take
+    /// the **highlighted candidate** (`sug_cursor`) and fill the value
+    /// buffer with its full text (replacing whatever partial text the user
+    /// had typed). The candidate list then re-narrows to the (single, fully
+    /// matched) candidate, so `↑/↓` still has a stable highlight to sit on.
     ///
-    /// Opening (buffer → menu): the menu cursor is armed and stays exactly
-    /// where it was (the user's selection survives a re-narrow). Typing
-    /// while the menu is open still goes to the buffer and re-narrows the
-    /// list (zsh idiom) — `menu_focus` does *not* become read-only.
+    /// This is a deliberate *fill* (not the old "pure focus toggle"): the
+    /// user pressed `Tab` meaning "complete this word", so the buffer now
+    /// holds a whole token. Typing immediately afterwards appends to it
+    /// (zsh behaviour), so a partial match can still be typed past.
     ///
-    /// Closing (menu → buffer): nothing else changes. `Enter` is what
-    /// adopts a candidate (see `accept_completion`), never `Tab`.
-    ///
-    /// In the **Picker** stage there is no buffer to focus, so `Tab` is a
-    /// no-op (press `Enter` to enter a field first).
-    pub fn toggle_menu(&mut self) {
-        if let Mode::Edit(e) = &mut self.mode {
-            match e.stage {
-                EditStage::Picker => {
-                    self.set_info("Picker — Enter to enter a field (Tab opens the menu once a field is open)");
-                }
-                EditStage::Value => {
-                    e.menu_focus = !e.menu_focus;
-                    if e.menu_focus {
-                        e.sug_cursor = e.sug_cursor.min(e.suggestions.len().saturating_sub(1));
-                        self.set_info(
-                            "menu focused — ↑/↓ move · Enter adopt + commit · Tab back · type to narrow",
-                        );
-                    } else {
-                        self.set_info("buffer focused — type · Tab re-open the menu · Enter commit");
-                    }
-                }
-            }
-        }
-    }
-
-    /// Adopt the highlighted **candidate** into the buffer, then commit,
-    /// then **stay on the Value stage for the same field** (the buffer is
-    /// cleared by the commit's disk-refresh; the user can keep typing or
-    /// re-open the menu). Two behaviours, one entry point:
-    ///
-    /// * **Menu focused** (`menu_focus == true`) — `accept` the highlighted
-    ///   candidate: the buffer becomes the candidate's full text, then the
-    ///   same `commit_edit` the Enter-to-commit path runs applies it. This
-    ///   is the zsh "Tab to browse, Enter to adopt" flow.
-    ///
-    /// * **Buffer focused** (`menu_focus == false`, or the menu is empty) —
-    ///   commit the buffer *as typed* (whatever it is, even if it doesn't
-    ///   match a candidate exactly).
-    ///
-    /// A commit *failure* (e.g. the file changed on disk) leaves the user
-    /// on the Value stage for the field still, so they can see + fix it.
-    /// **Total**: an empty-buffer scalar / list commit is the documented
-    /// no-op path (the file is written back byte-identical).
-    pub fn accept_completion(&mut self) -> KbResult<()> {
-        // If the menu has focus and a candidate is highlighted, the
-        // *candidate* is what we adopt — not whatever partial text the
-        // buffer currently holds. (This is the "Enter accepts the
-        // highlight" behaviour that was muddled by the old "Tab fills"
-        // path.)
-        let adopt = match &self.mode {
-            Mode::Edit(e) if e.stage == EditStage::Value && e.menu_focus => {
+    /// **Total**: on a scalar field (no candidates) or an empty candidate
+    /// list, `Tab` is a clean no-op (the buffer is left alone — there is
+    /// nothing known to complete it to). A *commit* is `Enter`'s job, never
+    /// `Tab`'s.
+    pub fn autocomplete(&mut self) {
+        let tok = match &self.mode {
+            Mode::Edit(e) if e.stage == EditStage::Value => {
                 e.suggestions.get(e.sug_cursor).cloned()
             }
             _ => None,
         };
-        if let Some(tok) = adopt {
-            if let Mode::Edit(e) = &mut self.mode {
-                e.value = tok;
+        match tok {
+            Some(t) => {
+                if let Mode::Edit(e) = &mut self.mode {
+                    e.value = t;
+                }
+                self.refresh_suggestions();
             }
-            self.refresh_suggestions();
-        }
-        let res = self.commit_edit();
-        if res.is_ok() {
-            // Stay on the **Value** stage for the same field — the user
-            // may want to commit another token, or move to the next field
-            // (buffer / menu focus is reset by `cycle_field`). This is the
-            // "commit + stay" UX — a `commit` is not a `close`.
-            if let Mode::Edit(e) = &mut self.mode {
-                e.stage = EditStage::Value;
-                e.menu_focus = false;
-                e.sug_cursor = 0;
+            None => {
+                self.set_info("no candidate to complete — keep typing");
             }
         }
-        res
     }
 
     /// Move the highlighted **candidate** up or down within the live
-    /// suggestion list, wrapping at the edge. Only meaningful when the menu
-    /// is focused *and* non-empty in the Value stage (the zsh completion
-    /// idiom). No-op otherwise (a stray `↑`/`↓` there is a field-cycle or
-    /// Picker-move, handled by the caller). Total: the cursor is always
-    /// clamped into `[0, suggestions.len())` (→ `0` when empty).
+    /// suggestion list, wrapping at the edge — the *only* meaning of `↑/↓`
+    /// in the Value stage (the field was already chosen in the Picker and
+    /// is never cycled again from here). No-op when the candidate list is
+    /// empty (a scalar field, or a filter with no matches). Total: the
+    /// cursor is always clamped into `[0, suggestions.len())` (→ `0` when
+    /// empty).
     pub fn move_suggestion(&mut self, down: bool) {
         if let Mode::Edit(e) = &mut self.mode {
-            if e.stage != EditStage::Value || !e.menu_focus || e.suggestions.is_empty() {
+            if e.stage != EditStage::Value || e.suggestions.is_empty() {
                 return;
             }
             let n = e.suggestions.len();
@@ -1214,11 +1134,9 @@ impl App {
             } else {
                 Vec::new()
             };
-            // A commit resets the live-menu bits so the user returns to a
-            // clean "buffer focused, top of menu" state on the same field —
-            // the "commit + stay" UX, ready to type the next token or re-
-            // open the menu.
-            e.menu_focus = false;
+            // A commit resets the candidate highlight to the top of the menu
+            // on the same field — the "commit + stay" UX: ready to type the
+            // next token, `↑/↓` picks, `Tab` fills, `Enter` commits.
             e.sug_cursor = 0;
         }
         Ok(())
@@ -1982,6 +1900,15 @@ fn event_loop(mut app: App) -> i32 {
 mod tests {
     use super::*;
 
+    /// Per-call sequence used by `seeded_app` to mint a *unique* temp dir.
+    /// All tests in this binary share a single pid, so keying the dir on the
+    /// pid alone caused every `seeded_app` call (in parallel test threads) to
+    /// read/write the *same* `page.md` — one test's commit raced another test's
+    /// re-seed and the on-disk assertion flaked. An atomic counter (distinct
+    /// under parallel fetch_add) + the pid isolates each call fully.
+    static SEEDED_SEQ: std::sync::atomic::AtomicU64 =
+        std::sync::atomic::AtomicU64::new(0);
+
     /// `move_selection` is total + bounded: on a non-empty list the
     /// selection always lands in range, and it is idempotent at the edges
     /// (`k` at row 0 stays 0; `j` at the last row stays last).
@@ -2498,7 +2425,6 @@ mod tests {
             current_list: Vec::new(),
             working_bytes: bytes.to_vec(),
             stage: EditStage::Value,
-            menu_focus: false,
             field_cursor: 0,
             sug_cursor: 0,
         };
@@ -2527,7 +2453,6 @@ mod tests {
             current_list: vec!["mTLS".into(), "transformer".into()],
             working_bytes: bytes.to_vec(),
             stage: EditStage::Value,
-            menu_focus: false,
             field_cursor: 2,
             sug_cursor: 0,
         };
@@ -2691,7 +2616,15 @@ mod tests {
     fn seeded_app() -> (App, std::path::PathBuf) {
         let db = Db::open_in_memory_test().unwrap();
         db.migrate().unwrap();
-        let dir = std::env::temp_dir().join(format!("kb_tui_redesign_{}", std::process::id()));
+        // Every call gets its *own* unique on-disk page, so parallel test
+        // threads (all sharing one pid) never read/write a common file — the
+        // old `kb_tui_redesign_{pid}` dir made every `seeded_app` call share
+        // one `page.md`, so one test's commit raced another test's re-seed
+        // and the on-disk assertion flaked. A per-call sequence (atomic, so
+        // distinct under parallelism) + the (fresh) pid fully isolates them.
+        let seq = SEEDED_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let dir = std::env::temp_dir().join(format!("kb_tui_redesign_{}_{}", std::process::id(), seq));
+        let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("page.md");
         std::fs::write(&path, FM_FIXTURE.as_bytes()).unwrap();
@@ -2766,13 +2699,12 @@ mod tests {
     }
 
     /// `enter_editor` loads the *highlighted* field into the **Value** stage
-    /// with the *buffer* focused and the *menu* not yet focused (the zsh
-    /// order: type first, then Tab to browse). The buffer is seeded with the
-    /// field's current value (scalar) or empty (list), and the menu cursor
-    /// resets to 0. This is the "choose a field, then touch its value"
-    /// invariant.
+    /// — the field choice is *final* here (no more field-cycling from the
+    /// buffer view). The buffer is seeded with the field's current value
+    /// (scalar) or empty (list), and the candidate highlight starts at 0.
+    /// This is the "choose a field, then touch its value" invariant.
     #[test]
-    fn enter_editor_loads_the_field_and_starts_in_value_buffer_focused() {
+    fn enter_editor_loads_the_field_and_starts_in_value() {
         let (mut app, _dir) = seeded_app();
         app.open_edit().unwrap();
         // Move the cursor to `tags` (index 2) and enter it.
@@ -2785,8 +2717,7 @@ mod tests {
                 assert_eq!(e.stage, EditStage::Value, "flips to the Value stage");
                 assert_eq!(e.field, EditField::Tags, "the chosen field is entered");
                 assert!(e.value.is_empty(), "a list field seeds an empty buffer");
-                assert!(!e.menu_focus, "the menu is *not* focused on entry — Tab is");
-                assert_eq!(e.sug_cursor, 0, "menu cursor resets");
+                assert_eq!(e.sug_cursor, 0, "candidate highlight starts at the top");
                 // The existing list items are loaded (the "what's there").
                 assert_eq!(
                     e.current_list,
@@ -2797,7 +2728,7 @@ mod tests {
             _ => panic!("not in Edit mode"),
         }
         // `enter_editor` on a *scalar* field seeds the buffer with the current
-        // value (the in-place edit guarantee).
+        // value (the in-place edit guarantee) and has no candidates to pick.
         let (mut app2, _dir2) = seeded_app();
         app2.open_edit().unwrap();
         app2.enter_editor(); // field_cursor 0 → Title (scalar)
@@ -2805,17 +2736,18 @@ mod tests {
             assert_eq!(e.stage, EditStage::Value);
             assert_eq!(e.field, EditField::Title);
             assert_eq!(e.value, "Hello World", "scalar seeds the current value");
-            assert!(!e.menu_focus, "scalar fields have no menu — focus stays on the buffer");
+            assert!(e.suggestions.is_empty(), "a scalar has no candidates to autocomplete");
         }
     }
 
-    /// `toggle_menu` is a *pure* focus toggle (zsh `Tab` idiom): it flips
-    /// the `menu_focus` bit and touches *nothing else* — the buffer, the
-    /// menu highlight, the candidates. The old "Tab fills the first
-    /// candidate" bug is what this test pins: the buffer is exactly the same
-    /// string on either side of the toggle.
+    /// `Tab` (**`autocomplete`**) is the zsh *autocomplete* idiom: it fills
+    /// the value buffer with the *highlighted* candidate (`sug_cursor`) and
+    /// re-narrows the list — the buffer now holds a whole known token, ready
+    /// to commit (or keep typing to refine). **Total**: on a scalar field
+    /// (no candidates) it is a clean no-op, leaving the buffer exactly as
+    /// typed — the "nothing to complete" path.
     #[test]
-    fn toggle_menu_is_a_pure_focus_toggle_it_never_touches_the_buffer() {
+    fn tab_autocompletes_the_buffer_from_the_highlighted_candidate() {
         let (mut app, _dir) = seeded_app();
         app.open_edit().unwrap();
         // Enter `tags` and type a partial token.
@@ -2824,34 +2756,46 @@ mod tests {
         app.enter_editor();
         app.edit_type('m');
         app.edit_type('t');
-        let buffer_before = {
-            if let Mode::Edit(ref e) = app.mode { e.value.clone() } else { panic!() }
-        };
-        let menu_focus_before = {
-            if let Mode::Edit(ref e) = app.mode { e.menu_focus } else { panic!() }
-        };
-        app.toggle_menu();
-        // Focus flips; the buffer is bit-for-bit identical.
-        assert!(!menu_focus_before, "pre-toggle: buffer focused");
         if let Mode::Edit(ref e) = app.mode {
-            assert!(e.menu_focus, "post-toggle: menu focused");
-            assert_eq!(e.value, buffer_before, "toggle is pure — the buffer is unchanged");
+            assert_eq!(e.value, "mt", "the user typed a partial token");
+            assert_eq!(e.suggestions, vec!["mtls".to_string()], "one match narrows the list");
+            assert_eq!(e.sug_cursor, 0, "the highlight is on the single candidate");
         }
-        // Second toggle: focus flips back.
-        app.toggle_menu();
+        app.autocomplete(); // Tab
         if let Mode::Edit(ref e) = app.mode {
-            assert!(!e.menu_focus, "second toggle: buffer focused again");
-            assert_eq!(e.value, buffer_before, "still pure — buffer unchanged");
+            assert_eq!(
+                e.value, "mtls",
+                "Tab *fills* the buffer with the highlighted candidate's full text"
+            );
+            assert_eq!(e.value, e.suggestions[0], "buffer now equals the candidate it came from");
+        }
+        // On a *scalar* field (no candidates), `Tab` is a no-op: the buffer
+        // — whatever the user typed — is left completely alone.
+        let (mut app2, _dir2) = seeded_app();
+        app2.open_edit().unwrap();
+        app2.enter_editor(); // Title (scalar)
+        app2.edit_type('z');
+        app2.edit_type('z');
+        let buffer_before = {
+            if let Mode::Edit(ref e) = app2.mode { e.value.clone() } else { panic!() }
+        };
+        app2.autocomplete();
+        if let Mode::Edit(ref e) = app2.mode {
+            assert_eq!(
+                e.value, buffer_before,
+                "no candidate (scalar) means Tab leaves the buffer exactly as typed"
+            );
+            assert_ne!(app2.status.kind, crate::tui::StatusKind::Error, "the no-op path is not an error");
         }
     }
 
-    /// Typing **while the menu has focus** goes to the buffer and re-narrows
-    /// the live list, and the menu stays focused (the zsh "type-to-narrow"
-    /// idiom — a filter change doesn't drop the menu). This is the *crucial*
-    /// detail the user called out as the reason Tab must be a pure toggle
-    /// rather than a "close-and-reopen".
+    /// Typing **appends to the buffer** and the live list re-narrows in
+    /// place — a filter change never "drops" the list, it just re-anchors
+    /// it (the zsh filter idiom). The candidate list is always a pure
+    /// function of the buffer, so there is no open/closed state to worry
+    /// about.
     #[test]
-    fn typing_while_the_menu_is_focused_renarrows_and_stays_open() {
+    fn typing_renarrows_the_live_menu_in_place() {
         let (mut app, _dir) = seeded_app();
         app.open_edit().unwrap();
         app.picker_move(true); // description (no menu)
@@ -2868,77 +2812,66 @@ mod tests {
                 "both corpus tokens contain 'm' — substring match"
             );
         }
-        // Toggle to focus the menu, then type one more char *while it is
-        // focused*. (The toggle itself is covered by `toggle_menu_is_a_pure_
-        // focus_toggle...`; here we only need the precondition.)
-        app.toggle_menu();
-        assert!(
-            menu_focus(&app),
-            "the menu is focused after the toggle (precondition for the test)"
-        );
-        // Type one more char *while the menu is focused* — this is the
-        // zsh idiom: the char goes to the buffer (not a candidate-nav),
-        // and the menu re-narrows in place and stays focused.
+        // Type one more char — the char goes to the buffer (nothing else is
+        // "focused"), and the live list re-narrows in place.
         // ("mt" as substring matches "mtls" but not "transformer".)
         app.edit_type('t');
         if let Mode::Edit(ref e) = app.mode {
-            assert!(e.menu_focus, "focus stays on the menu after a type");
-            assert_eq!(e.value, "mt", "the char went to the buffer — not to some 'candidate nav'");
+            assert_eq!(e.value, "mt", "the char went straight to the buffer");
             assert_eq!(
                 e.suggestions,
                 vec!["mtls".to_string()],
                 "the live list re-narrowed to exactly the 'mtls' match"
             );
+            assert_eq!(e.sug_cursor, 0, "the highlight stays valid after a re-narrow");
         }
     }
 
-    /// A small helper: the current menu-focus bit (None if not in Edit).
-    fn menu_focus(app: &App) -> bool {
-        match &app.mode {
-            Mode::Edit(e) => e.menu_focus,
-            _ => false,
-        }
-    }
-
-    /// `accept_completion` (Enter with the menu focused) adopts the
-    /// *highlighted* candidate into the buffer, commits, and **stays on the
-    /// Value stage for the same field** (the buffer is cleared by the
-    /// commit's disk-refresh — ready for the next token). This is the zsh
-    /// "Enter adopts the highlight" idiom — the *old* "return to the Picker"
-    /// is wrong for the tag-list workflow (you want to keep tagging).
+    /// `Enter` (**`commit_edit`**) commits the buffer *as typed*, then
+    /// **stays on the Value stage for the same field** (the buffer is
+    /// cleared by the commit's disk-refresh — ready for the next token).
+    /// For a *new* token (one not already in the list) this is a real
+    /// append + a disk write. This is the zsh "type → Tab (fill if you
+    /// want) → Enter (commit)" idiom — and a commit is not a close.
     #[test]
-    fn accept_completion_adopts_and_stays_on_value() {
+    fn enter_commits_the_buffer_and_stays_on_value() {
         let (mut app, page) = seeded_app();
         app.open_edit().unwrap();
-        // Enter `tags`, type a filter, focus the menu, accept.
+        // Enter `tags`, type a token *not yet* in the list so the commit is
+        // a real append (not a dedup no-op).
         app.picker_move(true); // description
         app.picker_move(true); // tags
         app.enter_editor();
-        // Type "tr" — narrows the live list to exactly one candidate
-        // ("transformer"; "mtls" has no "tr" substring).
-        app.edit_type('t');
-        app.edit_type('r');
-        if let Mode::Edit(ref e) = app.mode {
-            assert_eq!(e.suggestions.len(), 1, "one match for 'tr' in the corpus");
-            assert_eq!(e.suggestions[0], "transformer", "the only match is 'transformer'");
-            assert_eq!(e.sug_cursor, 0, "the cursor is on the first (only) candidate");
+        for c in ['s', 'e', 'c'] {
+            app.edit_type(c);
         }
-        app.toggle_menu(); // focus the menu
-        assert!(app.accept_completion().is_ok(), "accept + commit is Ok");
+        if let Mode::Edit(ref e) = app.mode {
+            assert_eq!(e.value, "sec", "the user typed a new token");
+            assert!(
+                !e.current_list.iter().any(|t| t.eq_ignore_ascii_case("sec")),
+                "'sec' is not yet in the list — this will be a real append"
+            );
+        }
+        assert!(app.commit_edit().is_ok(), "commit is Ok");
         // After a *successful* commit:
         //   - we stay on the Value stage for the same field (not the Picker)
         //   - the buffer is cleared (a list commit's disk-refresh → empty)
-        //   - the menu is unfocused (reset for the next token)
-        //   - the file is unchanged because "transformer" was *already in
-        //     the field's list* (dedup made this a no-op commit)
+        //   - the highlight is reset to the top (ready for the next token)
+        //   - the file is changed: the new token is now appended
         if let Mode::Edit(ref e) = app.mode {
             assert_eq!(e.stage, EditStage::Value, "success stays on Value (not the Picker)");
             assert_eq!(e.field, EditField::Tags, "the same field is still active");
-            assert!(!e.menu_focus, "the menu resets to *not* focused after a commit");
+            assert_eq!(e.sug_cursor, 0, "the highlight resets for the next token");
             assert!(e.value.is_empty(), "the buffer is cleared after a list commit");
         }
         let contents = std::fs::read_to_string(&page).unwrap();
-        assert_eq!(contents, FM_FIXTURE, "no-op commit (dedup) leaves the file unchanged");
+        let tags_now: Vec<String> =
+            kb_core::frontmatter::list_values(contents.as_bytes(), "tags").unwrap_or_default();
+        assert_eq!(
+            tags_now,
+            vec!["mTLS".to_string(), "transformer".to_string(), "sec".to_string()],
+            "the new token was appended on commit"
+        );
     }
 
     /// **The letter-safety test** — the whole reason for this redesign:
@@ -2978,11 +2911,92 @@ mod tests {
             );
             assert_eq!(e.field, EditField::Tags, "no field change");
             assert_eq!(e.stage, EditStage::Value, "still on the Value stage");
-            assert!(!e.menu_focus, "still buffer-focused (a manager nav would have left)");
         }
         // The file on disk is unchanged (no commit fired).
         let contents = std::fs::read_to_string(&page).unwrap();
         assert_eq!(contents, FM_FIXTURE, "no commit fired — the file is untouched");
+    }
+
+    /// **The field is final in the Value stage** — the user asked: "I've
+    /// already selected the field; why do up and down change *that*? They
+    /// should just pick from the completions." This test pins *both* halves:
+    /// (a) `↑/↓` on a non-empty candidate list move the *highlight* across
+    /// the candidates, and (b) they **never** switch the field (even when
+    /// the list has been narrowed to a single candidate, or on a scalar
+    /// where the list is empty). Total: every sequence of arrow presses
+    /// leaves the field untouched.
+    #[test]
+    fn arrows_pick_candidates_and_never_switch_the_field() {
+        let (mut app, _dir) = seeded_app();
+        app.open_edit().unwrap();
+        app.picker_move(true); // description
+        app.picker_move(true); // tags
+        app.enter_editor();
+        assert_eq!(field_of(&app), EditField::Tags, "we are on `tags`");
+        // The full candidate list (empty buffer → the whole corpus).
+        app.move_suggestion(true); // highlight the 1st candidate (down from top)
+        if let Mode::Edit(ref e) = app.mode {
+            assert_eq!(e.sug_cursor, 1, "down moves the highlight forward");
+            assert_eq!(
+                field_of(&app),
+                EditField::Tags,
+                "a down-press does **not** switch the field"
+            );
+        }
+        app.move_suggestion(false); // back to the top
+        app.move_suggestion(false); // and *wrap* past the top to the last one
+        if let Mode::Edit(ref e) = app.mode {
+            assert_eq!(e.sug_cursor, 1, "wrapping up from 0 lands on the last candidate");
+            assert_eq!(
+                field_of(&app),
+                EditField::Tags,
+                "a wrap does **not** switch the field either"
+            );
+        }
+        // Narrow to a single candidate: arrows are now a *no-op* (nothing to
+        // move between — there is exactly one). This is the *exact* case the
+        // old model would have used to switch fields; now it just pins.
+        app.edit_type('t');
+        app.edit_type('r');
+        if let Mode::Edit(ref e) = app.mode {
+            assert_eq!(e.suggestions.len(), 1, "'tr' narrows to exactly one candidate");
+        }
+        let cursor_before = {
+            if let Mode::Edit(ref e) = app.mode { e.sug_cursor } else { panic!() }
+        };
+        app.move_suggestion(true);
+        app.move_suggestion(false);
+        if let Mode::Edit(ref e) = app.mode {
+            assert_eq!(e.sug_cursor, cursor_before, "single candidate → arrows are a no-op");
+            assert_eq!(
+                field_of(&app),
+                EditField::Tags,
+                "single candidate still pins the field"
+            );
+        }
+        // And on a **scalar** field (no candidates at all) the arrows are a
+        // clean no-op: nothing to pick, and the field is still the one we
+        // chose.
+        let (mut app2, _dir2) = seeded_app();
+        app2.open_edit().unwrap();
+        app2.enter_editor(); // Title (scalar)
+        assert_eq!(field_of(&app2), EditField::Title, "we are on `title`");
+        app2.move_suggestion(true);
+        app2.move_suggestion(false);
+        assert_eq!(
+            field_of(&app2),
+            EditField::Title,
+            "arrows on a scalar (no candidates) never cycle to another field"
+        );
+    }
+
+    /// A small helper: the active Edit field (panics if not in Edit mode —
+    /// the total test surface relies on the caller having entered Edit).
+    fn field_of(app: &App) -> EditField {
+        match &app.mode {
+            Mode::Edit(e) => e.field,
+            _ => panic!("not in Edit mode while asserting a field"),
+        }
     }
 
     /// **Smart `Backspace`** (a zsh list-editor idiom): while the buffer

@@ -285,10 +285,10 @@ fn draw_picker_pane(f: &mut Frame, es: &crate::tui::EditState, rect: ratatui::la
 
 /// The single **Value** stage pane: the buffer, the field's *existing*
 /// items (for a list), the live candidate list (rendered inline — the
-/// `▶` marker is live when `menu_focus` is true, dimmed otherwise), and
-/// the pending commit plan. Everything is a pure function of `EditState`,
-/// so the display can never be stale relative to the state (the same
-/// `plan()` the commit path runs is what we render as the "→" footer).
+/// `▶` marker is on `sug_cursor`, the key of `Tab`), and the pending
+/// commit plan. Everything is a pure function of `EditState`, so the
+/// display can never be stale relative to the state (the same `plan()`
+/// the commit path runs is what we render as the "→" footer).
 fn build_value_lines(es: &crate::tui::EditState) -> Vec<String> {
     let mut out: Vec<String> = Vec::new();
     // Buffer.
@@ -358,10 +358,10 @@ fn build_value_lines(es: &crate::tui::EditState) -> Vec<String> {
 ///
 /// The **Value** pane is the value buffer for the chosen field, in a
 /// single pane that shows (for a list field) the existing items + the
-/// buffer + the live candidate list (the `▶` mark is on `sug_cursor`,
-/// live when `menu_focus`, else a stable hint) + the pending commit plan
-/// (`→` lines — exactly the ops `Enter` will apply). A scalar field
-/// just shows the buffer + the pending plan (no list, no menu).
+/// buffer + the live candidate list (the `▶` mark is on `sug_cursor` —
+/// the one `Tab` would fill) + the pending commit plan (`→` lines —
+/// exactly the ops `Enter` will apply). A scalar field just shows the
+/// buffer + the pending plan (no list, no candidates).
 fn draw_edit(f: &mut Frame, app: &App, es: &crate::tui::EditState, area: ratatui::layout::Rect) {
     let chunks = Layout::default()
         .direction(Direction::Vertical)
@@ -377,19 +377,12 @@ fn draw_edit(f: &mut Frame, app: &App, es: &crate::tui::EditState, area: ratatui
             String::from("picking field"),
             String::from("↑/↓ move · Enter open · a alias · r roots · Esc back · q quit"),
         ),
-        crate::tui::EditStage::Value => {
-            if es.menu_focus {
-                (
-                    format!("editing {} (menu)", es.field.label()),
-                    String::from("↑/↓ move · Enter adopt+commit · Tab back · type to narrow · Esc back"),
-                )
-            } else {
-                (
-                    format!("editing {} (buffer)", es.field.label()),
-                    String::from("type · ↑/↓ change field · Tab open menu · Enter commit · Esc back · C-c quit"),
-                )
-            }
-        }
+        crate::tui::EditStage::Value => (
+            format!("editing {}", es.field.label()),
+            String::from(
+                "type · ↑/↓ pick · Tab fill · Enter commit · Esc back · C-c quit",
+            ),
+        ),
     };
     let header = Paragraph::new(format!(
         "  kb tui — edit metadata for {} · {} · {}",
@@ -414,13 +407,8 @@ fn draw_edit(f: &mut Frame, app: &App, es: &crate::tui::EditState, area: ratatui
             let widget = Paragraph::new(lines.join("\n"))
                 .block(
                     Block::default().borders(Borders::ALL).title(format!(
-                        " {} — {}",
+                        " {} — type · ↑/↓ pick · Tab fill · Enter commit",
                         es.field.label(),
-                        if es.menu_focus {
-                            "menu focused (↑/↓ move · Enter adopt+commit · Tab back)"
-                        } else {
-                            "buffer focused (type · Tab open menu · Enter commit)"
-                        }
                     )),
                 )
                 .wrap(ratatui::widgets::Wrap { trim: false });

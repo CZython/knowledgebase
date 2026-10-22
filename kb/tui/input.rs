@@ -300,7 +300,6 @@ fn handle_edit(app: &mut App, ev: KeyEvent) -> bool {
             crate::tui::EditStage::Value => {
                 if let crate::tui::Mode::Edit(e) = &mut app.mode {
                     e.stage = crate::tui::EditStage::Picker;
-                    e.menu_focus = false;
                 }
                 app.set_info("edit metadata — ↑/↓ field · Enter to edit · a alias · r roots · Esc back · q quit");
             }
@@ -346,7 +345,7 @@ fn handle_edit(app: &mut App, ev: KeyEvent) -> bool {
                 false
             }
             KeyCode::Tab => {
-                app.set_info("Picker — Enter to enter a field (Tab opens the menu once a field is open)");
+                app.set_info("Picker — Enter to enter a field (↑/↓ · Tab · Enter are the field's keys, once it's open)");
                 false
             }
             _ => false, // stray input; the status bar already shows the hint
@@ -357,60 +356,48 @@ fn handle_edit(app: &mut App, ev: KeyEvent) -> bool {
         // are the arrows / Tab / Enter / Backspace / (already-handled) Esc
         // / C-c. A `Char(c)` catch-all is the last arm so nothing else
         // can swallow a letter.
-        crate::tui::EditStage::Value => {
-            let menu_focus = match &app.mode {
-                crate::tui::Mode::Edit(e) => e.menu_focus,
-                _ => false,
-            };
-            match ev.code {
-                // Arrows: contextual. Menu focused → move the candidate;
-                // buffer focused → move the *field* (cycle).
-                KeyCode::Up | KeyCode::Char('k') => {
-                    if menu_focus {
-                        app.move_suggestion(false);
-                    } else {
-                        app.edit_move_field(false);
-                    }
-                    false
-                }
-                KeyCode::Down | KeyCode::Char('j') => {
-                    if menu_focus {
-                        app.move_suggestion(true);
-                    } else {
-                        app.edit_move_field(true);
-                    }
-                    false
-                }
-                // `Tab` is a pure focus toggle between buffer and menu;
-                // it never touches the buffer text.
-                KeyCode::Tab => {
-                    app.toggle_menu();
-                    false
-                }
-                // `Enter`: adopt the highlighted candidate (if the menu is
-                // focused and a candidate is highlighted), then commit, then
-                // stay on the Value stage for the same field.
-                KeyCode::Enter => {
-                    if let Err((msg, _)) = app.accept_completion() {
-                        app.set_error(msg);
-                    }
-                    false
-                }
-                // `Backspace`: smart — pop a char, or drop the list tail if
-                // the buffer is empty.
-                KeyCode::Backspace => {
-                    app.edit_backspace_or_tail();
-                    false
-                }
-                // *Any* other character types straight into the buffer (so
-                // "security", "query", "data", "tax", "tax", "q", "a", "r"
-                // all work).
-                KeyCode::Char(c) => {
-                    app.edit_type(c);
-                    false
-                }
-                _ => false,
+        crate::tui::EditStage::Value => match ev.code {
+            // Arrows: *always* move the highlight across the live candidates
+            // (the zsh completion idiom). The field was already chosen in
+            // the Picker and is final here — `↑/↓` never switch fields.
+            // A no-op on a scalar (no candidates to move through).
+            KeyCode::Up | KeyCode::Char('k') => {
+                app.move_suggestion(false);
+                false
             }
+            KeyCode::Down | KeyCode::Char('j') => {
+                app.move_suggestion(true);
+                false
+            }
+            // `Tab`: the zsh *autocomplete* — fill the buffer with the
+            // highlighted candidate (the full known token), so the buffer
+            // holds a whole word ready to commit (or keep typing to refine).
+            KeyCode::Tab => {
+                app.autocomplete();
+                false
+            }
+            // `Enter`: commit the buffer as-is, then **stay on the same
+            // field** for the next token (a commit is not a close).
+            KeyCode::Enter => {
+                if let Err((msg, _)) = app.commit_edit() {
+                    app.set_error(msg);
+                }
+                false
+            }
+            // `Backspace`: smart — pop a char, or drop the list tail if
+            // the buffer is empty.
+            KeyCode::Backspace => {
+                app.edit_backspace_or_tail();
+                false
+            }
+            // *Any* other character types straight into the buffer (so
+            // "security", "query", "data", "tax", "tax", "q", "a", "r"
+            // all work).
+            KeyCode::Char(c) => {
+                app.edit_type(c);
+                false
+            }
+            _ => false,
         }
     }
 }
