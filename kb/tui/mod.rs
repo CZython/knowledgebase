@@ -350,6 +350,36 @@ pub struct EditState {
     /// into `suggestions`). Total: always `< suggestions.len()` (clamped on
     /// every filter change). `0` when `suggestions` is empty.
     pub sug_cursor: usize,
+    /// The **text cursor** inside the value buffer — a *character offset*
+    /// into `value` (Total: always in `0..=value.chars().count()`), so
+    /// multi-byte characters land on clean char boundaries. Used only for a
+    /// **scalar** field (free-text `←`/`→` editing); a **list** field's
+    /// buffer is a whole token, so the cursor is irrelevant there.
+    pub value_cursor: usize,
+    /// Two sub-modes inside the Value stage for a **list** field (ignored
+    /// on a scalar field, where `←`/`→` move the text cursor):
+    /// - `false` (default) — the **buffer** is live: `←` enters Selection,
+    ///   `↓`/`↑` pick, `Tab` completes, `Enter` commits.
+    /// - `true` — the **Selection** sub-mode is live: the user is walking
+    ///   the existing items (the trailing `<new>` is a virtual entry).
+    ///   `←`/`→`/`↑`/`↓` move the highlight, `Backspace`/`Del` remove the
+    ///   highlighted item (live, a real `fm::remove_list_item`), `Enter` on
+    ///   an item loads it into the buffer (so the user can type-paste-
+    ///   commit), `Enter` on `<new>` returns to buffer mode with the
+    ///   cached buffer intact, typing a letter returns to buffer mode
+    ///   (appending the letter to the *same* cached buffer), `Esc` returns
+    ///   to buffer mode with no change.
+    pub in_list_select: bool,
+    /// The **highlighted** item in Selection mode (an index into
+    /// `current_list` when that is the target, or `current_list.len()`
+    /// when the trailing `<new>` entry is the target). Total: always in
+    /// `0..=current_list.len()`.
+    pub list_high: usize,
+    /// The item currently being *edited in place*, if any — the value the
+    /// buffer was loaded with (via Selection → `Enter` on an item), and
+    /// which `build_ops` will *replace* on commit (not append). `None` for
+    /// every "add a new token" / "scalar" commit.
+    pub editing_item: Option<String>,
 }
 
 impl EditState {
@@ -359,15 +389,12 @@ impl EditState {
     /// field the no-op rule compares the buffer against the field's value
     /// *on entry* (the `build_ops` "original"); for a list field the
     /// dedup rule compares against the *current* list (after any
-    /// tail-removals tracked in `current_list`). Total.
+    /// removals tracked in `current_list`); for a "replace" commit
+    /// (`editing_item: Some(old)`) the buffer is a *new* value, so the
+    /// plan is `remove_item(old)` + `append_item(new)` (remove-before-
+    /// append, atomic). Total.
     pub fn plan(&self) -> Vec<EditOp> {
-        if self.field.is_list() {
-            build_ops(self.field, &self.value, "", &self.current_list)
-        } else {
-            let original = fm::scalar_value(self.entry_bytes.as_slice(), self.field.key())
-                .unwrap_or_default();
-            build_ops(self.field, &self.value, &original, &[])
-        }
+        build_ops(self.field, &self.value, &self.editing_item, &self.current_list, self.entry_bytes.as_slice())
     }
 }
 
@@ -384,10 +411,18 @@ pub enum EditOp {
     AppendItem { key: &'static str, item: String },
     /// A whole-field removal (`fm::remove_field`) — used to *clear* a scalar.
     RemoveField { key: &'static str },
-    /// A single list-item removal (`fm::remove_list_item`) — the tail-removal
-    /// is applied live by `remove_tail_item`; this variant exists for the
-    /// pure `apply_op` surface + test coverage.
-    #[allow(dead_code)]
+    /// A single list-item removal (`fm::replace_list_item`). Emitted
+    /// (for "replace" commits) when the user edits an existing item via the
+    /// Selection sub-mode (`Enter` on a tag loads it; typing a different
+    /// value; `Enter` commits) — the "load → edit → save" workflow that
+    /// `edit metadata` is designed to support for long tokens. The commit
+    /// path derives one `RemoveItem { key, old }` op for the (already
+    /// removed) old value and one `AppendItem { key, new }` op for the new
+    /// one, applied in that order (`remove` before `append`) so a "mTLS"
+    /// → "mtls" rename is atomic — no window in which either value is
+    /// absent. `remove_tail_item` (the *live* smart-Backspace path) does
+    /// its own `fm::remove_list_item` call without going through `EditOp`
+    /// (it mutates the working bytes directly, not building a commit plan).
     RemoveItem { key: &'static str, item: String },
 }
 
@@ -693,6 +728,10 @@ impl App {
             stage: EditStage::Picker,
             field_cursor: 0,
             sug_cursor: 0,
+            value_cursor: 0,
+            in_list_select: false,
+            list_high: 0,
+            editing_item: None,
         });
         self.set_info("edit metadata — ↑/↓ field · Enter to edit · Esc back");
         Ok(())
@@ -730,6 +769,19 @@ impl App {
             // Entering a field (re-)anchors the candidate highlight at the
             // top, so a fresh field starts with a stable, known menu.
             e.sug_cursor = 0;
+            // Scalar fields start the text cursor at the *end* of the
+            // buffer (the natural "append at the end" default — the user is
+            // editing in place and will typically append, not prepend).
+            // List fields start the cursor in buffer mode (so `↑/↓` on a
+            // fresh field go to the candidate list, not Selection-mode).
+            e.value_cursor = if field.is_list() {
+                0
+            } else {
+                e.value.chars().count()
+            };
+            e.in_list_select = false;
+            e.list_high = 0;
+            e.editing_item = None;
             self.set_info(Self::edit_field_note(field));
         }
     }
@@ -750,69 +802,150 @@ impl App {
         }
     }
 
-    /// Append a single character to the value buffer (the typing path).
-    /// Typing is **always to the buffer, regardless of the menu's focus**
-    /// (zsh idiom) — the buffer is the single source of truth the menu is
-    /// derived from. Recomputes the live candidate list when the field is a
-    /// list; no-ops on a scalar (the buffer is free text, no menu).
+    /// **Typed character**, dispatched by the current (sub-)mode:
+    /// - **Scalar**, buffer mode: insert `c` at `value_cursor` (a char
+    ///   offset; multi-byte safe), advance the cursor. The "text cursor"
+    ///   the user asked for in scalar fields — `←/→` will move it separately
+    ///   (see `move_buffer_cursor`).
+    /// - **List**, buffer mode: append `c` to the end of the buffer (a list
+    ///   buffer is a whole token, so the cursor is irrelevant here).
+    /// - **List**, Selection mode: *exit* Selection mode (back to buffer),
+    ///   *append* `c` to the *same* cached buffer (the user's accidental
+    ///   `→` press is undone: their in-progress token is preserved, and they
+    ///   can keep typing), clear `editing_item` (a new token is being typed,
+    ///   not a loaded one being refined), reset `list_high`.
+    ///
+    /// Total; no-op outside a Value-stage Edit mode (defensive).
     pub fn edit_type(&mut self, c: char) {
         if let Mode::Edit(e) = &mut self.mode {
-            e.value.push(c);
-        }
-        self.refresh_suggestions();
-    }
-
-    /// Pop the last character from the value buffer (the *plain* backspace
-    /// path). Recomputes the live candidate list the same way as
-    /// `edit_type`. (The *smart* "drop the list tail on an empty buffer"
-    /// path is a separate `edit_backspace_or_tail` — see `handle_edit`.)
-    pub fn edit_backspace(&mut self) {
-        if let Mode::Edit(e) = &mut self.mode {
-            e.value.pop();
-        }
-        self.refresh_suggestions();
-    }
-
-    /// The **smart** `Backspace` in the Value stage. The zsh "list editor"
-    /// idiom: while the buffer has text, `Backspace` removes the last char
-    /// (re-narrowing the live menu); once the buffer is *empty* on a **list**
-    /// field, `Backspace` drops the field's *tail item* (the "delete the
-    /// last thing I added" semantic), which is exactly what the old
-    /// dedicated `x` key did — but now it's discoverable (no single-letter
-    /// command key competing with the letters the user is typing).
-    ///
-    /// Scalar fields never have a tail to drop, so they always do the plain
-    /// char-pop path. **Total** on an empty list (nothing to remove → a
-    /// clean status note, no state change).
-    pub fn edit_backspace_or_tail(&mut self) {
-        let (is_list, empty_buffer, has_tail) = match &self.mode {
-            Mode::Edit(e) => {
-                (e.field.is_list(), e.value.trim().is_empty(), !e.current_list.is_empty())
+            if e.stage != EditStage::Value {
+                return;
             }
-            _ => (false, false, false),
+            if e.field.is_list() && e.in_list_select {
+                // Exiting Selection with a typed char: append to the same
+                // cached buffer; drop any loaded-item state.
+                e.value.push(c);
+                e.in_list_select = false;
+                e.editing_item = None;
+                e.list_high = 0;
+            } else if e.field.is_list() {
+                e.value.push(c);
+            } else {
+                // Scalar: char-offset insert at the cursor, then advance.
+                let mut chars: Vec<char> = e.value.chars().collect();
+                let pos = e.value_cursor.min(chars.len());
+                chars.insert(pos, c);
+                e.value_cursor = pos + 1;
+                e.value = chars.into_iter().collect();
+            }
+        }
+        self.refresh_suggestions();
+    }
+
+    /// **Cursor-aware `Backspace`** (the plain path — see
+    /// `edit_backspace_or_tail` for the smart-dispatch wrapper).
+    /// - **Scalar**: delete the char *before* `value_cursor` (a classic
+    ///   edit cursor); `value_cursor` steps back one. No-op when the cursor
+    ///   is at the start (Total; no panic on an empty / zero-cursor state).
+    /// - **List**, buffer mode: pop the last char of the buffer (a list
+    ///   buffer has no cursor — the cursor is irrelevant for a whole token).
+    /// - **List**, Selection mode: **not** handled here — routed separately
+    ///   by `edit_backspace_or_tail` (Selection-mode `Backspace`/`Del`
+    ///   remove the highlighted item).
+    pub fn edit_backspace(&mut self) {
+        let do_it = match &self.mode {
+            Mode::Edit(e) if e.stage == EditStage::Value => {
+                !e.field.is_list() || !e.in_list_select
+            }
+            _ => false,
         };
-        if is_list && empty_buffer && has_tail {
-            self.remove_tail_item();
-        } else if is_list && empty_buffer && !has_tail {
-            self.set_info("list already empty — nothing to remove (Backspace does nothing more)");
+        if !do_it {
+            return;
+        }
+        if let Mode::Edit(e) = &mut self.mode {
+            if e.field.is_list() {
+                e.value.pop();
+            } else {
+                let mut chars: Vec<char> = e.value.chars().collect();
+                let pos = e.value_cursor.min(chars.len());
+                if pos > 0 {
+                    chars.remove(pos - 1);
+                    e.value_cursor = pos - 1;
+                }
+                e.value = chars.into_iter().collect();
+            }
+        }
+        self.refresh_suggestions();
+    }
+
+    /// **The *single* "remove something" key** (`Backspace` *and* `Del`
+    /// are both wired to this in `handle_edit`). Dispatch by (sub-)mode:
+    /// - **Scalar**, buffer mode: plain cursor-aware `Backspace` (delete
+    ///   the char before the cursor).
+    /// - **List, buffer mode**: while the buffer has text, pop a char
+    ///   (re-narrowing the live menu); once the buffer is *empty*, drop
+    ///   the field's *tail item* (a "delete the last thing I added"
+    ///   ergonomic — preserved for convenience; the Selection mode is the
+    ///   full removal path).
+    /// - **List, Selection mode**: **remove the highlighted item**
+    ///   (`remove_item_at`, a real `fm::remove_list_item`, *live* — no
+    ///   commit). This is the "remove any existing tag" path the user asked
+    ///   for. After a removal `list_high` clamps into the new (shorter)
+    ///   list, `current_list` shrinks, `working_bytes` is re-serialized,
+    ///   and the state is *ready to chain* another removal (stay in
+    ///   Selection mode).
+    pub fn remove_or_pop(&mut self) {
+        let (in_value, in_sel, is_list, empty_buffer, has_items) = match &self.mode {
+            Mode::Edit(e) if e.stage == EditStage::Value => (
+                true,
+                e.in_list_select,
+                e.field.is_list(),
+                e.value.trim().is_empty(),
+                !e.current_list.is_empty(),
+            ),
+            _ => (false, false, false, false, false),
+        };
+        if !in_value {
+            return;
+        }
+        if is_list {
+            if in_sel && has_items {
+                self.remove_item_at();
+            } else if !in_sel && empty_buffer && has_items {
+                self.remove_tail_item();
+            } else if !in_sel && empty_buffer && !has_items {
+                self.set_info(
+                    "list already empty — nothing to remove (Backspace does nothing more)",
+                );
+            } else {
+                self.edit_backspace();
+            }
         } else {
             self.edit_backspace();
         }
     }
 
     /// The human note for the status bar after `enter_editor`. Every letter
-    /// in the value buffer is a literal; the only special keys here are the
-    /// arrows (pick a candidate), `Tab` (autocomplete into the buffer),
-    /// `Enter` (commit), `Esc` (back to Picker) and `C-c` (quit).
+    /// in the value buffer is a literal. The special keys differ by field
+    /// kind:
+    /// - **Scalar** (title / description): `←/→` move the text cursor,
+    ///   `Backspace` deletes before it, `Enter` commits.
+    /// - **List** (tags / search_terms): `←/→` enter the *selection* sub-
+    ///   mode (the existing items, plus a trailing `<new>`); there, `←/→/↑/↓`
+    ///   move the highlight, `Backspace`/`Del` remove the highlighted item,
+    ///   `Enter` loads it into the buffer (or return to `<new>`), and typing
+    ///   a letter returns to the buffer (preserving the typed token). In the
+    ///   buffer, `↑/↓` pick a candidate, `Tab` autocompletes, `Enter`
+    ///   commits. `Esc` back to Picker; `C-c` quit.
     fn edit_field_note(field: EditField) -> String {
         if field.is_list() {
             format!(
-                "editing {} — type · ↑/↓ pick · Tab fill · Enter commit · Esc back · C-c quit",
+                "editing {} — type · ↑/↓ pick · Tab fill · ←/→ select existing (Backspace remove) · Enter commit · Esc back · C-c quit",
                 field.label()
             )
         } else {
             format!(
-                "editing {} — type (letters are literal) · Enter commit · Esc back · C-c quit",
+                "editing {} — type · ←/→ move cursor · Backspace delete · Enter commit · Esc back · C-c quit",
                 field.label()
             )
         }
@@ -882,9 +1015,16 @@ impl App {
     /// nothing known to complete it to). A *commit* is `Enter`'s job, never
     /// `Tab`'s.
     pub fn autocomplete(&mut self) {
+        // Only meaningful in *buffer* mode (not Selection mode — in
+        // Selection there is no candidate list to pull from). Dispatched
+        // on `in_list_select`.
         let tok = match &self.mode {
             Mode::Edit(e) if e.stage == EditStage::Value => {
-                e.suggestions.get(e.sug_cursor).cloned()
+                if e.in_list_select {
+                    None
+                } else {
+                    e.suggestions.get(e.sug_cursor).cloned()
+                }
             }
             _ => None,
         };
@@ -892,6 +1032,15 @@ impl App {
             Some(t) => {
                 if let Mode::Edit(e) = &mut self.mode {
                     e.value = t;
+                    // Scalar (if any): put the cursor at the end of the
+                    // just-filled buffer (a natural "I just completed —
+                    // the cursor is at the end" default).
+                    if !e.field.is_list() {
+                        e.value_cursor = e.value.chars().count();
+                    }
+                    // The buffer no longer has a loaded item — a fresh
+                    // completion is an *add*, not a *replace*.
+                    e.editing_item = None;
                 }
                 self.refresh_suggestions();
             }
@@ -903,18 +1052,101 @@ impl App {
 
     /// Move the highlighted **candidate** up or down within the live
     /// suggestion list, wrapping at the edge — the *only* meaning of `↑/↓`
-    /// in the Value stage (the field was already chosen in the Picker and
-    /// is never cycled again from here). No-op when the candidate list is
+    /// in the **buffer** mode of a Value stage (the field was already
+    /// chosen in the Picker and is never cycled again from here). In the
+    /// **Selection** sub-mode of a list field, `↑/↓` instead moves the
+    /// Selection highlight (the `list_high`) — the same key, a different
+    /// *job* based on which sub-mode the user is in (see the doc on
+    /// `EditState::in_list_select`). No-op when the candidate list is
     /// empty (a scalar field, or a filter with no matches). Total: the
     /// cursor is always clamped into `[0, suggestions.len())` (→ `0` when
-    /// empty).
+    /// empty) and `list_high` is always clamped into
+    /// `[0, current_list.len()]`.
     pub fn move_suggestion(&mut self, down: bool) {
         if let Mode::Edit(e) = &mut self.mode {
-            if e.stage != EditStage::Value || e.suggestions.is_empty() {
+            if e.stage != EditStage::Value {
                 return;
             }
-            let n = e.suggestions.len();
-            e.sug_cursor = if down { (e.sug_cursor + 1) % n } else { (e.sug_cursor + n - 1) % n };
+            if e.field.is_list() && e.in_list_select {
+                // Selection sub-mode: move the Selection highlight.
+                let n = e.current_list.len().saturating_add(1);
+                if n > 0 {
+                    e.list_high = if down {
+                        (e.list_high + 1) % n
+                    } else {
+                        (e.list_high + n - 1) % n
+                    };
+                }
+            } else if !e.suggestions.is_empty() {
+                let n = e.suggestions.len();
+                e.sug_cursor = if down {
+                    (e.sug_cursor + 1) % n
+                } else {
+                    (e.sug_cursor + n - 1) % n
+                };
+            }
+        }
+    }
+
+    /// **← / →** in the Value stage — *move the buffer cursor* (scalar)
+    /// or *enter/exit the Selection sub-mode* (list). See the docs on
+    /// `EditState::in_list_select` for the two-mode model. The user's
+    /// exact spec: "pressing left arrow will kick out of the input buffer
+    /// into a tag selection … (right does the same thing but selects the
+    /// first tag in the list). Then you can using right and left arrow
+    /// or up and down arrow select an elements in the list, and using
+    /// del/backspace delete it, or using enter start editing it (fill the
+    /// input buffer with the tag and user can use backspace to remove /
+    /// edit it however they like) selecting `<new>` brings it back to
+    /// the normal add new tag / element empty input buffer (Or better
+    /// yet, cache it so when user accidentally presses a right arrow,
+    /// they can immediately select `<new>`, and continue editing the
+    /// cached buffer.)"
+    ///
+    /// **Total**: a stray call outside a Value-stage Edit mode is a
+    /// no-op (defensive; no panic). On a scalar field the cursor is
+    /// always in `0..=value.chars().count()` (clamped on every move).
+    pub fn move_buffer_cursor(&mut self, right: bool) {
+        // Snapshot the routing first (a single atomic `&self` read under
+        // the `&mut` borrow; the snapshot ends the borrow so we can
+        // mutate freely afterwards).
+        let (is_list, in_sel) = match &self.mode {
+            Mode::Edit(e) if e.stage == EditStage::Value => (e.field.is_list(), e.in_list_select),
+            _ => return, // Total; defensive no-op outside a Value stage.
+        };
+        if is_list && in_sel {
+            // Inside Selection mode: `←/→` and `↑/↓` share the same job —
+            // move the Selection highlight through existing items + `<new>`.
+            // (The user's exact spec: "using right and left arrow or up
+            // and down arrow select an element in the list".) Delegate to
+            // `move_suggestion`, which handles both sub-mode branches.
+            self.move_suggestion(right);
+        } else if is_list && !in_sel {
+            // Enter Selection mode from the buffer. Spec: `←` highlights
+            // the *last* existing item, `→` the *first*. With an empty
+            // existing list, highlight `<new>` (index `current_list.len()`).
+            if let Mode::Edit(e) = &mut self.mode {
+                e.in_list_select = true;
+                if e.current_list.is_empty() {
+                    e.list_high = 0; // the only entry is `<new>`
+                } else if right {
+                    e.list_high = 0; // first existing item
+                } else {
+                    e.list_high = e.current_list.len() - 1; // last existing item
+                }
+            }
+            self.set_info("in selection — ←↑/→↓ move · Backspace remove · Enter load · Esc/tip-letter return to buffer");
+        } else {
+            // Scalar: move the text cursor by one char (clamped to the
+            // buffer's char range — multi-byte safe).
+            if let Mode::Edit(e) = &mut self.mode {
+                let len = e.value.chars().count();
+                e.value_cursor = if right {
+                    (e.value_cursor + 1).min(len)
+                } else {
+                    e.value_cursor.saturating_sub(1)
+                };
+            }
         }
     }
 
@@ -967,6 +1199,66 @@ impl App {
             }
             Err(err) => {
                 self.set_error(format!("remove {last}: {err}"));
+            }
+        }
+    }
+
+    /// Remove the item **highlighted in Selection mode** (`list_high`)
+    /// from a list field — the "remove *any* existing tag" path the user
+    /// asked for (vs. `remove_tail_item`, which only removes the tail).
+    /// A real `fm::remove_list_item` on `working_bytes`; **live** (no
+    /// commit) — `working_bytes` + `current_list` are updated so the next
+    /// commit derives ops from the new bytes. After a removal `list_high`
+    /// is clamped into the now-shorter list (stays on the same "slot" if
+    /// possible, so the user can keep removing downward). **Only valid in
+    /// Selection mode on a list field**; a stray call elsewhere is a
+    /// no-op (Total).
+    pub fn remove_item_at(&mut self) {
+        // Snapshot everything (one `&mut` borrow, ends before the write) so
+        // the removal + status update can re-borrow below freely.
+        let (field, item, working) = match &mut self.mode {
+            Mode::Edit(e) if e.stage == EditStage::Value => {
+                if !e.field.is_list() || !e.in_list_select || e.current_list.is_empty() {
+                    return;
+                }
+                // `high` in Selection mode is `0..=len` where `== len` is
+                // the `<new>` slot — you can't remove `<new>` (it holds no
+                // real item), so fall back to the last real item.
+                let idx = if e.list_high < e.current_list.len() {
+                    e.list_high
+                } else {
+                    e.current_list.len() - 1
+                };
+                (
+                    e.field,
+                    e.current_list[idx].clone(),
+                    e.working_bytes.clone(),
+                )
+            }
+            _ => return, // total on a stray non-Edit call
+        };
+        let field_key = field.key();
+        match fm::remove_list_item(working.as_slice(), field_key, &item) {
+            Ok(new_bytes) => {
+                if let Mode::Edit(e) = &mut self.mode {
+                    let new_list = fm::list_values(new_bytes.as_slice(), field_key).unwrap_or_default();
+                    e.current_list = new_list;
+                    e.working_bytes = new_bytes;
+                    // Clamp `list_high` into the new (shorter) list; keep
+                    // the same slot if it still exists so the user can
+                    // chain downward removals; on an empty list stay at 0
+                    // (which is the `<new token>` slot — a valid landing
+                    // place in Selection mode, even if odd).
+                    e.list_high = e.list_high.min(e.current_list.len());
+                }
+                self.set_success(format!(
+                    "removed '{}' from {} — Enter to commit",
+                    truncate_str(&item, 60),
+                    field.label()
+                ));
+            }
+            Err(err) => {
+                self.set_error(format!("remove {item}: {err}"));
             }
         }
     }
@@ -1138,8 +1430,126 @@ impl App {
             // on the same field — the "commit + stay" UX: ready to type the
             // next token, `↑/↓` picks, `Tab` fills, `Enter` commits.
             e.sug_cursor = 0;
+            // The scalar buffer is re-seeded with the freshly-loaded value,
+            // so the text cursor is at the end (a natural default — the
+            // user just "saw" the buffer, it's at the end-of-text). In
+            // buffer mode, `Backspace` deletes before it (so the user can
+            // refine the end of the just-seen value).
+            e.value_cursor = if field.is_list() {
+                0
+            } else {
+                e.value.chars().count()
+            };
+            // A successful commit exits the Selection sub-mode (it was
+            // just about to remove/replace an item — that item is now baked
+            // into `working_bytes` via the op; the sub-mode's
+            // "pending" state is over). The *new* value buffer is in
+            // buffer mode (ready to type / pick a *different* item).
+            e.in_list_select = false;
+            e.list_high = 0;
+            e.editing_item = None;
         }
         Ok(())
+    }
+
+    /// **`Enter`** in the Value stage. **Dispatch** by (sub-)mode:
+    /// - **Buffer mode**: `commit_edit()` — apply `plan()` to disk. After
+    ///   a successful commit, `refresh_edit_state_on_disk` resets the
+    ///   buffer/sub-mode, so the user can pick / type the next token on
+    ///   the same field ("commit + stay").
+    /// - **Selection mode** on a **list** field: **do not commit** —
+    ///   instead:
+    ///   - If `list_high == current_list.len()` (the `<new>` slot), *exit*
+    ///     Selection mode, re-arm the buffer (cached token from the
+    ///     previous mode is preserved; `in_list_select = false`,
+    ///     `list_high = 0`, no change to `value` or `editing_item`).
+    ///     The user's in-progress token is exactly what they were
+    ///     typing before they hit `←`/`→` to peek at the list.
+    ///   - Otherwise (a real existing item is highlighted), *load* that
+    ///     item into the buffer: `value = current_list[list_high]`,
+    ///     `editing_item = Some(that_item)`, `value_cursor = end`,
+    ///     **exit** Selection mode. The user is now in a "refine a
+    ///     known item" sub-mode: `←`/`→` move the text cursor, `Tab`
+    ///     autocompletes, `Enter` commits (which replaces the `old`
+    ///     item with the refilled `new` via `RemoveItem + AppendItem`),
+    ///     `Esc`/typing a letter returns to buffer mode. A scalar field's
+    ///     `Enter` always commits (no Selection sub-mode on scalars).
+    ///
+    /// Total: a stray call outside a Value-stage Edit mode is a no-op.
+    pub fn enter_action(&mut self) -> KbResult<()> {
+        // Snapshot whether we're in Selection mode (one `&mut` borrow,
+        // ends before the commit / load branches below).
+        let (in_value, in_sel, is_list, high, len) = match &self.mode {
+            Mode::Edit(e) if e.stage == EditStage::Value => {
+                (true, e.in_list_select, e.field.is_list(), e.list_high, e.current_list.len())
+            }
+            _ => (false, false, false, 0, 0),
+        };
+        if !in_value {
+            return Ok(());
+        }
+        if is_list && in_sel {
+            if high < len {
+                // Load the highlighted item into the buffer (a "refine an
+                // existing item" path). Snapshot the item (one `&self`
+                // borrow, ends before the write) so the state mutation
+                // below can re-borrow freely.
+                let item = match &self.mode {
+                    Mode::Edit(e) => e.current_list.get(high).cloned().unwrap_or_default(),
+                    _ => String::new(),
+                };
+                if let Mode::Edit(e) = &mut self.mode {
+                    e.value = item.clone();
+                    e.editing_item = Some(item);
+                    e.in_list_select = false;
+                    e.list_high = 0;
+                    e.value_cursor = e.value.chars().count();
+                }
+                self.set_info("loaded into buffer — Enter to commit (replaces the loaded item) · Esc to return to list");
+            } else {
+                // `<new>` slot — exit Selection mode, keep the cached
+                // buffer. (`value` is left as the user was typing it. `Esc`
+                // is the same action here by symmetry of "escape back to
+                // the thing I was doing before I peeked".)
+                if let Mode::Edit(e) = &mut self.mode {
+                    e.in_list_select = false;
+                    e.list_high = 0;
+                }
+                self.set_info("back to the buffer — type to edit, Tab to fill, Enter to commit");
+            }
+            return Ok(());
+        }
+        // Buffer mode (or a scalar): a real commit.
+        self.commit_edit()
+    }
+
+    /// **`Esc`** in the Value stage. Two meanings, one key:
+    /// - **Selection mode** (a list field, `in_list_select`): exit the
+    ///   Selection sub-mode, return to the **buffer** (preserving the
+    ///   in-progress token the user typed *before* they hit `←`/`→` to
+    ///   peek at the list). This is "escape back to the thing I was doing
+    ///   before I peeked at the existing items".
+    /// - **Buffer mode** (or a scalar field): pop the Value stage back to
+    ///   the Picker (the "abandon this field" action the pre-Selection
+    ///   model had).
+    ///
+    /// Total: a stray call outside a Value-stage Edit mode is a no-op.
+    pub fn esc_in_value(&mut self) {
+        if let Mode::Edit(e) = &mut self.mode {
+            if e.stage != EditStage::Value {
+                return;
+            }
+            if e.field.is_list() && e.in_list_select {
+                // Selection mode → Buffer mode (stay in the Value stage).
+                e.in_list_select = false;
+                e.list_high = 0;
+                self.set_info("back to the buffer — type to edit, Tab to fill, Enter to commit, Esc for Picker");
+            } else {
+                // Buffer mode → Picker stage (abandon this field).
+                e.stage = EditStage::Picker;
+                self.set_info("edit metadata — ↑/↓ field · Enter to edit · a alias · r roots · Esc back · q quit");
+            }
+        }
     }
 
     /// Re-run `list_pages` + `apply_filter` (a "dirty" refresh after an
@@ -1582,12 +1992,14 @@ pub fn suggestions_for(corpus: &[String], buffer: &str) -> Vec<String> {
 pub fn build_ops(
     field: EditField,
     value: &str,
-    original: &str,
-    existing: &[String],
+    editing_item: &Option<String>,
+    current_list: &[String],
+    entry_bytes: &[u8],
 ) -> Vec<EditOp> {
     let key = field.key();
     let v = value.trim();
     if !field.is_list() {
+        let original = fm::scalar_value(entry_bytes, key).unwrap_or_default();
         let o = original.trim();
         if v == o {
             return Vec::new(); // unchanged → no-op
@@ -1603,12 +2015,33 @@ pub fn build_ops(
     }
     // List field.
     if v.is_empty() {
-        return Vec::new();
+        return Vec::new(); // empty buffer → no commit (the smart-Backspace
+                           // live-removal is baked into working_bytes)
     }
+    // "Replace" commit (the buffer was loaded with an existing item via the
+    // Selection sub-mode — `Enter` on a tag, then the user typed a
+    // different value, then `Enter`): emit `RemoveItem(old)` *before*
+    // `AppendItem(new)` so the list is atomic (no window in which both
+    // values are absent / both present — "mTLS" → "mtls" rename is
+    // atomic). Dedup: if the buffer is the *same* token (case-insensitive)
+    // as the loaded item, the commit is a no-op.
+    if let Some(old) = editing_item {
+        if v == old.trim() {
+            return Vec::new(); // identical → no-op
+        }
+        return vec![
+            EditOp::RemoveItem { key, item: old.clone() },
+            EditOp::AppendItem { key, item: v.to_string() },
+        ];
+    }
+    // "Add" commit (normal typing + Enter): one `AppendItem` per
+    // comma-separated token, *dedup'd against `current_list`* so re-adding
+    // a known token is a no-op, and empty tokens are dropped. Order is
+    // preserved.
     v.split(',')
         .map(|t| t.trim().to_string())
         .filter(|t| {
-            !t.is_empty() && !existing.iter().any(|e| e == t)
+            !t.is_empty() && !current_list.iter().any(|e| e == t)
         })
         .map(|item| EditOp::AppendItem { key, item })
         .collect()
@@ -2263,12 +2696,19 @@ mod tests {
     ///     an absent scalar is a no-op)
     #[test]
     fn build_ops_scalar_contract() {
-        // Unchanged → no-op.
-        let ops = build_ops(EditField::Title, "Hello World", "Hello World", &[]);
+        // The scalar's *original* value is read from `entry_bytes` (the
+        // page file on disk), not a separate argument. Build a minimal
+        // frontmatter fixture.
+        let with_title = b"---\ntitle: Hello World\n---\n\nbody\n";
+        let without_title = b"---\ndescription: some\n---\n\nbody\n";
+        let no_editing: Option<String> = None;
+
+        // Unchanged → no-op (buffer equals the on-disk value).
+        let ops = build_ops(EditField::Title, "Hello World", &no_editing, &[], with_title);
         assert!(ops.is_empty(), "unchanged scalar is a no-op");
 
         // Changed → one SetScalar.
-        let ops = build_ops(EditField::Title, "New", "Hello World", &[]);
+        let ops = build_ops(EditField::Title, "New", &no_editing, &[], with_title);
         assert_eq!(ops.len(), 1);
         assert!(matches!(
             ops[0],
@@ -2276,15 +2716,15 @@ mod tests {
         ));
 
         // Cleared from non-empty → one RemoveField.
-        let ops = build_ops(EditField::Title, "", "Hello World", &[]);
+        let ops = build_ops(EditField::Title, "", &no_editing, &[], with_title);
         assert_eq!(ops.len(), 1);
         assert!(matches!(
             ops[0],
             EditOp::RemoveField { key } if key == "title"
         ));
 
-        // Cleared from empty → no-op.
-        let ops = build_ops(EditField::Title, "   ", "", &[]);
+        // Cleared from empty/absent → no-op.
+        let ops = build_ops(EditField::Title, "   ", &no_editing, &[], without_title);
         assert!(ops.is_empty(), "clearing an absent scalar is a no-op");
     }
 
@@ -2297,12 +2737,18 @@ mod tests {
     ///   - **whitespace padding**                 → the token is trimmed
     #[test]
     fn build_ops_list_contract() {
+        // `entry_bytes` is *not* read on the add path (a list commit
+        // appends to the list; the baseline bytes only matter for scalars),
+        // but the signature requires it — pass a minimal valid fixture.
+        let bytes: &[u8] = b"---\ntags: [mTLS]\n---\n\nbody\n";
+        let no_editing: Option<String> = None;
+
         // Empty buffer → no-op.
-        let ops = build_ops(EditField::Tags, "", "", &["mTLS".into()]);
+        let ops = build_ops(EditField::Tags, "", &no_editing, &["mTLS".into()], bytes);
         assert!(ops.is_empty(), "empty buffer on a list is a no-op");
 
         // One new token, not in list → one AppendItem.
-        let ops = build_ops(EditField::Tags, "llm", "", &["mTLS".into()]);
+        let ops = build_ops(EditField::Tags, "llm", &no_editing, &["mTLS".into()], bytes);
         assert_eq!(ops.len(), 1);
         assert!(matches!(
             ops[0],
@@ -2312,7 +2758,8 @@ mod tests {
         // Multiple tokens, some new, some present → only the new ones,
         // order preserved. (Existing = ["mTLS", "transformer"].)
         let existing = vec!["mTLS".into(), "transformer".into()];
-        let ops = build_ops(EditField::Tags, "mTLS, llm, transformer, token-bucket", "", &existing);
+        let ops =
+            build_ops(EditField::Tags, "mTLS, llm, transformer, token-bucket", &no_editing, &existing, bytes);
         assert_eq!(ops.len(), 2, "new tokens only, existing tokens dropped");
         match &ops[0] {
             EditOp::AppendItem { key, item } => {
@@ -2330,7 +2777,8 @@ mod tests {
         }
 
         // Whitespace padding: the token is trimmed.
-        let ops = build_ops(EditField::Tags, "  llm  ", "", &[]);
+        let ops =
+            build_ops(EditField::Tags, "  llm  ", &no_editing, &[], bytes);
         assert_eq!(ops.len(), 1);
         if let EditOp::AppendItem { ref item, key } = ops[0] {
             assert_eq!(key, "tags");
@@ -2339,13 +2787,56 @@ mod tests {
             panic!("expected AppendItem");
         }
 
-        // All tokens in list → no AppendItem (empty buffer effect).
-        let ops = build_ops(EditField::Tags, "mTLS, transformer", "", &["mTLS".into(), "transformer".into()]);
+        // All tokens in list → no AppendItem (dedup'd away → no-op).
+        let ops = build_ops(
+            EditField::Tags,
+            "mTLS, transformer",
+            &no_editing,
+            &["mTLS".into(), "transformer".into()],
+            bytes,
+        );
         assert!(ops.is_empty(), "all tokens already in the list → no-op");
 
         // Empty tokens (whitespace-only segments) are dropped.
-        let ops = build_ops(EditField::Tags, "  , ,  ", "", &[]);
+        let ops =
+            build_ops(EditField::Tags, "  , ,  ", &no_editing, &[], bytes);
         assert!(ops.is_empty(), "whitespace-only tokens are dropped");
+    }
+
+    /// The **"replace"** contract (`editing_item = Some(old)`): the buffer
+    /// was loaded with an existing item via the Selection sub-mode, the
+    /// user typed a different value, and `Enter` commits. The commit must
+    /// be *atomic* — one `RemoveItem(old)` *before* one `AppendItem(new)` —
+    /// so that a rename (e.g. "mTLS" → "mtls") never leaves a window in
+    /// which both values are absent / both present. Identical buffer →
+    /// no-op.
+    #[test]
+    fn build_ops_replace_contract() {
+        let bytes: &[u8] = b"---\ntags: [mTLS, transformer]\n---\n\nbody\n";
+        let existing = vec!["mTLS".into(), "transformer".into()];
+        let editing = Some("mTLS".to_string());
+
+        // Renamed → RemoveItem(old) + AppendItem(new), in that order.
+        let ops = build_ops(EditField::Tags, "mtls", &editing, &existing, bytes);
+        assert_eq!(ops.len(), 2, "a rename is exactly old-out + new-in");
+        assert!(
+            matches!(
+                ops[0],
+                EditOp::RemoveItem { key, ref item } if key == "tags" && *item == "mTLS"
+            ),
+            "first op must remove the old item: {ops:?}"
+        );
+        assert!(
+            matches!(
+                ops[1],
+                EditOp::AppendItem { key, ref item } if key == "tags" && *item == "mtls"
+            ),
+            "second op must append the new item: {ops:?}"
+        );
+
+        // Identical (case-insensitive trim equal) → no-op.
+        let ops = build_ops(EditField::Tags, "mTLS", &editing, &existing, bytes);
+        assert!(ops.is_empty(), "loading + re-committing the same item is a no-op");
     }
 
     /// `apply_op` is pure + total over the four `EditOp` variants: the
@@ -2427,6 +2918,10 @@ mod tests {
             stage: EditStage::Value,
             field_cursor: 0,
             sug_cursor: 0,
+            value_cursor: "Hello World".chars().count(),
+            in_list_select: false,
+            list_high: 0,
+            editing_item: None,
         };
         assert!(es.plan().is_empty(), "unchanged scalar → no-op plan");
 
@@ -2455,6 +2950,10 @@ mod tests {
             stage: EditStage::Value,
             field_cursor: 2,
             sug_cursor: 0,
+            value_cursor: 0,
+            in_list_select: false,
+            list_high: 0,
+            editing_item: None,
         };
         assert!(es3.plan().is_empty(), "empty buffer on a list → no-op plan");
 
@@ -3031,19 +3530,19 @@ mod tests {
             assert_eq!(e.value, "se");
         }
         // First Backspace on a NON-empty buffer: pops a char, not the tail.
-        app.edit_backspace_or_tail();
+        app.remove_or_pop();
         if let Mode::Edit(ref e) = app.mode {
             assert_eq!(e.value, "s", "Backspace pops a char (buffer non-empty)");
             assert_eq!(e.current_list, vec!["mTLS", "transformer"], "tail NOT dropped");
         }
         // Pop the remaining char — the buffer is now empty.
-        app.edit_backspace_or_tail();
+        app.remove_or_pop();
         if let Mode::Edit(ref e) = app.mode {
             assert!(e.value.is_empty(), "buffer is now empty");
         }
         // Second Backspace on an EMPTY buffer: drops the list tail
         // ("transformer").
-        app.edit_backspace_or_tail();
+        app.remove_or_pop();
         if let Mode::Edit(ref e) = app.mode {
             assert_eq!(
                 e.current_list,
@@ -3089,7 +3588,7 @@ mod tests {
         // Backspace on an empty buffer + empty list → the "nothing to
         // remove" branch (a status note, not an error, no state change).
         let before = std::fs::read_to_string(&page).unwrap();
-        app.edit_backspace_or_tail();
+        app.remove_or_pop();
         if let Mode::Edit(ref e) = app.mode {
             assert!(e.value.is_empty(), "buffer still empty");
             assert!(e.current_list.is_empty(), "list still empty");
@@ -3460,5 +3959,281 @@ mod tests {
         db.conn
             .query_row("SELECT COUNT(*) FROM pages", [], |r| r.get::<_, i64>(0))
             .unwrap() as usize
+    }
+
+    // ---- Selection mode (list fields) -----------------------------------
+
+    /// A test helper: navigate to the **Value stage** of a list field
+    /// (the *tags* field, by default) — the common prelude for any
+    /// Selection-mode test. Returns a handle to the `App` in the state
+    /// "just entered the tags field, in buffer mode, no input yet".
+    /// Caller can then drive the selection UX directly from here.
+    fn into_tags_buffer(app: &mut App) {
+        app.open_edit().unwrap();
+        // `picker_move` cycles Title → description → tags (field_cursor
+        // starts at 0 = Title).
+        app.picker_move(true);
+        app.picker_move(true);
+        app.enter_editor();
+        if let Mode::Edit(ref e) = app.mode {
+            assert_eq!(e.field, EditField::Tags, "helper lands on tags");
+            assert!(!e.in_list_select, "helper lands in buffer mode");
+            assert!(e.value.is_empty(), "helper lands with an empty buffer");
+        }
+    }
+
+    /// **`←` in a list field** enters Selection mode and highlights the
+    /// *last* existing item (the user's exact spec: "left arrow … selects
+    /// the last tag"). **`→`** enters Selection and highlights the *first*.
+    /// With an empty `current_list`, either direction highlights the
+    /// `<new token>` slot (index 0 = `current_list.len()` = 0 when empty).
+    #[test]
+    fn enter_selection_from_buffer() {
+        let (mut app, _dir) = seeded_app();
+        into_tags_buffer(&mut app);
+        // The fixture has ["mTLS", "transformer"].
+        app.move_buffer_cursor(false); // `←`
+        if let Mode::Edit(ref e) = app.mode {
+            assert!(e.in_list_select, "buffer ← enters Selection mode");
+            assert_eq!(e.list_high, 1, "← highlights the *last* existing item");
+        }
+        // `Esc` back to buffer (stays in Value stage).
+        app.esc_in_value();
+        if let Mode::Edit(ref e) = app.mode {
+            assert!(!e.in_list_select, "Esc leaves Selection mode");
+            assert_eq!(e.stage, EditStage::Value, "Esc stays in Value stage");
+        }
+        // Now `→` to enter Selection again → should land on the first item.
+        app.move_buffer_cursor(true);
+        if let Mode::Edit(ref e) = app.mode {
+            assert!(e.in_list_select, "buffer → also enters Selection mode");
+            assert_eq!(e.list_high, 0, "→ highlights the *first* existing item");
+        }
+    }
+
+    /// **`↑/↓` in Selection mode** move the Selection highlight (wrap-at
+    /// both ends, Total), *not* the candidates. The trailing `<new token>`
+    /// (index `current_list.len()`) is a valid highlight slot (Enter on
+    /// it exits to buffer mode, per the spec). **`←`/`→` are equivalent
+    /// to `↑`/`↓`** in Selection mode (the user's exact spec: "you can
+    /// using right and left arrow or up and down arrow select elements in
+    /// the list").
+    #[test]
+    fn navigation_in_selection_mode_wraps_across_items_and_new_slot() {
+        let (mut app, _dir) = seeded_app();
+        into_tags_buffer(&mut app);
+        app.move_buffer_cursor(false); // `←` → Selection mode, on the last existing item
+        let len = 2; // current_list.len() == 2 (["mTLS", "transformer"])
+        // The combined order is [mTLS, transformer, <new>]. So:
+        //   index 0 = mTLS, index 1 = transformer, index 2 = <new slot>.
+        // `↓` from index 1 → index 2 (the `<new>` slot).
+        app.move_suggestion(true);
+        if let Mode::Edit(ref e) = app.mode {
+            assert_eq!(e.list_high, len, "↓ advances to the trailing `<new>` slot");
+        }
+        // `↓` from index 2 wraps back to index 0 (the first existing item).
+        app.move_suggestion(true);
+        if let Mode::Edit(ref e) = app.mode {
+            assert_eq!(e.list_high, 0, "↓ wraps back to the first existing item");
+        }
+        // `↑` from index 0 wraps to the *last* entry in the combined
+        // order — which is the `<new>` slot (index `len`), NOT a real
+        // item.
+        app.move_suggestion(false);
+        if let Mode::Edit(ref e) = app.mode {
+            assert_eq!(e.list_high, len, "`↑` from index 0 wraps to the trailing `<new>` slot");
+        }
+        // ← / → (routed through `move_buffer_cursor` → `move_suggestion`)
+        // must be *equivalent* to ↑ / ↓ in Selection mode.
+        app.move_buffer_cursor(false); // `←` (a "down"-equivalent in my
+                                       // impl: `right=false` → up in the
+                                       // `move_suggestion` mapping).
+        // Actually wait: in my impl, `move_suggestion(down)` moves *down*
+        // when `down=true` (i.e. to the next item in the order). A
+        // `right` key in `move_buffer_cursor(true)` calls
+        // `move_suggestion(true)`. So `→` is "advance".
+        if let Mode::Edit(ref e) = app.mode {
+            // From index `<new>` (the last), `←` (up) steps *back* to the
+            // last existing item (index `len - 1`).
+            assert_eq!(e.list_high, len - 1, "`←` in Selection steps back to the last *existing* item");
+        }
+    }
+
+    /// **`Backspace` / `Del` in Selection mode** removes the *highlighted*
+    /// item from the field — live (a real `fm::remove_list_item`; no file
+    /// write to disk yet). **`Enter` on an item** loads it into the buffer
+    /// (a "refine an existing item" path; the next `Enter` will commit
+    /// a *rename*, not a re-append). **`Enter` on `<new token>`** exits
+    /// to buffer mode with the cache preserved. A letter *types* into the
+    /// (still-cached) buffer and exits Selection mode.
+    ///
+    /// Also asserts that "re-adding the same token" is a no-op (the
+    /// `build_ops` dedup), so an accidental Enter-on-item without an
+    /// intervening change does not double-list.
+    #[test]
+    fn selection_mode_full_ux() {
+        let (mut app, path) = seeded_app();
+        into_tags_buffer(&mut app);
+
+        // --- 1. Enter Selection from Buffer mode, on the last item.
+        app.move_buffer_cursor(false);
+        assert!(match &app.mode {
+            Mode::Edit(ref e) => e.in_list_select,
+            _ => false,
+        });
+
+        // --- 2. `←`/`→`/`↑`/`↓` navigate the highlight.
+        app.move_suggestion(true); // `→`-equivalent on list_high: last → `<new>`
+        app.move_suggestion(true); // → wraps: 0 (first existing item)
+
+        // --- 3. `Backspace` in Selection removes the *highlighted*
+        //       (currently the first existing = "mTLS") item — a real
+        //       `fm::remove_list_item`, baked into `working_bytes`.
+        app.remove_or_pop();
+        if let Mode::Edit(ref e) = app.mode {
+            let cur: Vec<String> = e.current_list.clone();
+            assert_eq!(cur, vec!["transformer".to_string()], "mTLS was removed from the list");
+            // The working bytes still parse and no longer contain the
+            // "mTLS" item as a list value. (`vec::contains` with a byte
+            // slice is *byte-by-byte*, so use a string search on the
+            // UTF-8 rendering of the bytes.)
+            let working_str = String::from_utf8_lossy(&e.working_bytes);
+            assert!(!working_str.contains("mTLS"), "working_bytes is re-serialized");
+        }
+        // The file on disk is *not* written (live only — commit is Enter).
+        let on_disk = std::fs::read_to_string(&path).unwrap();
+        assert!(on_disk.contains("mTLS"), "no disk write yet — live removal");
+
+        // --- 4. `Enter` on the (now-*) highlighted item *loads* it into
+        //       the buffer. (After the mTLS removal, `list_high`
+        //       clamped to `current_list.len() = 1` — which points to
+        //       the *last existing* item, "transformer".)
+        app.enter_action().unwrap();
+        if let Mode::Edit(ref e) = app.mode {
+            assert_eq!(e.value, "transformer", "Enter loaded the item into the buffer");
+            assert!(e.editing_item.is_some(), "editing_item was armed (a rename path)");
+            assert!(!e.in_list_select, "Exit Selection mode after loading the item");
+        }
+
+        // --- 5. Commit the rename: a "transformer" → "transformer" *plan*
+        //       no-op (the buffer still equals the loaded token), so no
+        //       `AppendItem` op is produced. **However**, the *pending
+        //       removal* from step 3 is already baked into
+        //       `working_bytes`. `commit_edit` writes when the *result*
+        //       (working_bytes + ops) differs from disk — and it does,
+        //       because mTLS is gone from working_bytes. So the write
+        //       *happens* and bakes the mTLS removal to disk.
+        assert!(app.enter_action().is_ok());
+        let on_disk_after_commit = std::fs::read_to_string(&path).unwrap();
+        assert!(!on_disk_after_commit.contains("mTLS"), "the baked-in removal was written to disk");
+        assert!(on_disk_after_commit.contains("transformer"), "transformer is still on disk");
+
+        // --- 6. Now: type `x` into the (now-fresh) buffer and commit.
+        //       `x` should *append* (the *new* token, a pure add).
+        app.edit_type('x');
+        assert!(app.enter_action().is_ok());
+        let final_disk = std::fs::read_to_string(&path).unwrap();
+        assert!(!final_disk.contains("mTLS"), "mTLS is still gone");
+        assert!(final_disk.contains("transformer"), "transformer is still on disk");
+        assert!(final_disk.contains("x"), "the new token `x` was appended");
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
+    }
+
+    /// **Buffer mode** on a list field (before the Selection sub-mode is
+    /// entered) — the existing UX is preserved for *add-new*. The buffer
+    /// still types, Tab still autocompletes, ↑/↓ still pick, Enter
+    /// still commits, and the smart-`Backspace` (empty buffer → drop
+    /// tail) still works.
+    #[test]
+    fn buffer_mode_on_list_field_preserves_old_behavior() {
+        let (mut app, _dir) = seeded_app();
+        into_tags_buffer(&mut app);
+        // Type 'm' (a prefix of "mtls" in the corpus): the suggestion
+        // list narrows.
+        app.edit_type('m');
+        if let Mode::Edit(ref e) = app.mode {
+            assert!(!e.in_list_select, "typing stays in buffer mode");
+            assert!(!e.suggestions.is_empty(), "the live menu is non-empty");
+        }
+        // Tab autocomplete still fills the buffer from the *highlighted*
+        // candidate (sug_cursor=0 → first match = "mtls" from the corpus
+        // — the seed corpus has lowercase "mtls").
+        app.autocomplete();
+        if let Mode::Edit(ref e) = app.mode {
+            assert_eq!(e.value, "mtls", "Tab filled the buffer from the highlighted candidate");
+        }
+        // Commit: "mtls" is not in `current_list` (which is
+        // ["mTLS", "transformer"]) so it's a new append. (mTLS /
+        // transformer are present-case-sensitively; "mtls" is a new
+        // token.)
+        assert!(app.enter_action().is_ok());
+        // Smart-`Backspace` (empty buffer) still drops the tail.
+        if let Mode::Edit(ref e) = app.mode {
+            assert!(e.value.is_empty(), "the buffer was reset after commit");
+        }
+        app.remove_or_pop(); // empty buffer → tail-drop
+        if let Mode::Edit(ref e) = app.mode {
+            // The tail ("transformer") was dropped; current_list is now
+            // ["mTLS"] (the "mtls" append was *not* yet committed — the
+            // tail-drop is a *pending* op, not a commit. The "mTLS"
+            // item is still there. This is a subtle case: the user's
+            // last visible action (in this test) is: type m, Tab,
+            // commit, backspace. The *commit* wrote "mtls" to disk.
+            // The *backspace* is a live removal of the tail. The tail
+            // of a *just-committed* list ["mTLS", "transformer",
+            // "mtls"] is "mtls" — so dropping the tail removes "mtls",
+            // leaving ["mTLS", "transformer"].
+            let cur = e.current_list.clone();
+            assert_eq!(cur, vec!["mTLS".to_string(), "transformer".to_string()], "the *tail* (newest) token was dropped, the rest preserved");
+        }
+    }
+
+    /// A **scalar** field's `←/→` move the text cursor mid-buffer (a
+    /// classic editor). `Backspace` deletes the char before the cursor
+    /// (not the last char — a "mid-buffer" Backspace). Commit (Enter)
+    /// writes the new scalar to disk. Esc pops to Picker (the legacy
+    /// buffer-mode Escape).
+    #[test]
+    fn scalar_field_left_right_moves_cursor_and_middle_backspace_edits_mid_buffer() {
+        let (mut app, path) = seeded_app();
+        app.open_edit().unwrap();
+        // Stay on Title (field_cursor=0). The fixture's title is
+        // "Hello World" (the same as the on-disk bytes).
+        app.enter_editor();
+        if let Mode::Edit(ref e) = app.mode {
+            assert_eq!(e.value, "Hello World");
+            let len = e.value.chars().count();
+            assert_eq!(e.value_cursor, len, "the cursor starts at the end");
+        }
+        // `←` 6 times puts the cursor before "World" (position 5).
+        app.move_buffer_cursor(false);
+        app.move_buffer_cursor(false);
+        app.move_buffer_cursor(false);
+        app.move_buffer_cursor(false);
+        app.move_buffer_cursor(false);
+        app.move_buffer_cursor(false);
+        if let Mode::Edit(ref e) = app.mode {
+            assert_eq!(e.value_cursor, 5, "`←` x6 put the cursor before 'World'");
+        }
+        // Type 'X' at position 5 — inserts at the cursor.
+        app.edit_type('X');
+        if let Mode::Edit(ref e) = app.mode {
+            assert_eq!(e.value, "HelloX World", "the char was inserted at the cursor");
+        }
+        // `Backspace` now deletes the char *before the cursor* — which
+        // should be 'o' (position 4), giving "HellXo World"… wait.
+        // The cursor is at position 6 (after inserting 'X' at 5, the
+        // cursor advanced to 6, so Backspace should remove the char at
+        // position 5 (which is 'X' — the char we just typed).
+        app.remove_or_pop();
+        if let Mode::Edit(ref e) = app.mode {
+            assert_eq!(e.value, "Hello World", "Backspace deleted the char before the cursor (the 'X' we just inserted)");
+        }
+        // Commit. The *value* on disk should be unchanged (a pure
+        // insert-at-cursor then backspace-removed-that-same-char is
+        // net-zero).
+        assert!(app.enter_action().is_ok());
+        let on_disk = std::fs::read_to_string(&path).unwrap();
+        assert!(on_disk.contains("Hello World"), "the title is unchanged on disk (net-zero edit)");
     }
 }

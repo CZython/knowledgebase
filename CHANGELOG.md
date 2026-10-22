@@ -38,9 +38,30 @@ the API is still moving; breaking changes are called out explicitly.
     the last thing I added" semantic, replaced the old `x` key and is more
     discoverable). `Backspace` with text just deletes the last character. On an
     empty list it's a clean no-op.
-  - **`Esc` pops one stage**: value → picker → browse. `C-c` is the one
-    unconditional quit. `q`/`a`/`r` (quit / alias / roots) are reachable only in
-    the picker, where no letter is being typed.
+   - **`Esc` pops one stage**: value → picker → browse. `C-c` is the one
+     unconditional quit. `q`/`a`/`r` (quit / alias / roots) are reachable only in
+     the picker, where no letter is being typed.
+- **`←`/`→` are a text cursor on scalar fields.** A char-level caret moves
+  mid-buffer (typing inserts at the cursor, `Backspace` deletes the char before
+  it) — so a "mid-word" edit (e.g. fixing a typo in `HelloX World`) does not
+  require re-typing the whole token. `←` at start / `→` at end are clean no-ops.
+- **List fields get a *selection sub-mode* on top of the buffer.** In buffer
+  mode, `←`/`→` (and only then) enter Selection: a combined list of
+  `[tag₁, …, tagₙ, <new>]` where `↑/↓/←/→` all navigate the highlight
+  (wrapping), `Del`/`Backspace` live-removes the highlighted item (a real
+  `fm::remove_list_item`, no file write until `Enter`), `Enter` on a tag *loads
+  it into the buffer* (a "refine" path; the next `Enter` will commit an atomic
+  `RemoveItem(old)` + `AppendItem(new)` rename, not a duplicated append),
+  `Enter` on `<new>` returns to buffer mode with the cached token preserved,
+  and any typed letter exits Selection and appends that letter to the buffer.
+  `Esc` also returns to buffer mode. The two sub-modes (Buffer / Selection)
+  are visually distinct in the header and the block title.
+- **Atomic rename-on-tag-edit for lists.** Committing a buffer that matches an
+  existing tag (either freshly-typed or loaded via Selection `Enter`) emits
+  `RemoveItem(old)` + `AppendItem(new)` in one plan — the file's list is
+  re-serialized in one pass, no intermediate state ever appears. Dedup is
+  still case-sensitive (a "mTLS" vs "mtls" commit adds a *new* token, it does
+  not replace the old).
 - **`v` key in the browse/read views opens the selected page in `$EDITOR`**
   (`$VISUAL` → `$EDITOR` → `vi`), reusing the existing `edit in place` path —
   in-editor flow from the TUI without leaving it. Gated on the `editor`

@@ -293,16 +293,13 @@ fn handle_edit(app: &mut App, ev: KeyEvent) -> bool {
 
     // `Esc` pops one stage:
     //   Picker → Browse (the user leaves edit entirely)
-    //   Value  → Picker (abandon this field, pick another)
+    //   Value  → (dispatched by `esc_in_value` below):
+    //            - in Selection sub-mode → back to Buffer (stay in Value)
+    //            - in Buffer mode       → back to Picker
     if ev.code == KeyCode::Esc {
         match stage {
             crate::tui::EditStage::Picker => app.close_edit(),
-            crate::tui::EditStage::Value => {
-                if let crate::tui::Mode::Edit(e) = &mut app.mode {
-                    e.stage = crate::tui::EditStage::Picker;
-                }
-                app.set_info("edit metadata — ↑/↓ field · Enter to edit · a alias · r roots · Esc back · q quit");
-            }
+            crate::tui::EditStage::Value => app.esc_in_value(),
         }
         return false;
     }
@@ -350,17 +347,37 @@ fn handle_edit(app: &mut App, ev: KeyEvent) -> bool {
             }
             _ => false, // stray input; the status bar already shows the hint
         },
-        // **Value** — the value buffer. Every character (including `q` / `a`
-        // / `r` / `x` / `e` / `v`) types straight in — the single-letter
-        // manager keys are *only* in the stage above. The only special keys
-        // are the arrows / Tab / Enter / Backspace / (already-handled) Esc
-        // / C-c. A `Char(c)` catch-all is the last arm so nothing else
-        // can swallow a letter.
+        // **Value** — the value buffer. Every character (including `q` /
+        // `a` / `r` / `x` / `e` / `v`) types straight in — the single-letter
+        // manager keys are *only* in the stage above. The *special* keys
+        // here are now the full zsh-style editor set:
+        //   - **scalar** (title / description): `←/→` move the *text cursor*
+        //     (insert / delete at a mid-buffer position), `Backspace`
+        //     deletes the char immediately before the cursor.
+        //   - **list** (tags / search_terms): `←/→` enter *Selection mode*
+        //     (a sub-mode that walks the existing items + a trailing
+        //     `<new>`); in Selection mode, `←/→/↑/↓` move the highlight,
+        //     `Backspace`/`Del` remove the highlighted item, `Enter`
+        //     either loads the item into the buffer (so the user can
+        //     refine it in place) or exits to Buffer. In Buffer mode,
+        //     `↑/↓` pick a candidate, `Tab` autocompletes, and `Enter`
+        //     commits. `Esc` always "pops back one state": Selection
+        //     → Buffer, Buffer → Picker. `C-c` quits.
         crate::tui::EditStage::Value => match ev.code {
-            // Arrows: *always* move the highlight across the live candidates
-            // (the zsh completion idiom). The field was already chosen in
-            // the Picker and is final here — `↑/↓` never switch fields.
-            // A no-op on a scalar (no candidates to move through).
+            // **Text cursor** (scalar) / **enter Selection** (list). Both
+            // route through `move_buffer_cursor` (which dispatches on the
+            // field's sub-mode).
+            KeyCode::Left => {
+                app.move_buffer_cursor(false);
+                false
+            }
+            KeyCode::Right => {
+                app.move_buffer_cursor(true);
+                false
+            }
+            // **Candidates** (Buffer mode, list) / **Selection highlight**
+            // (Selection mode, list). Same key, different job —
+            // `move_suggestion` dispatches on `in_list_select`.
             KeyCode::Up | KeyCode::Char('k') => {
                 app.move_suggestion(false);
                 false
@@ -369,30 +386,38 @@ fn handle_edit(app: &mut App, ev: KeyEvent) -> bool {
                 app.move_suggestion(true);
                 false
             }
-            // `Tab`: the zsh *autocomplete* — fill the buffer with the
-            // highlighted candidate (the full known token), so the buffer
-            // holds a whole word ready to commit (or keep typing to refine).
+            // **Autocomplete**: fill the buffer with the highlighted
+            // candidate (a Buffer-mode-only key — in Selection mode it's a
+            // no-op: there is no candidate list to pull from).
             KeyCode::Tab => {
                 app.autocomplete();
                 false
             }
-            // `Enter`: commit the buffer as-is, then **stay on the same
-            // field** for the next token (a commit is not a close).
+            // **Enter**: commit (Buffer / scalar) or load/exits (Selection).
+            // Dispatches through `enter_action`, which snapshots `in_sel`
+            // and routes to the right job.
             KeyCode::Enter => {
-                if let Err((msg, _)) = app.commit_edit() {
+                if let Err((msg, _)) = app.enter_action() {
                     app.set_error(msg);
                 }
                 false
             }
-            // `Backspace`: smart — pop a char, or drop the list tail if
-            // the buffer is empty.
+            // **Backspace / Del**: remove.
+            //   - scalar: pop a char before the text cursor.
+            //   - list, Buffer mode: pop a char, or drop the list tail
+            //     (when the buffer is empty).
+            //   - list, Selection mode: remove the *highlighted* item.
+            // All three go through `remove_or_pop`.
             KeyCode::Backspace => {
-                app.edit_backspace_or_tail();
+                app.remove_or_pop();
                 false
             }
-            // *Any* other character types straight into the buffer (so
-            // "security", "query", "data", "tax", "tax", "q", "a", "r"
-            // all work).
+            KeyCode::Delete => {
+                app.remove_or_pop();
+                false
+            }
+            // *Any* other character types straight into the buffer (or
+            // exits Selection mode and appends to the cached buffer).
             KeyCode::Char(c) => {
                 app.edit_type(c);
                 false
