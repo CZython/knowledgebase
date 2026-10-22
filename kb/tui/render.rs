@@ -41,6 +41,7 @@
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Direction, Layout};
 use ratatui::style::{Color, Modifier, Style};
+use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, List as RatList, ListItem, ListState, Paragraph};
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
@@ -324,109 +325,115 @@ fn draw_picker_pane(f: &mut Frame, es: &crate::tui::EditState, rect: ratatui::la
 /// Everything is a pure function of `EditState`, so the display can never
 /// be stale relative to the state (the same `plan()` the commit path runs
 /// is what we render as the "→" footer).
-fn build_value_lines(es: &crate::tui::EditState) -> Vec<String> {
-    let mut out: Vec<String> = Vec::new();
+fn build_value_lines(es: &crate::tui::EditState) -> Vec<Line<'static>> {
+    let mut out: Vec<Line<'static>> = Vec::new();
+
+    let active = Style::default().fg(Color::White).add_modifier(Modifier::BOLD);
+    let caret = Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD);
+    let arrow = Style::default().fg(Color::Green).add_modifier(Modifier::BOLD);
+    let star = Style::default().fg(Color::Green);
+    let ctx_dot = Style::default().fg(Color::DarkGray);
+    let ctx_text = Style::default().fg(Color::Gray);
+    let dim = Style::default().fg(Color::DarkGray);
 
     if es.field.is_list() {
         if es.in_list_select {
-            // **Selection mode** (list field) — a *combined* list: every
-            // existing item + a trailing `<new token>` slot (a "I want to
-            // add a new one" entry the user's `←`/`→` spec calls for).
-            // The `▶` marker is on `list_high` (Total: `list_high` is
-            // always in `0..=current_list.len()`).
-            out.push(String::from("  existing tags (Selection)"));
+            // ---- SELECTION: `▶` on `list_high`, `·` on the others ----
             for (i, t) in es.current_list.iter().enumerate() {
-                let marker = if i == es.list_high { "    ▶ • " } else { "        " };
-                out.push(format!("{}{}", marker, truncate(t.as_str(), 60)));
+                let on = i == es.list_high;
+                out.push(Line::from(vec![
+                    Span::styled(
+                        if on { "▶  " } else { "·  " },
+                        if on { arrow } else { ctx_dot },
+                    ),
+                    Span::styled(truncate(t.as_str(), 60), if on { active } else { ctx_text }),
+                ]));
             }
-            // The trailing `<new token>` slot — this is index
-            // `current_list.len()` (the "add here" entry in the user's
-            // spec: "selecting `<new>` brings it back to the normal add
-            // new tag / element empty input buffer").
-            let new_idx = es.current_list.len();
-            let marker = if new_idx == es.list_high { "    ▶ " } else { "      " };
-            out.push(format!("{}<new token>", marker));
-            out.push(String::new());
-            // Cached buffer (preserved from the prior Buffer mode —
-            // "cache it so when user accidentally presses a right arrow,
-            // they can immediately select `<new>`, and continue editing
-            // the cached buffer").
-            out.push(format!(
-                "  cached buffer: '{}'",
-                truncate(es.value.as_str(), 60)
-            ));
+            let on = es.current_list.len() == es.list_high;
+            out.push(Line::from(vec![
+                Span::styled(
+                    if on { "▶  " } else { "·  " },
+                    if on { arrow } else { ctx_dot },
+                ),
+                Span::styled("<new>", if on { active } else { ctx_text }),
+            ]));
+            out.push(Line::from(""));
+            out.push(Line::from(vec![
+                Span::styled("·  ", ctx_dot),
+                Span::styled("cached: ", ctx_text),
+                Span::styled(format!("'{}'", truncate(es.value.as_str(), 60)), ctx_text),
+            ]));
         } else {
-            // **Buffer mode** (list field) — the existing items as a
-            // *flat list* (the pre-Selection UX), the buffer token, the
-            // live-candidate list. (The Selection mode is the new path
-            // for removing / loading existing items; this layout is
-            // preserved for *add-new* — the zsh "completion" idiom.)
+            // ---- BUFFER: existing items are context (`·`); candidates
+            // are `»`/`·`; the *buffer itself* is the one `▶`. ----
             if es.current_list.is_empty() {
-                out.push(String::from("  existing: (none)"));
+                out.push(Line::from(vec![
+                    Span::styled("·  ", ctx_dot),
+                    Span::styled("(no existing)", ctx_text),
+                ]));
             } else {
-                out.push(String::from("  existing:"));
-                for (i, t) in es.current_list.iter().enumerate() {
-                    let marker = if es.list_high == i { "    ▶ " } else { "      " };
-                    out.push(format!("{}{}", marker, truncate(t.as_str(), 60)));
+                for t in es.current_list.iter() {
+                    out.push(Line::from(vec![
+                        Span::styled("·  ", ctx_dot),
+                        Span::styled(truncate(t.as_str(), 60), ctx_text),
+                    ]));
                 }
             }
-            out.push(String::new());
-            out.push(format!(
-                "  buffer:   '{}'",
-                truncate(es.value.as_str(), 60)
-            ));
-            out.push(String::new());
-            // Live candidate list (a pure function of buffer + corpus).
+            out.push(Line::from(""));
             if es.suggestions.is_empty() {
-                out.push(String::from("  (no matches — keep typing)"));
+                out.push(Line::from(vec![
+                    Span::styled("   ", dim),
+                    Span::styled("(no matches — keep typing)", ctx_text),
+                ]));
             } else {
-                out.push(String::from("  candidates:"));
                 for (i, t) in es.suggestions.iter().take(40).enumerate() {
-                    let marker = if i == es.sug_cursor { "    ▶ • " } else { "        " };
-                    out.push(format!("{}{}", marker, truncate(t.as_str(), 60)));
+                    let on = i == es.sug_cursor;
+                    out.push(Line::from(vec![
+                        Span::styled(
+                            if on { "»  " } else { "·  " },
+                            if on { star } else { ctx_dot },
+                        ),
+                        Span::styled(truncate(t.as_str(), 60), if on { active } else { ctx_text }),
+                    ]));
                 }
             }
+            out.push(Line::from(""));
+            // The list buffer has *no* text cursor (Left/Right enter Selection
+            // mode instead), so no block caret — just the token typed, bold.
+            out.push(Line::from(vec![
+                Span::styled("▶  ", arrow),
+                Span::styled("<buffer> ", ctx_text),
+                Span::styled(truncate(es.value.as_str(), 60), active),
+            ]));
         }
-        out.push(String::new());
+        out.push(Line::from(""));
     } else {
-        // **Scalar field**, buffer mode — render the buffer with a
-        // *visible cursor glyph* at `value_cursor`. A `|` in monospace is
-        // the classic text-cursor marker for a terminal TUI.
-        let value = es.value.clone();
-        let mut before = String::new();
-        let mut after = String::new();
-        let mut at = 0usize;
-        let cursor = es.value_cursor;
-        for c in value.chars() {
-            if at == cursor {
-                after.push(c);
-            } else {
-                before.push(c);
-            }
-            at += 1;
-        }
-        if at != cursor {
-            // Cursor is past the end (shouldn't happen; `value_cursor`
-            // is always clamped to `0..=chars.len()` on every mutation) —
-            // render the full value + cursor at the end.
-            before = value;
-        }
-        out.push(format!(
-            "  buffer (cursor:): {}|{}",
-            truncate(before.as_str(), 60),
-            truncate(after.as_str(), 60)
-        ));
-        out.push(String::new());
+        // ---- SCALAR: `▶` + a `▮` block caret at the insert point ----
+        let before: String = es.value.chars().take(es.value_cursor).collect();
+        let after: String = es.value.chars().skip(es.value_cursor).collect();
+        let mut spans = vec![
+            Span::styled("▶  ", arrow),
+            Span::styled(format!("{}  ", es.field.label()), ctx_text),
+        ];
+        if !before.is_empty() { spans.push(Span::styled(before, active)); }
+        spans.push(Span::styled("▮", caret));
+        if !after.is_empty() { spans.push(Span::styled(after, active)); }
+        out.push(Line::from(spans));
+        out.push(Line::from(""));
     }
 
-    // Pending commit plan — the *same* ops `Enter` will apply, so what the
-    // user sees is exactly what will happen (no surprise writes).
-    let plan = crate::tui::EditState::plan(es);
+    let plan = es.plan();
     if plan.is_empty() {
-        out.push(String::from("  → no-op commit (nothing to change)"));
+        out.push(Line::from(vec![
+            Span::styled("   ", dim),
+            Span::styled("no-op commit (nothing to change)", ctx_text),
+        ]));
     } else {
         for op in &plan {
-            out.push(format!("  → {}", describe_op(op)));
+            out.push(Line::from(vec![
+                Span::styled("   ", dim),
+                Span::styled(describe_op(op), ctx_text),
+            ]));
         }
     }
     out
@@ -511,7 +518,7 @@ fn draw_edit(f: &mut Frame, app: &App, es: &crate::tui::EditState, area: ratatui
             // at a glance which of the two things `↑/↓` / `Enter` are
             // addressing.
             let lines = build_value_lines(es);
-            let widget = Paragraph::new(lines.join("\n"))
+            let widget = Paragraph::new(lines)
                 .block(
                     Block::default().borders(Borders::ALL).title(format!(
                         " {} — {}",

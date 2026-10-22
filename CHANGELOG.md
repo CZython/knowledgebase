@@ -62,6 +62,17 @@ the API is still moving; breaking changes are called out explicitly.
   re-serialized in one pass, no intermediate state ever appears. Dedup is
   still case-sensitive (a "mTLS" vs "mtls" commit adds a *new* token, it does
   not replace the old).
+- **A clearer, color-coded value pane (presentation).** The edit-metadata
+  value buffer was a single dim block where you couldn't tell what a key would
+  touch. It now uses a **one-triangle** cue: the single green `▶` marks the
+  one row your *current* keys act on (the **input buffer** in buffer/scalar
+  mode, with a bright `▮` block caret at the exact insert point; the
+  **highlighted item** in Selection mode — `Backspace` removes / `Enter` loads
+  it). `»` marks the highlighted candidate in buffer mode (the one `Tab` fills
+  from), and dim `·` marks read-only context (existing items, the cached
+  buffer). All the `•` dots are gone. So you can always tell at a glance
+  whether your arrows are typing, picking a candidate, or walking existing
+  tags. Live-verified in a terminal for all three sub-modes.
 - **`v` key in the browse/read views opens the selected page in `$EDITOR`**
   (`$VISUAL` → `$EDITOR` → `vi`), reusing the existing `edit in place` path —
   in-editor flow from the TUI without leaving it. Gated on the `editor`
