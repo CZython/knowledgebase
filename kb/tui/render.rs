@@ -90,17 +90,11 @@ fn draw_browse(f: &mut Frame, app: &App, area: ratatui::layout::Rect) {
         })
         .collect();
 
-    let title = if app.filter_text.is_empty() {
-        let hint = if cfg!(feature = "editor") {
-            String::from(" e edit metadata · v $EDITOR · q quit")
-        } else {
-            String::from(" e edit metadata · q quit")
-        };
-        format!(" {} page(s) — ↑↓/jk move · / filter · Enter open · a alias · r roots ·{}", app.view.len(), hint)
-    } else {
-        format!(" {} page(s) of {} match '{}' — / to edit filter · Esc to clear",
-                app.view.len(), app.rows.len(), app.filter_text)
-    };
+    // The keybinding legend lives in the **status bar** (bottom), not the
+    // pane title. The title is identity + count only — this is what removes
+    // the duplicate/truncated legend we saw in the captures (title AND bar
+    // each used to print the same hints, both clipping).
+    let title = browse_pane_title(app.view.len(), app.rows.len(), &app.filter_text);
     // White-on-black (inverted default) so the selected row stands out
     // regardless of the terminal's own fg/bg colors.
     let widget = RatList::new(items)
@@ -148,8 +142,11 @@ fn draw_read(f: &mut Frame, app: &App, rs: &ReadState, area: ratatui::layout::Re
     // The panes row: body (~70%) | outline (~30%, or 0 if the page has no
     // headings).
     let has_outline = !rs.outline.is_empty();
+    // 60/40 (was 70/30): the outline pane needs enough width that `L<n>` +
+    // indent + title sit on one line at common terminal widths; too narrow
+    // and a `Paragraph` wraps mid-word (see the H2→"sub/section" break).
     let pane_constraints = if has_outline {
-        [Constraint::Percentage(70), Constraint::Percentage(30)]
+        [Constraint::Percentage(60), Constraint::Percentage(40)]
     } else {
         [Constraint::Percentage(100), Constraint::Length(0)]
     };
@@ -188,25 +185,29 @@ fn draw_read(f: &mut Frame, app: &App, rs: &ReadState, area: ratatui::layout::Re
     f.render_widget(body_widget, panes[0]);
 
     if has_outline {
-        let entries: Vec<String> = rs
+        // A `List`, not a `Paragraph`: each heading stays on **one row** and
+        // never wraps mid-word (the old `Paragraph` + `Wrap{trim:false}` broke
+        // `L3  H2 section` into two visible lines in narrow panes). Rows are
+        // indented per heading level; the `L<n>` anchor is dimmed (the title
+        // is the focus) and `¶` marks an empty-title heading (same convention
+        // as the body's `read_line`). Palette-driven: `p.dim` for the anchor,
+        // `p.label` for the title, `p.label` for the empty-title glyph, and
+        // `p.selection` for the highlight (so the pane is visually ready for
+        // M8.2's Enter-to-jump — today there's no state, so no row stands out).
+        let rows: Vec<ratatui::widgets::ListItem> = rs
             .outline
             .iter()
             .map(|(line, level, title)| {
-                let indent = "  ".repeat(*level as usize - 1);
-                let marker = if title.is_empty() { "¶" } else { "" };
-                // `L<line>` gives the user a jump target (M8.2: `Enter` on
-                // an outline row will scroll the body to `line`). Show it
-                // dimmed so the title stays the visual focus.
-                format!("{} L{line:<4}{}{}", indent, marker, title)
+                ratatui::widgets::ListItem::new(outline_line(p, *line, *level as usize, title))
             })
             .collect();
-        let outline_widget = Paragraph::new(entries.join("\n"))
-            .block(
-                Block::default()
-                    .borders(Borders::ALL)
-                    .title(format!(" outline — {} section(s)", rs.outline.len())),
-            )
-            .wrap(ratatui::widgets::Wrap { trim: false });
+        let outline_widget = RatList::new(rows).block(
+            Block::default()
+                .borders(Borders::ALL)
+                .title(format!(" outline — {} section(s)  (M8.2: Enter will jump)", rs.outline.len())),
+        );
+        // No `ListState` (yet) — no highlight. When M8.2 lands, swap to
+        // `render_stateful_widget` + an `outline_cursor` field on `ReadState`.
         f.render_widget(outline_widget, panes[1]);
     }
 
@@ -293,9 +294,11 @@ fn draw_picker_pane(f: &mut Frame, p: &Palette, es: &crate::tui::EditState, rect
     let items: Vec<ListItem> = rows.into_iter().map(ListItem::new).collect();
     let widget = RatList::new(items)
         .highlight_style(p.selection)
-        .block(Block::default().borders(Borders::ALL).title(
-            " pick a field — ↑/↓ move · Enter open field · Esc back · q quit",
-        ));
+        .block(
+            // Keybinding legend lives in the status bar (one place), not here —
+            // this title is identity only. (Removes the dual/truncated legend.)
+            Block::default().borders(Borders::ALL).title(" pick a field"),
+        );
     let mut state = ListState::default();
     state.select(Some(es.field_cursor));
     f.render_stateful_widget(widget, rect, &mut state);
@@ -907,9 +910,36 @@ fn browse_row(p: &Palette, row: &PageRow, width: usize) -> Vec<Span<'static>> {
     out
 }
 
-/// The *textual* form of a browse row — test helper only, so it flattens
-/// the span list to a `String` that `assert_eq!` can compare against the
-/// old shape. Never rendered.
+/// The Browse pane's **title**: identity + count only. The keybinding legend
+/// lives in the status bar (the one place a user glances for "what do I
+/// press"), intentionally *not* here — two copies of the same hints (title +
+/// bar) is exactly what clip-doubled on real terminal widths. Pure over the
+/// three inputs so the contract is testable without a `Frame`.
+fn browse_pane_title(view_len: usize, rows_len: usize, filter: &str) -> String {
+    if filter.is_empty() {
+        format!(" {} page(s)", view_len)
+    } else {
+        format!(" {} of {} match '{}'", view_len, rows_len, filter)
+    }
+}
+
+/// One **outline row**: a single `Line` (never a wrapping `Paragraph`), so a
+/// heading like `L3  H2 section` stays on one visible line and is never
+/// broken mid-word. The row is indented per heading level; the `L<line>`
+/// anchor carries the jump target and is styled `p.dim` (the title is the
+/// focus, styled `p.label`); an empty title gets the `¶` glyph (the body's
+/// `read_line` convention) in the label role. Pure over the palette + entry,
+/// one row per heading, in body order.
+fn outline_line(p: &Palette, line: usize, level: usize, title: &str) -> Line<'static> {
+    let indent = "  ".repeat(level.saturating_sub(1));
+    let anchor = Span::styled(format!("{indent}L{line:<4}"), p.dim);
+    if title.is_empty() {
+        Line::from(vec![anchor, Span::styled("¶".to_string(), p.label)])
+    } else {
+        Line::from(vec![anchor, Span::styled(title.to_string(), p.label)])
+    }
+}
+
 #[cfg(test)]
 fn browse_row_text(row: &PageRow, width: usize) -> String {
     let p = Palette::default_palette();
@@ -1168,5 +1198,49 @@ mod tests {
         assert!(!out.is_empty(), "positive width never yields an empty row");
         assert!(cells(&out) <= 20, "fallback still bounded: {out:?}");
         assert!(out.contains('…'), "an overflowed locator is still marked: {out:?}");
+    }
+
+    /// **Single-legend contract (the #1 fix)**: the Browse pane's title is
+    /// identity + count **only** — it must NOT contain the keybinding hints
+    /// (`↑`/`/`/`Enter`/`q quit`). The legend lives in the status bar, so a
+    /// keybinding never appears in two places at once (which is what clip-doubled
+    /// on real-width terminals: `…e edit m…` in the title AND `…q q` in the bar).
+    #[test]
+    fn browse_pane_title_carries_no_keybinding_legend() {
+        let empty = browse_pane_title(4, 4, "");
+        assert_eq!(empty, " 4 page(s)", "no filter -> just the count");
+        let filt = browse_pane_title(3, 11, "rust");
+        assert_eq!(filt, " 3 of 11 match 'rust'", "with filter -> match summary");
+        // Neither form may leak any of the legend's tokens:
+        for legend in ["↑", "jk", "/ filter", "Enter open", "e edit", "q quit"] {
+            assert!(!empty.contains(legend), "title {empty:?} leaked legend {legend:?}");
+            assert!(!filt.contains(legend), "title {filt:?} leaked legend {legend:?}");
+        }
+    }
+
+    /// **Outline line contract (the #2 fix)**: each heading row is a *single*
+    /// `Line` (two spans: dim `L<n>` anchor + label title), indented by level,
+    /// and never splits mid-word the way the old wrapping `Paragraph` did
+    /// (`H2 section` → `sub` / `section`). An empty title gets `¶` in the label
+    /// role. This is the visual precondition for M8.2's Enter-to-jump.
+    #[test]
+    fn outline_line_is_single_line_per_heading() {
+        let p = Palette::default_palette();
+        let h2 = outline_line(&p, 3, 2, "H2 section");
+        assert_eq!(h2.spans.len(), 2, "anchor + title, one line");
+        // indent (level-1)*2 spaces + "L" + line padded to 4 wide.
+        assert_eq!(h2.spans[0].content.as_ref(), "  L3   ", "indent(1)=2sp + L3 anchor");
+        assert_eq!(h2.spans[0].style, p.dim, "anchor styled dim");
+        assert_eq!(h2.spans[1].content.as_ref(), "H2 section", "title intact — not wrapped");
+        assert_eq!(h2.spans[1].style, p.label, "title styled as label");
+        // Deeper level -> deeper indent, same shape.
+        let h4 = outline_line(&p, 9, 4, "H4 detail");
+        assert_eq!(h4.spans[0].content.as_ref(), "      L9   ", "indent(3)=6sp");
+        assert_eq!(h4.spans[0].style, p.dim);
+        // Empty title -> the ¶ glyph (the body's `read_line` convention).
+        let blank = outline_line(&p, 1, 1, "");
+        assert_eq!(blank.spans.len(), 2);
+        assert_eq!(blank.spans[1].content.as_ref(), "¶", "empty title uses the paragraph glyph");
+        assert_eq!(blank.spans[1].style, p.label);
     }
 }

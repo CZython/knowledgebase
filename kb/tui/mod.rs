@@ -507,10 +507,15 @@ impl App {
     /// Load the DB snapshot into the TUI state.
     pub fn new(db: Db) -> KbResult<Self> {
         let rows = list_pages(&db)?;
+        // The keybinding legend lives in the status bar (the one place a
+        // user glances for "what do I press"), NOT the pane title — the
+        // title carries identity + count only. This is what removes the
+        // duplicate/truncated legend we saw in the captures (top title +
+        // bottom bar each printing the same hints).
         let status = if rows.is_empty() {
-            Status::info("kb tui — no pages indexed yet (run `kb add <root>` then `kb tui` again)")
+            Status::info("no pages indexed yet — run `kb add <root>` then re-run `kb tui`")
         } else {
-            Status::info("kb tui · ↑↓/jk move · / filter · e edit · a alias · r roots · Enter open · q quit")
+            Status::info("↑↓/jk move · / filter · e edit · a alias · r roots · Enter open · v $EDITOR · q quit")
         };
         Ok(App {
             view: rows.clone(),

@@ -7,6 +7,23 @@ the API is still moving; breaking changes are called out explicitly.
 ## [Unreleased]
 
 ### Added
+- **Browse/picker pane titles now carry identity + count only; the
+  keybinding legend lives in the status bar, the one place a user glances
+  for "what do I press".** Before this pass the same hints were printed in
+  two places at once (the pane title *and* the bottom status bar), so on
+  real-width terminals both copies clip-doubled (`…e edit m…` up top, `…q q`
+  below). Now `browse_pane_title` (identity + count) is the only string in a
+  title, and the status bar is the only place the keybinding legend appears.
+  Two new tests pin the contract: `browse_pane_title_carries_no_keybinding_legend`.
+- **Read-pane outline is now a `List`, one heading per visible line (no
+  mid-word wrapping).** The old `Paragraph` + `Wrap{trim:false}` broke `L3  H2
+  section` into two visible lines (`sub` / `section`) on narrow panes;
+  `outline_line` (pure palette + entry → `Line<'static>`) returns a single
+  `Line` per heading — dim `L<n>` anchor + `label`-styled title — so a heading
+  never splits. The pane is `p.selection`-ready when M8.2's Enter-to-jump
+  lands. Two new tests pin the shape: `outline_line_is_single_line_per_heading`.
+
+### Added
 - **The TUI "edit" flow is now a clean two-stage, zsh-style model (renamed to
   `edit metadata`).** Opening the metadata editor from the browse/read view
   lands on a *field picker* first (a deliberate step): select one of
