@@ -75,3 +75,9 @@ crossterm = "0.28"
 # ratatui/unicode internals already compile it; we use it directly to
 # truncate to *cells* so CJK/fullwidth titles don't blow past the edge.
 unicode-width = "0.2"
+# `--palette` file format + `StyleSpec` serde (P1): TOML is human-editable
+# and `serde` gives us structured deserialization with `deny_unknown_fields`.
+# Only `kb-user` links them, feature-gated behind `tui`, so a hardened build
+# never pulls them into its dep tree.
+serde = { version = "1", features = ["derive"] }
+toml  = "0.8"

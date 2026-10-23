@@ -120,7 +120,11 @@ kb add /root --json
 kb tag-alias --add "rust async" --canonical "async"
 
 # 8. TUI (user build only).
-kb tui
+kb tui                          # browse / read / edit, ratatui-powered
+kb tui --palette colorblind     # red→magenta, green→cyan (no red/green pair)
+kb tui --palette mono           # foreground-only; selection = REVERSED
+kb tui --palette my.toml        # a custom file (every role must be present)
+kb tui --list-palettes          # swatch table of the shipped palettes
 ```
 
 Every verb has `--help`; every write is idempotent under a matching
@@ -182,6 +186,8 @@ Prereq for the `verus` stage: a Verus install on `$PATH` and `z3` at
 .
 ├── kb/                  # the shared CLI *body* (main.rs, diff.rs, tui/)
 │                        #   included by both packages via include!()
+│   └── tui/             #   the TUI module: input/, render/, palette.rs,
+│                        #   + palettes/{default,colorblind,mono}.toml
 ├── kb-user/             # the full build: default = ["editor","tui"]
 ├── kb-hardened/         # the agent build: default = []   (TUI + editor compiled out)
 ├── kb-core/             # pure + Verus-verified core (no I/O, no deps)

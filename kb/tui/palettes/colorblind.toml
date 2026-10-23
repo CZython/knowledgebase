@@ -1,0 +1,50 @@
+# Colorblind-safe: no red/green pair anywhere. Red → Magenta, Green →
+# Blue/Cyan. Meaning is *also* double-encoded via the symbols that are
+# hard-coded in render.rs (▸ / ▮ / » / ◆ / ◇ / · / !), so the palette is
+# strictly a recolor and the semantic survives even in monochrome.
+
+[label]
+fg   = "cyan"
+bold = true
+
+[default]
+fg = "white"
+
+[dim]
+fg = "dark-gray"
+
+[active]
+fg   = "cyan"
+bold = true                # ▸
+
+[caret]
+fg   = "white"
+bold = true                # ▮
+
+[hint]
+fg = "dark-gray"
+
+[gated]
+fg   = "blue"
+bold = true                # ◆ (has search_required_phrase)
+
+[open]
+fg = "dark-gray"           # ◇ (no gate)
+
+[info]
+fg = "cyan"
+
+[success]
+fg = "blue"                # was green
+
+[error]
+fg   = "magenta"
+bold = true                # was red
+
+[selection]
+fg = "black"
+bg = "white"
+
+[selection_ctx]
+fg = "white"
+bg = "dark-gray"

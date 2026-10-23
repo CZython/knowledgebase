@@ -26,7 +26,7 @@ description = "kb — the full knowledge-base CLI (interactive TUI + $EDITOR flo
 [features]
 default = ["editor", "tui"]
 editor = []
-tui = ["dep:ratatui", "dep:crossterm", "dep:unicode-width"]
+tui = ["dep:ratatui", "dep:crossterm", "dep:unicode-width", "dep:serde", "dep:toml"]
 
 [[bin]]
 name = "kb"
@@ -51,4 +51,10 @@ ratatui   = { workspace = true, optional = true }
 crossterm = { workspace = true, optional = true }
 # Display-width measurement for the TUI's bounded browse rows — used only
 # when the `tui` feature is on (render.rs), so a hardened build never links it.
-unicode-width = { workspace = true, optional = true }
+ unicode-width = { workspace = true, optional = true }
+ # `--palette` support (P1): `toml` parses the user/palette TOML files and
+ # `serde` + `serde_derive` give us structured deserialization of `StyleSpec`
+ # and `Palette` with `deny_unknown_fields`. Feature-gated behind `tui` so a
+ # hardened build never links them.
+ serde   = { workspace = true, optional = true }
+ toml    = { workspace = true, optional = true }

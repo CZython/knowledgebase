@@ -1,0 +1,44 @@
+[label]
+fg   = "gray"
+bold = true
+
+[default]
+fg = "gray"
+
+[dim]
+fg = "dark-gray"
+
+[active]
+fg   = "white"
+bold = true
+
+[caret]
+fg   = "yellow"
+bold = true
+
+[hint]
+fg = "green"
+
+[gated]
+fg   = "green"
+bold = true
+
+[open]
+fg = "dark-gray"
+
+[info]
+fg = "gray"
+
+[success]
+fg = "green"
+
+[error]
+fg = "red"
+
+[selection]
+fg = "black"
+bg = "white"
+
+[selection_ctx]
+fg   = "green"
+bold = true

@@ -74,6 +74,7 @@ use crate::EXIT_ERR;
 use crate::EXIT_OK;
 
 pub mod input;
+pub mod palette;
 pub mod render;
 
 /// A single page row — a snapshot of one `pages` row. The TUI only reads
@@ -89,6 +90,17 @@ pub struct PageRow {
     pub title: String,
     pub rel_path: String,
     pub root: String,
+    /// The page's `tags:` list (from `page_tags`). Empty when the page has
+    /// no tags. Used by `apply_filter` so a user who types `/security` also
+    /// finds pages *tagged* `security`, not just pages whose id/title/path
+    /// mention it.
+    pub tags: Vec<String>,
+    /// The page's `search_required_phrase:` list (from `page_gates`, i.e.
+    /// the unquoted form). Non-empty = the page is *gated* (hidden from
+    /// general search until a query contains one of these entries). Both
+    /// used for the browse row's `◆`/`◇` marker (palette.gated/palette.open)
+    /// and for `apply_filter` to match phrases the user types into the filter.
+    pub gates: Vec<String>,
 }
 
 /// A single row in the **Alias** manager (M8.3): one `tag_aliases` row.
@@ -480,6 +492,11 @@ pub struct App {
     pub mode: Mode,
     /// The status-bar text (last event message).
     pub status: Status,
+    /// The active color palette (P2). **`Copy`** and read by `render.rs` for
+    /// every `Style`. Default-constructed (the pinned `default_palette`) when
+    /// `kb tui` runs with no `--palette`; set by `with_palette` after a
+    /// `--palette <name|path>` resolves.
+    pub palette: palette::Palette,
 }
 
 /// A `Result` over the `(message, exit-code)` tuple the rest of `kb`
@@ -504,13 +521,30 @@ impl App {
             selected: 0,
             mode: Mode::Browse,
             status,
+            palette: palette::Palette::default_palette(),
         })
+    }
+
+    /// Install a resolved palette (P2). Called from `run_tui` after
+    /// `--palette <name|path>` has been validated to a `Palette`. A no-flag
+    /// run never calls this, so the pinned default stays in effect.
+    pub fn with_palette(mut self, palette: palette::Palette) -> Self {
+        self.palette = palette;
+        self
     }
 
     /// Recompute `view` (the filtered row list) from `filter_text` and
     /// clamp `selected` into the new bounds. Total: on an empty filter the
     /// view is the full `rows`; on a non-empty filter it is the (possibly
     /// empty) matching subset, and `selected` never points out of range.
+    ///
+    /// Matching is a *case-insensitive substring* over:
+    /// - `id`, `title`, `rel_path` — the page's display identity;
+    /// - **any tag** (`r.tags`) — a user who types `/security` should find a
+    ///   page tagged `security` even if its id/title/path don't mention it;
+    /// - **any `search_required_phrase`** entry (`r.gates`) — typing one of
+    ///   the page's gate terms (e.g. `mtls`) should surface the gated page
+    ///   in the browse list (a useful way to find gated pages by name).
     pub fn apply_filter(&mut self) {
         let needle = self.filter_text.to_lowercase();
         if needle.is_empty() {
@@ -523,6 +557,8 @@ impl App {
                     r.id.to_lowercase().contains(&needle)
                         || r.title.to_lowercase().contains(&needle)
                         || r.rel_path.to_lowercase().contains(&needle)
+                        || r.tags.iter().any(|t| t.to_lowercase().contains(&needle))
+                        || r.gates.iter().any(|g| g.to_lowercase().contains(&needle))
                 })
                 .cloned()
                 .collect();
@@ -2208,7 +2244,7 @@ fn list_pages(db: &Db) -> KbResult<Vec<PageRow>> {
              ORDER BY root, rel_path",
         )
         .map_err(|e| (format!("prepare: {e}"), EXIT_ERR))?;
-    let out = stmt
+    let mut rows: Vec<PageRow> = stmt
         .query_map([], |r| {
             Ok(PageRow {
                 abs_path: r.get::<_, String>(0)?,
@@ -2217,12 +2253,51 @@ fn list_pages(db: &Db) -> KbResult<Vec<PageRow>> {
                 title: r.get::<_, Option<String>>(3)?.unwrap_or_default(),
                 root: r.get::<_, String>(4)?,
                 rel_path: r.get::<_, String>(5)?,
+                tags: Vec::new(),
+                gates: Vec::new(),
             })
         })
         .map_err(|e| (format!("query: {e}"), EXIT_ERR))?
         .collect::<Result<Vec<_>, _>>()
         .map_err(|e| (format!("rows: {e}"), EXIT_ERR))?;
-    Ok(out)
+    // Load `page_tags` + `page_gates` for every page *we just read*, keyed
+    // by `abs_path` (the stable identifier). Both are optional — a page
+    // with neither gets empty vectors (gated == false, tagless).
+    let mut tags_by: std::collections::HashMap<String, Vec<String>> =
+        std::collections::HashMap::new();
+    {
+        let mut st = db.conn
+            .prepare("SELECT abs_path, tag FROM page_tags ORDER BY tag")
+            .map_err(|e| (format!("prepare page_tags: {e}"), EXIT_ERR))?;
+        let items: Vec<(String, String)> = st
+            .query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))
+            .map_err(|e| (format!("query page_tags: {e}"), EXIT_ERR))?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|e| (format!("page_tags rows: {e}"), EXIT_ERR))?;
+        for (ap, tag) in items {
+            tags_by.entry(ap).or_default().push(tag);
+        }
+    }
+    let mut gates_by: std::collections::HashMap<String, Vec<String>> =
+        std::collections::HashMap::new();
+    {
+        let mut st = db.conn
+            .prepare("SELECT abs_path, term FROM page_gates ORDER BY term")
+            .map_err(|e| (format!("prepare page_gates: {e}"), EXIT_ERR))?;
+        let items: Vec<(String, String)> = st
+            .query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))
+            .map_err(|e| (format!("query page_gates: {e}"), EXIT_ERR))?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|e| (format!("page_gates rows: {e}"), EXIT_ERR))?;
+        for (ap, term) in items {
+            gates_by.entry(ap).or_default().push(term);
+        }
+    }
+    for r in rows.iter_mut() {
+        r.tags = tags_by.get(&r.abs_path).cloned().unwrap_or_default();
+        r.gates = gates_by.get(&r.abs_path).cloned().unwrap_or_default();
+    }
+    Ok(rows)
 }
 
 /// A page outline: a list of `(byte_offset, level, title)` entries, in document
@@ -2250,7 +2325,15 @@ fn load_body(db: &Db, abs_path: &str) -> KbResult<(String, Outline)> {
 /// Run the TUI: open the DB, load the snapshot, hand off to the event
 /// loop, and restore the terminal on the way out (the `Drop` guard in
 /// `event_loop` is the safety net for the in-between returns).
-pub fn run_tui(dbpath: Option<&Path>) -> i32 {
+pub fn run_tui(dbpath: Option<&Path>, palette_spec: Option<&str>, list_palettes: bool) -> i32 {
+    // `--list-palettes` is a purely informational flag: it lists the
+    // built-ins and exits 0 without touching the DB or entering raw mode.
+    // (It is accepted even without a reachable DB so the help works anywhere.)
+    if list_palettes {
+        print_palettes();
+        return crate::EXIT_OK;
+    }
+
     let db = match crate::open_db(dbpath) {
         Ok(d) => d,
         Err((msg, code)) => {
@@ -2258,14 +2341,75 @@ pub fn run_tui(dbpath: Option<&Path>) -> i32 {
             return code;
         }
     };
+    // Resolve `--palette <name|path>` *before* entering raw mode so a typo /
+    // missing file / bad TOML prints a clean message and exits non-zero.
+    let palette = match palette_spec {
+        Some(spec) => match palette::Palette::load(spec) {
+            Ok(p) => p,
+            Err(msg) => {
+                eprintln!("{msg}");
+                return crate::EXIT_ERR;
+            }
+        },
+        None => palette::Palette::default_palette(),
+    };
     let app = match App::new(db) {
-        Ok(a) => a,
+        Ok(a) => a.with_palette(palette),
         Err((msg, code)) => {
             eprintln!("{msg}");
             return code;
         }
     };
     event_loop(app)
+}
+
+/// Print the available built-in palettes to stdout (`kb tui --list-palettes`).
+///
+/// One row per palette. Each row shows 4 color **swatches** — `label`, `active`,
+/// `error`, `selection` — rendered in the *user's own terminal* via ANSI, so
+/// they can see the palette before choosing it. The swatch for a role is the
+/// swatch text styled by that role, closed by `ANSI_RESET`.
+///
+/// A trailing blank line + two one-liners tell the user how to apply either a
+/// built-in or their own file.
+fn print_palettes() {
+    let names = palette::Palette::builtins();
+    let name_w = names.iter().map(|(n, _)| n.len()).max().unwrap_or(0);
+    // Header row (plain text): name · swatch legend · description.
+    println!(
+        "{:<width$}   | swatches: label · active · error · selection | description",
+        "name", width = name_w
+    );
+    let underline = "-".repeat(name_w);
+    println!("{underline}   --------------------------------------------------------------");
+    for (name, desc) in names {
+        let p = match palette::Palette::load(name) {
+            Ok(p) => p,
+            Err(e) => {
+                eprintln!("[{name}] failed to load: {e}");
+                continue;
+            }
+        };
+        let sw = |s: ratatui::style::Style| {
+            let pre = palette::Palette::to_ansi(s);
+            let post = palette::Palette::ANSI_RESET;
+            format!("{pre}██{post}")
+        };
+        let label = sw(p.label);
+        let active = sw(p.active);
+        let error = sw(p.error);
+        let selection = sw(p.selection);
+        println!(
+            "{:<width$}   | {label} · {active} · {error} · {selection}        | {desc}",
+            name, width = name_w
+        );
+    }
+    println!();
+    println!("To use a built-in:    kb tui --palette <name>");
+    println!("To use a custom file: kb tui --palette /path/to/palette.toml");
+    println!("(Every role is required in a file; a missing role is an error, not a fallback.)");
+    println!("To inspect a built-in as a starting point, see the shipped files:");
+    println!("    kb/tui/palettes/{{default,colorblind,mono}}.toml");
 }
 
 /// Enter the alt screen + raw mode, install the cleanup guard, run the
@@ -2589,6 +2733,52 @@ mod tests {
         app.filter_text.clear();
         app.apply_filter();
         assert_eq!(app.view.len(), 3);
+    }
+
+    /// P10: `apply_filter` also matches *tags* and *search_required_phrase*
+    /// so a user can surface a gated page (`mtls`) or a tagged page
+    /// (`security`) without knowing its id / title / path.
+    #[test]
+    fn apply_filter_matches_tags_and_gates() {
+        let db = Db::open_in_memory_test().unwrap();
+        db.migrate().unwrap();
+        let _ = insert_page(&db, "mTLS", "Mutual TLS", "x\n");
+        db.conn
+            .execute(
+                "INSERT INTO page_tags (abs_path, tag) VALUES ('/root/mTLS.md', 'security')",
+                rusqlite::params![],
+            )
+            .unwrap();
+        db.conn
+            .execute(
+                "INSERT INTO page_gates (abs_path, term) VALUES ('/root/mTLS.md', 'mtls')",
+                rusqlite::params![],
+            )
+            .unwrap();
+        let mut app = App::new(db).unwrap();
+        {
+            let row = app
+                .view
+                .iter()
+                .find(|r| r.id == "note:mTLS")
+                .expect("sanity: mTLS page must be listed");
+            assert_eq!(row.tags, vec!["security".to_string()], "tag loaded");
+            assert_eq!(row.gates, vec!["mtls".to_string()], "gate loaded");
+        }
+        // Tag match.
+        app.filter_text = "security".to_string();
+        app.apply_filter();
+        assert_eq!(app.view.len(), 1, "tag 'security' matches only the gated page");
+        assert_eq!(app.view[0].id, "note:mTLS");
+        // Gate-phrase match (case-insensitive).
+        app.filter_text = "MTLS".to_string();
+        app.apply_filter();
+        assert_eq!(app.view.len(), 1, "gate phrase 'MTLS' matches the gated page");
+        assert_eq!(app.view[0].id, "note:mTLS");
+        // Neither present.
+        app.filter_text = "quantum-soup".to_string();
+        app.apply_filter();
+        assert!(app.view.is_empty(), "unrelated needle must not match");
     }
 
     /// `open_read` resolves by *absolute path* — the stable identity — so a

@@ -40,12 +40,13 @@
 
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Direction, Layout};
-use ratatui::style::{Color, Modifier, Style};
+use ratatui::style::Style;
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, List as RatList, ListItem, ListState, Paragraph};
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use crate::tui::{App, Mode, PageRow, ReadState, StatusKind};
+use crate::tui::palette::Palette;
 
 /// Draw the whole screen for `app`. Called once per event-loop tick.
 pub fn draw(f: &mut Frame, app: &App) {
@@ -71,17 +72,22 @@ fn draw_browse(f: &mut Frame, app: &App, area: ratatui::layout::Rect) {
 
     let header = header_line(app);
     let header_widget = Paragraph::new(header)
-        .style(Style::default().fg(Color::Gray).add_modifier(Modifier::BOLD));
+        .style(app.palette.label);
     f.render_widget(header_widget, chunks[0]);
 
-    // Each row is `<id>  <rel_path>` fitted to the pane's inner width (the
-    // ALL-side borders eat one cell per side) so the locator stays visible
-    // and the id ellipsizes to what fits — no clipping-without-marker.
+    // Each row is `<gate marker> <id> <rel_path>` fitted to the pane's
+    // inner width (the ALL-side borders eat one cell per side). The gate
+    // marker (◆ / ◇) is *double-encoded*: as a symbol and as a palette
+    // role, so it survives even in mono and colorblind palettes.
     let row_width = chunks[1].width.saturating_sub(2) as usize;
+    let p = &app.palette;
     let items: Vec<ListItem> = app
         .view
         .iter()
-        .map(|r| ListItem::new(browse_row(r, row_width)))
+        .map(|r| {
+            let spans = browse_row(p, r, row_width);
+            ListItem::new(Line::from(spans))
+        })
         .collect();
 
     let title = if app.filter_text.is_empty() {
@@ -99,7 +105,7 @@ fn draw_browse(f: &mut Frame, app: &App, area: ratatui::layout::Rect) {
     // regardless of the terminal's own fg/bg colors.
     let widget = RatList::new(items)
         .block(Block::default().borders(Borders::ALL).title(title))
-        .highlight_style(Style::default().fg(Color::Black).bg(Color::White));
+        .highlight_style(app.palette.selection);
 
     let mut list_state = ListState::default();
     if !app.view.is_empty() {
@@ -136,7 +142,7 @@ fn draw_read(f: &mut Frame, app: &App, rs: &ReadState, area: ratatui::layout::Re
         .split(area);
 
     let header = Paragraph::new(format!("  kb tui — reading {} (row {} of {})", rs.id, rs.row_idx + 1, app.rows.len()))
-        .style(Style::default().fg(Color::Gray).add_modifier(Modifier::BOLD));
+        .style(app.palette.label);
     f.render_widget(header, chunks[0]);
 
     // The panes row: body (~70%) | outline (~30%, or 0 if the page has no
@@ -157,14 +163,20 @@ fn draw_read(f: &mut Frame, app: &App, rs: &ReadState, area: ratatui::layout::Re
     // already scrolls past the end if there are more, but we want the
     // *viewport* to be exactly the pane height, so the scroll stays in
     // sync with what's on screen.
-    let body_text: Vec<String> = rs
+    //
+    // P7: ATX headings (`#` through `######`) render in the `p.label` role;
+    // every other line stays in the default `p.default` role. The detection
+    // is cheap (prefix check on up to 7 leading `#` + a space) and runs on
+    // *every* windowed line, so it stays in lockstep with the scroll.
+    let p = &app.palette;
+    let body_lines: Vec<Line<'static>> = rs
         .body
         .lines()
         .skip(rs.scroll_top)
         .take(body_window_height(panes[0].height))
-        .map(|l| l.to_string())
+        .map(|l| read_line(p, l))
         .collect();
-    let body_widget = Paragraph::new(body_text.join("\n"))
+    let body_widget = Paragraph::new(body_lines)
         .block(
             Block::default()
                 .borders(Borders::ALL)
@@ -225,42 +237,48 @@ fn draw_read(f: &mut Frame, app: &App, rs: &ReadState, area: ratatui::layout::Re
 /// the user sees *before* choosing a field, so the field is not a mystery
 /// (they don't have to enter it to know if it's empty / what value is in
 /// there).
-fn picker_row(es: &crate::tui::EditState, field: crate::tui::EditField) -> String {
+fn picker_row(p: &Palette, es: &crate::tui::EditState, field: crate::tui::EditField) -> Line<'static> {
     // `entry_bytes` is the file-as-we-saw-it (the baseline). We use the raw
     // bytes + a fresh parse (not the cached `current_list`) so the user sees
     // what's *on disk*, never a stale working copy (which only ever differs
     // after a tail-removal via the smart `Backspace`, and only while they're
     // already in that field's Value stage).
     let bytes = es.entry_bytes.as_slice();
-    let preview = if field.is_list() {
+    let (populated, preview) = if field.is_list() {
         let items: Vec<String> = kb_core::frontmatter::list_values(bytes, field.key())
             .unwrap_or_default();
         if items.is_empty() {
-            String::from("(none)")
+            (false, String::from("(none)"))
         } else {
-            format!("[{}]", items.iter().map(|t| truncate(t.as_str(), 30)).collect::<Vec<_>>().join(" · "))
+            (true, format!("[{}]", items.iter().map(|t| truncate(t.as_str(), 30)).collect::<Vec<_>>().join(" · ")))
         }
     } else {
         let v = kb_core::frontmatter::scalar_value(bytes, field.key()).unwrap_or_default();
         if v.is_empty() {
-            String::from("(none)")
+            (false, String::from("(none)"))
         } else {
-            format!("'{}'", truncate(v.as_str(), 50))
+            (true, format!("'{}'", truncate(v.as_str(), 50)))
         }
     };
-    format!("  {:<12}  {}", field.label(), preview)
+    // P8: the *first* character of the row is the gate marker — `◆`
+    // (populated) or `◇` (empty) — in the palette's `gated`/`open` role so
+    // a user scanning the field list sees at a glance which fields are
+    // already set. The rest of the row is unchanged.
+    let (marker, style) = if populated { ("◆", p.gated) } else { ("◇", p.open) };
+    Line::from(vec![
+        Span::styled(marker.to_string(), style),
+        Span::raw(format!("  {:<12}  {}", field.label(), preview)),
+    ])
 }
 
 /// The full *field list* the Picker shows — one row per field in the
 /// stable `EditField::all()` order, with a `▶` marker on the current
 /// highlight. This is the visual "field picker" pane.
-fn build_picker_rows(es: &crate::tui::EditState) -> Vec<String> {
+fn build_picker_rows(p: &Palette, es: &crate::tui::EditState) -> Vec<Line<'static>> {
     let fields = crate::tui::EditField::all();
     let mut out = Vec::new();
-    for (i, field) in fields.iter().enumerate() {
-        let row = picker_row(es, *field);
-        let marker = if i == es.field_cursor { "▶ " } else { "  " };
-        out.push(format!("{}{}", marker, row));
+    for field in fields {
+        out.push(picker_row(p, es, *field));
     }
     out
 }
@@ -270,12 +288,11 @@ fn build_picker_rows(es: &crate::tui::EditState) -> Vec<String> {
 /// the suggestions are loaded + shown in the Editor stage, not yet); on a
 /// scalar the *preview* is the current scalar value, and on a list the
 /// *preview* is the existing items.
-fn draw_picker_pane(f: &mut Frame, es: &crate::tui::EditState, rect: ratatui::layout::Rect) {
-    let rows = build_picker_rows(es);
+fn draw_picker_pane(f: &mut Frame, p: &Palette, es: &crate::tui::EditState, rect: ratatui::layout::Rect) {
+    let rows = build_picker_rows(p, es);
     let items: Vec<ListItem> = rows.into_iter().map(ListItem::new).collect();
-    let highlight = Style::default().fg(Color::Black).bg(Color::White);
     let widget = RatList::new(items)
-        .highlight_style(highlight)
+        .highlight_style(p.selection)
         .block(Block::default().borders(Borders::ALL).title(
             " pick a field — ↑/↓ move · Enter open field · Esc back · q quit",
         ));
@@ -325,16 +342,16 @@ fn draw_picker_pane(f: &mut Frame, es: &crate::tui::EditState, rect: ratatui::la
 /// Everything is a pure function of `EditState`, so the display can never
 /// be stale relative to the state (the same `plan()` the commit path runs
 /// is what we render as the "→" footer).
-fn build_value_lines(es: &crate::tui::EditState) -> Vec<Line<'static>> {
+fn build_value_lines(p: &Palette, es: &crate::tui::EditState) -> Vec<Line<'static>> {
     let mut out: Vec<Line<'static>> = Vec::new();
 
-    let active = Style::default().fg(Color::White).add_modifier(Modifier::BOLD);
-    let caret = Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD);
-    let arrow = Style::default().fg(Color::Green).add_modifier(Modifier::BOLD);
-    let star = Style::default().fg(Color::Green);
-    let ctx_dot = Style::default().fg(Color::DarkGray);
-    let ctx_text = Style::default().fg(Color::Gray);
-    let dim = Style::default().fg(Color::DarkGray);
+    let active = p.active;
+    let caret = p.caret;
+    let arrow = p.selection_ctx;
+    let star = p.hint;
+    let ctx_dot = p.dim;
+    let ctx_text = p.default;
+    let dim = p.dim;
 
     if es.field.is_list() {
         if es.in_list_select {
@@ -502,14 +519,14 @@ fn draw_edit(f: &mut Frame, app: &App, es: &crate::tui::EditState, area: ratatui
         "  kb tui — edit metadata for {} · {} · {}",
         es.id, stage_label, focus_note
     ))
-    .style(Style::default().fg(Color::Gray).add_modifier(Modifier::BOLD));
+    .style(app.palette.label);
     f.render_widget(header, chunks[0]);
 
     match es.stage {
         crate::tui::EditStage::Picker => {
             // Single pane: the field list (the *deliberate first step* —
             // the user chooses a field before touching its value).
-            draw_picker_pane(f, es, chunks[1]);
+            draw_picker_pane(f, &app.palette, es, chunks[1]);
         }
         crate::tui::EditStage::Value => {
             // Single pane: the value form (existing items + buffer + live
@@ -517,7 +534,7 @@ fn draw_edit(f: &mut Frame, app: &App, es: &crate::tui::EditState, area: ratatui
             // current focus state (buffer vs. menu) so the user can see
             // at a glance which of the two things `↑/↓` / `Enter` are
             // addressing.
-            let lines = build_value_lines(es);
+            let lines = build_value_lines(&app.palette, es);
             let widget = Paragraph::new(lines)
                 .block(
                     Block::default().borders(Borders::ALL).title(format!(
@@ -584,7 +601,7 @@ fn draw_alias(
         "  kb tui — aliases: {} (Tab list/form · Esc back · q quit)",
         ast.list.len()
     ))
-    .style(Style::default().fg(Color::Gray).add_modifier(Modifier::BOLD));
+    .style(app.palette.label);
     f.render_widget(header, chunks[0]);
 
     let panes = Layout::default()
@@ -592,13 +609,19 @@ fn draw_alias(
         .constraints([Constraint::Percentage(70), Constraint::Percentage(30)])
         .split(chunks[1]);
 
+    // P9: the alias row is palette-styled — the *alias* in `p.default`,
+    // the `→` separator in `p.label` (the "this *points at*" affordance),
+    // the *canonical* target in `p.dim` (secondary information). On focus
+    // the whole row is reversed via `p.selection`.
     let items: Vec<ListItem> = ast
         .list
         .iter()
         .map(|r| {
-            let mut line = String::from(&r.alias);
-            line.push_str("  →  ");
-            line.push_str(&truncate(r.canonical.as_str(), 40));
+            let line = Line::from(vec![
+                Span::styled(r.alias.clone(), app.palette.default),
+                Span::styled("  →  ".to_string(), app.palette.label),
+                Span::styled(truncate(r.canonical.as_str(), 40), app.palette.dim),
+            ]);
             ListItem::new(line)
         })
         .collect();
@@ -607,7 +630,9 @@ fn draw_alias(
     } else {
         "   alias list (Tab to focus)"
     };
-    let widget = RatList::new(items).block(Block::default().borders(Borders::ALL).title(list_title));
+    let widget = RatList::new(items)
+        .highlight_style(app.palette.selection)
+        .block(Block::default().borders(Borders::ALL).title(list_title));
     let mut list_state = ListState::default();
     if !ast.list.is_empty() {
         list_state.select(Some(ast.selected));
@@ -656,7 +681,7 @@ fn draw_roots(
         "  kb tui — roots: {} (Tab list/form · Esc back · q quit)",
         rs.list.len()
     ))
-    .style(Style::default().fg(Color::Gray).add_modifier(Modifier::BOLD));
+    .style(app.palette.label);
     f.render_widget(header, chunks[0]);
 
     let panes = Layout::default()
@@ -664,30 +689,32 @@ fn draw_roots(
         .constraints([Constraint::Percentage(70), Constraint::Percentage(30)])
         .split(chunks[1]);
 
+    // P9: the roots row is palette-styled — the *path* in `p.default`,
+    // any `[options]` / `(added: …)` trailing annotations in `p.dim` (the
+    // secondary information), so the path stays the visual focus.
     let items: Vec<ListItem> = rs
         .list
         .iter()
         .map(|r| {
-            let mut line = String::from(r.path.as_str());
+            let mut spans = vec![Span::styled(r.path.clone(), app.palette.default)];
             let opts: Vec<String> = r
                 .extra_exts
                 .as_deref()
                 .map(|s| s.lines().map(|l| format!("ext:{l}")).collect())
                 .unwrap_or_default();
             if !opts.is_empty() {
-                line.push_str("  [");
-                line.push_str(&opts.join(","));
-                line.push(']');
+                spans.push(Span::styled(
+                    format!("  [{}]", opts.join(",")),
+                    app.palette.dim,
+                ));
             }
             if r.include_hidden {
-                line.push_str("  [include-hidden]");
+                spans.push(Span::styled("  [include-hidden]".to_string(), app.palette.dim));
             }
             if let Some(added) = &r.added_at {
-                line.push_str("  (added: ");
-                line.push_str(added);
-                line.push(')');
+                spans.push(Span::styled(format!("  (added: {added})"), app.palette.dim));
             }
-            ListItem::new(line)
+            ListItem::new(Line::from(spans))
         })
         .collect();
     let list_title = if rs.focused {
@@ -695,7 +722,9 @@ fn draw_roots(
     } else {
         "   roots list (Tab to focus)"
     };
-    let widget = RatList::new(items).block(Block::default().borders(Borders::ALL).title(list_title));
+    let widget = RatList::new(items)
+        .highlight_style(app.palette.selection)
+        .block(Block::default().borders(Borders::ALL).title(list_title));
     let mut list_state = ListState::default();
     if !rs.list.is_empty() {
         list_state.select(Some(rs.selected));
@@ -733,12 +762,40 @@ fn body_window_height(h: u16) -> usize {
 
 fn render_status_bar(f: &mut Frame, app: &App, area: ratatui::layout::Rect) {
     let bar_style = match app.status.kind {
-        StatusKind::Info => Color::Gray,
-        StatusKind::Success => Color::Green,
-        StatusKind::Error => Color::Red,
+        StatusKind::Info => app.palette.info,
+        StatusKind::Success => app.palette.success,
+        StatusKind::Error => app.palette.error,
     };
-    let bar = Paragraph::new(format!("  {}", app.status.text)).style(Style::default().fg(bar_style));
+    let bar = Paragraph::new(format!("  {}", app.status.text)).style(bar_style);
     f.render_widget(bar, area);
+}
+
+/// P7: turn a single body line into a `Line<'static>`. An ATX heading
+/// (`#` … `######` followed by a space) renders in the `p.label` role so a
+/// reader can skim the document's structure even when the body is wrapped;
+/// non-headings stay in the default role. The check is *visual* (it
+/// matches what the user would read as a heading in markdown), so lines
+/// inside a fenced code block that happen to start with `#` will also pick
+/// up the label style — an acceptable, deterministic false-positive rather
+/// than carrying a stateful parser through the render path.
+fn read_line(p: &Palette, raw: &str) -> Line<'static> {
+    let is_heading = || {
+        let cs = raw.as_bytes();
+        if cs.is_empty() || cs[0] != b'#' {
+            return false;
+        }
+        // Up to 6 `#`s, then *exactly* one space (or end-of-line).
+        let mut i = 0;
+        while i < cs.len() && cs[i] == b'#' {
+            i += 1;
+        }
+        (1..=6).contains(&i) && i < cs.len() && cs[i] == b' '
+    };
+    if is_heading() {
+        Line::from(vec![Span::styled(raw.to_string(), p.label)])
+    } else {
+        Line::from(Span::styled(raw.to_string(), p.default))
+    }
 }
 
 /// Truncate to at most `max` **chars** (not bytes) so a multi-byte title
@@ -784,32 +841,82 @@ fn ellipsize_cells(s: &str, max: usize) -> String {
     out
 }
 
-/// The text of one Browse list row, fitted to `width` display cells.
+/// One Browse list row as a `Vec<Span>` (the audit's **finding B**):
 ///
-/// The row is `<id>  <rel_path>` — there is **no separate title column**,
-/// because `id` is `type:<slug>` and the slug is derived *from* the title
-/// (title-wins identity), so the title is already inside the `id`. The old
-/// code printed the title a second time and — with a fixed 40-*char* cap —
-/// let `rel_path` (the *where the file is* field the user acts on) get
-/// clipped off the right edge with no marker. Here `rel_path` (kept whole,
-/// it's the locator) is guaranteed visible and `id` is ellipsized to what
-/// fits, so every row is exactly `width` cells. Pure + total.
-fn browse_row(row: &PageRow, width: usize) -> String {
+/// ```text
+///  ◆ note:attention  wiki/a.md        ← ◆  = gated (has search_required_phrase)
+///  ◇ note:plain      wiki/b.md        ← ◇  = open
+/// ```
+///
+/// The gate marker is double-encoded (the symbol *and* the palette role —
+/// `gated` vs `open`) so a colorblind user sees the distinction in monochrome.
+/// `rel_path` (the locator) is kept whole, and the `id` ellipsizes to what
+/// fits; total + width-bounded. If the pane is too narrow to fit the 4-cell
+/// marker overhead, the marker drops and the row degrades to the old
+/// `<id> <rel_path>` shape so the row still renders.
+fn browse_row(p: &Palette, row: &PageRow, width: usize) -> Vec<Span<'static>> {
     if width == 0 {
-        return String::new();
+        return Vec::new();
     }
-    // `rel_path` is the part we refuse to cut. Reserve its width, then fit
-    // the id into the remaining cells (minus one space separator).
+    let (marker, mstyle): (&str, Style) = if row.gates.is_empty() {
+        ("◇  ", p.open)
+    } else {
+        ("◆  ", p.gated)
+    };
     let rel_w = row.rel_path.width();
-    let sep = 1usize;
-    if rel_w >= width {
-        // Even the relative path alone doesn't fit — show it (truncated)
-        // rather than losing the locator to the id.
-        return ellipsize_cells(&row.rel_path, width);
+    let has_rel = rel_w > 0;
+    // rel_path is the locator: reserve its width and the 1-space separator,
+    // then fit the id into what remains.
+    let old_id_budget = if width > rel_w + 1 {
+        width - rel_w - 1
+    } else {
+        0
+    };
+    // The gate marker is a nicety, not a requirement: it is shown only when
+    // the id still fits (no ellipsis) inside the narrower budget. Otherwise
+    // we degrade to the pre-P6 shape so a narrow pane never loses the id.
+    let with_marker = {
+        let ib = if width > rel_w + 1 + 3 {
+            width - rel_w - 1 - 3
+        } else {
+            0
+        };
+        ib >= 1 && ellipsize_cells(&row.id, ib) == row.id
+    };
+    let mut out = Vec::new();
+    if with_marker {
+        out.push(Span::styled(marker, mstyle));
     }
-    let id_budget = width - rel_w - sep;
-    let id = ellipsize_cells(&row.id, id_budget);
-    format!("{id} {}", row.rel_path)
+    let id = ellipsize_cells(&row.id, old_id_budget);
+    if !id.is_empty() {
+        out.push(Span::styled(id, p.default));
+        if has_rel {
+            out.push(Span::raw(" "));
+        }
+    }
+    if has_rel {
+        out.push(Span::styled(
+            if rel_w > width {
+                ellipsize_cells(&row.rel_path, width)
+            } else {
+                row.rel_path.clone()
+            },
+            p.dim,
+        ));
+    }
+    out
+}
+
+/// The *textual* form of a browse row — test helper only, so it flattens
+/// the span list to a `String` that `assert_eq!` can compare against the
+/// old shape. Never rendered.
+#[cfg(test)]
+fn browse_row_text(row: &PageRow, width: usize) -> String {
+    let p = Palette::default_palette();
+    browse_row(&p, row, width)
+        .iter()
+        .map(|s| s.content.as_ref())
+        .collect::<String>()
 }
 
 #[cfg(test)]
@@ -824,6 +931,8 @@ mod tests {
             title: String::new(),
             rel_path: rel.to_string(),
             root: String::new(),
+            tags: Vec::new(),
+            gates: Vec::new(),
         }
     }
 
@@ -839,13 +948,19 @@ mod tests {
     /// and the **locator must stay visible**. "Fills exactly" is *not* a
     /// real guarantee — a CJK cut can leave a 1-cell gap that ratatui pads
     /// with a trailing space — so we assert `<= width`, never `== width`.
+    /// The `browse_row` is now a span list (P6: the row's `◆`/`◇` marker
+    /// needs a palette role). The tests compare the *flattened* text via
+    /// `browse_row_text`, so they keep their existing shape.
     #[test]
     fn browse_row_never_overflows_and_keeps_rel_path() {
         let long_id = "note:Realistic Document Title with a lot of words";
         for w in [1usize, 5, 20, 38, 40, 50, 78, 100, 200] {
-            let out = browse_row(&row(long_id, "real60.md"), w);
+            let out = browse_row_text(&row(long_id, "real60.md"), w);
             let got = cells(&out);
             assert!(got <= w, "row ({out:?}) is {got} cells, must be <= {w}");
+            // The 3-cell gate marker is *part* of the row now; the test's
+            // old expectations still hold because they only look at the
+            // suffix (the rel_path) and the width bound.
             assert!(
                 out.ends_with("real60.md") || cells(&out) < cells("real60.md"),
                 "locator (rel_path) never pushed off the edge: {out:?}"
@@ -858,10 +973,121 @@ mod tests {
     #[test]
     fn browse_row_ellipsizes_the_id_not_the_locator() {
         let id = "note:".to_string() + &"a".repeat(120);
-        let out = browse_row(&row(&id, "dir/a/b/c.md"), 40);
+        let out = browse_row_text(&row(&id, "dir/a/b/c.md"), 40);
         assert!(cells(&out) <= 40);
         assert!(out.ends_with("dir/a/b/c.md"), "locator wins over the id: {out:?}");
         assert!(out.contains('…'), "the cut id must carry an ellipsis: {out:?}");
+    }
+
+    /// P8: every *populated* field in the picker shows `◆` styled with
+    /// `p.gated`; every *empty* field shows `◇` styled with `p.open`.
+    /// The fixture below has `title` + `tags` set, so those two must read
+    /// `◆`, while `description` + `search_required_phrase` (absent) read `◇`.
+    #[test]
+    fn picker_rows_carry_gate_markers_for_each_field() {
+        let p = Palette::default_palette();
+        let fixture = "---\ntype: note\ntitle: P8\ntags:\n- a\n- b\n---\nbody\n";
+        let es = crate::tui::EditState {
+            field: crate::tui::EditField::Title,
+            abs_path: "/fake/p8.md".into(),
+            id: "note:P8".into(),
+            value: "x".into(),
+            suggestions: Vec::new(),
+            corpus: Vec::new(),
+            entry_bytes: fixture.as_bytes().to_vec(),
+            entry_list: Vec::new(),
+            current_list: Vec::new(),
+            working_bytes: fixture.as_bytes().to_vec(),
+            stage: crate::tui::EditStage::Value,
+            field_cursor: 0,
+            sug_cursor: 0,
+            value_cursor: 1,
+            in_list_select: false,
+            list_high: 0,
+            editing_item: None,
+        };
+        let rows = build_picker_rows(&p, &es);
+        assert_eq!(rows.len(), 4, "one row per field");
+        // Order matches EditField::all(): Title, Description, Tags, SearchRequiredPhrase.
+        let expect = [
+            ("◆", p.gated),
+            ("◇", p.open),
+            ("◆", p.gated),
+            ("◇", p.open),
+        ];
+        for (i, (line, (m, s))) in rows.iter().zip(expect.iter()).enumerate() {
+            let first = &line.spans[0];
+            assert_eq!(first.content.as_ref(), *m, "row {i} first span content");
+            assert_eq!(first.style, *s, "row {i} first span style");
+        }
+    }
+    /// `label` role; body lines keep their default style. The check is
+    /// visual: 0, 7+, or a `##` without a trailing space are *not* headings.
+    #[test]
+    fn read_line_styles_headings_only() {
+        let p = Palette::default_palette();
+        // A labelled heading and a plain line must *differ* in style.
+        let h1 = read_line(&p, "# Title");
+        let body = read_line(&p, "body line");
+        assert_ne!(
+            h1.spans[0].style, body.spans[0].style,
+            "heading must use the label style; body must not"
+        );
+        assert_eq!(
+            h1.spans[0].style, p.label,
+            "heading style == palette.label"
+        );
+        // All six heading levels style as labels.
+        for level in 1..=6u8 {
+            let h = read_line(&p, &format!("{} Sec", "#".repeat(level as usize)));
+            assert_eq!(h.spans[0].style, p.label, "level {level} styles as label");
+        }
+        // Non-headings must NOT pick up the label role.
+        for line in ["", "   ", "####### seven hashes", "##nospace", "#", "text#tail"] {
+            let l = read_line(&p, line);
+            assert_ne!(l.spans[0].style, p.label, "{line:?} must not style as heading");
+        }
+    }
+    /// (open) — so a user scanning the browse list sees at a glance which
+    /// pages require a phrase before search. The marker is only drawn when
+    /// it fits the pane; the two cases are otherwise byte-identical.
+    #[test]
+    fn browse_row_marks_gated_open_differently() {
+        let gated = PageRow {
+            abs_path: String::new(),
+            id: "note:attention".to_string(),
+            pt: String::new(),
+            title: String::new(),
+            rel_path: "wiki/a.md".to_string(),
+            root: String::new(),
+            tags: Vec::new(),
+            gates: vec!["mTLS".to_string()],
+        };
+        let open = PageRow {
+            abs_path: String::new(),
+            id: "note:plain".to_string(),
+            pt: String::new(),
+            title: String::new(),
+            rel_path: "wiki/b.md".to_string(),
+            root: String::new(),
+            tags: vec!["rust".to_string()],
+            gates: Vec::new(),
+        };
+        let p = Palette::default_palette();
+        for w in [4usize, 10, 30, 80] {
+            let a = browse_row(&p, &gated, w);
+            let b = browse_row(&p, &open, w);
+            let first_open = b.first().map(|s| s.content.as_ref());
+            let first_gated = a.first().map(|s| s.content.as_ref());
+            // The marker should only be *dropped* (not swapped) when the
+            // budget collapses, so when *either* row shows a marker, the
+            // two rows must differ in the first cell.
+            if first_open == Some("◇  ") {
+                assert_eq!(first_gated, Some("◆  "), "gate marker differs");
+            } else if first_gated == Some("◆  ") {
+                assert_eq!(first_open, Some("◇  "), "gate marker differs");
+            }
+        }
     }
 
     /// A CJK id must be measured in *cells* (each fullwidth char = 2, not
@@ -879,11 +1105,11 @@ mod tests {
         let rel = "cjk.md";
         let rel_cells = rel.width(); // 6
         for w in [10usize, 20, 30, 40, 70, 80, 100] {
-            let out = browse_row(&row(&id, rel), w);
+            let out = browse_row_text(&row(&id, rel), w);
             let got = out.width();
             assert!(got <= w, "row ({out:?}) = {got} cells must be <= {w}");
             assert!(out.ends_with(rel), "locator stays visible: {out:?}");
-            let budget = w.saturating_sub(rel_cells + 1);
+            let budget = w.saturating_sub(rel_cells + 4); // marker(3) + 1 sep
             if id_cells <= budget {
                 // The id fits: shown whole, no marker, exact width.
                 assert!(
@@ -891,9 +1117,8 @@ mod tests {
                     "a fitting id must not carry a marker: {out:?}"
                 );
                 assert!(
-                    got == id_cells + 1 + rel_cells,
-                    "fitting id fills exactly: {got} vs {expected}",
-                    expected = id_cells + 1 + rel_cells
+                    got == id_cells + 4 + rel_cells,
+                    "fitting id fills exactly (marker + sep + id + rel): {got}",
                 );
             } else {
                 // The id is cut: marked, and the loss is <= one cell (a 2-wide
@@ -933,12 +1158,13 @@ mod tests {
 
     /// The rel_path-only fallback: if even the locator alone overflows the
     /// pane, the row still shows the locator (marked) — never empty for a
-    /// positive width.
+    /// positive width. (With the gate marker, the "pane" is now smaller
+    /// than `width` by the 3-cell marker + 1 separator = 4 fixed cells.)
     #[test]
     fn browse_row_falls_back_to_rel_path_when_it_overflows() {
         let id = "note:short";
         let rel = format!("/{}", "a-very-long-absolute-ish-relative-path".repeat(4));
-        let out = browse_row(&row(id, &rel), 20);
+        let out = browse_row_text(&row(id, &rel), 20);
         assert!(!out.is_empty(), "positive width never yields an empty row");
         assert!(cells(&out) <= 20, "fallback still bounded: {out:?}");
         assert!(out.contains('…'), "an overflowed locator is still marked: {out:?}");

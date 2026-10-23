@@ -412,7 +412,19 @@ enum Cmd {
     /// Gated behind the `tui` feature (default on): a hardened build omits
     /// this subcommand entirely and rejects `kb tui` as an unknown command.
     #[cfg(feature = "tui")]
-    Tui,
+    Tui {
+        /// Color palette: a built-in name (`default` / `colorblind` / `mono`,
+        /// listed by `--list-palettes`) or a **path** to a TOML file. When
+        /// omitted, the default palette is used (identical to a no-flag run).
+        /// Resolution happens before the TUI enters raw mode, so a typo /
+        /// missing file / bad TOML prints a clean error and exits non-zero.
+        #[arg(long, value_name = "NAME_OR_PATH")]
+        palette: Option<String>,
+        /// List the built-in palettes (one per line: `<name>\t<description>`)
+        /// and exit without entering the TUI or opening the DB.
+        #[arg(long)]
+        list_palettes: bool,
+    },
 }
 
 /// The section-level write verbs (all bind to the pure `kb-core::section` ops).
@@ -625,8 +637,8 @@ fn run(cli: &Cli) -> i32 {
         // `tui` only exists when the `tui` feature is on (a hardened build
         // rejects the subcommand at parse time, so this arm is unreachable).
         #[cfg(feature = "tui")]
-        Cmd::Tui => {
-            let code = tui::run_tui(cli.db.as_deref());
+        Cmd::Tui { palette, list_palettes } => {
+            let code = tui::run_tui(cli.db.as_deref(), palette.as_deref(), *list_palettes);
             match code {
                 EXIT_OK => Ok(EXIT_OK),
                 c => Err(("tui exited unsuccessfully".into(), c)),

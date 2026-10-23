@@ -76,7 +76,50 @@ the API is still moving; breaking changes are called out explicitly.
 - **`v` key in the browse/read views opens the selected page in `$EDITOR`**
   (`$VISUAL` → `$EDITOR` → `vi`), reusing the existing `edit in place` path —
   in-editor flow from the TUI without leaving it. Gated on the `editor`
-  feature (absent in the hardened build).
+   feature (absent in the hardened build).
+- **`--palette <name|path>` + `--list-palettes` on the TUI.** The TUI's
+  color vocabulary is now the *single source of truth* for every rendered
+  style — `render.rs` no longer names any `Style` / `Color` / `Modifier`
+  directly. Thirteen named roles (`label`, `default`, `dim`, `active`,
+  `caret`, `hint`, `gated`, `open`, `info`, `success`, `error`,
+  `selection`, `selection_ctx`) map to concrete styles via a tiny TOML
+  file, and the roles are *stable* so a user-supplied file (e.g. a
+  personal colorblind palette) only has to re-map colors without touching
+  any render code. Three palettes ship: **`default`** (pinned to the
+  pre-palette baseline), **`colorblind`** (red→magenta, green→cyan/blue),
+  and **`mono`** (foreground-only; the selection role uses REVERSED).
+  `kb tui --list-palettes` renders a small ANSI swatch table of the four
+  most user-visible roles (`label`/`active`/`error`/`selection`) so you
+  can compare without launching the TUI.
+- **Gate markers in the browse list and the field picker.** Every browse
+  row and every field-picker row now *double-encodes* "is this gated?" —
+  a symbol (`◆` for gated / open, `◇` for un-gated) *and* a palette role
+  (`gated` vs `open`) — so a colorblind reader sees the distinction in
+  monochrome. A page is gated when it has one or more
+  `search_required_phrase` entries (the secret-unlock-phrase semantic
+  documented under the `search_required_phrase` rename above); a field is
+  "populated" (and thus `◆`) when it already has a value on disk.
+  Filter (`/`) now also matches *tags* and *gate phrases*, so you can
+  surface a gated page without knowing its id / title / path.
+- **Read-pane heading hierarchy.** ATX headings (`#` through `######`
+  followed by a space) in the read body now render in the palette's
+  `label` role, so the document structure is visually distinguishable
+  from prose (and from a code block that happens to start with `#` — the
+  detection is visual, stateless, and deterministic rather than carrying
+  a markdown parser through the render path).
+- **Palette-styled alias + roots managers.** The alias row splits into
+  *alias* (`p.default`) + `→` (`p.label`) + *canonical* (`p.dim`), and
+  the roots row splits into *path* (`p.default`) + any `[options]` /
+  `(added: …)` trailing annotations (`p.dim`) — the primary identity
+  stays the visual focus in both. Selection highlight on either list now
+  uses `p.selection` (the pinned default is black-on-white; the `mono`
+  palette uses REVERSED).
+- **Tests:** `browse_row_marks_gated_open_differently`,
+  `apply_filter_matches_tags_and_gates`, `read_line_styles_headings_only`,
+  and `picker_rows_carry_gate_markers_for_each_field` pin the new
+  behavior (the marker *symbol*, its *palette role*, and the filter /
+  heading logic) so a future `default.toml` edit cannot silently change
+  what `◆`/`◇` mean to the user.
 
 ### Renamed
 - **The `search_terms` frontmatter field is now `search_required_phrase`.**
