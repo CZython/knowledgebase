@@ -2,10 +2,9 @@
 //!
 //! Every `Style` used in `render.rs` + `input.rs` is expressed as a named
 //! *role*, not an inline `Style::default().fg(Color::Gray)`. The role set
-//! is **stable**; the colors are **user-swapable**. A user who runs in a
-//! terminal with a fixed 2-color palette, or with red-green colorblindness,
-//! can override the roles (or supply a built-in: `default` / `colorblind` /
-//! `mono`) without touching a single `render.rs` line.
+//! is **stable**; the colors are **user-swapable**. A user with red-green
+//! colorblindness can override the roles (or supply a built-in: `default` /
+//! `colorblind`) without touching a single `render.rs` line.
 //!
 //! The palette is a **`Copy` value stored on `App`**, so it is captured in
 //! the same single-thread event loop as everything else — no `Rc`, no
@@ -30,8 +29,8 @@
 //! | `selection_ctx` | sub-selection (an item within a list value)               | —      |
 //!
 //! The symbols are **palette-independent** (they live in `render.rs`, not
-//! here) so a `--palette mono` user still gets the same visual language —
-//! only the foreground/background colors change.
+//! here) so any `--palette` user gets the same visual language — only the
+//! foreground/background colors change.
 
 use ratatui::style::{Color, Modifier, Style};
 
@@ -189,30 +188,37 @@ impl Palette {
     /// inline style cannot silently change the default's colors unless the
     /// author also updates this constructor.
     pub fn default_palette() -> Self {
-        // Mirrors kb/tui/render.rs as of the pre-palette rewrite. Every role
-        // equals the exact inline style render.rs currently paints (Gray/bold
-        // headers, Black-on-White selection, White/bold active value, etc.),
-        // so `--palette default` is *visually identical* to a no-flag run.
+        // The *out-of-the-box* look is colorful, not gray. Roles and their
+        // roles are the invariant (they're the only thing render.rs reads);
+        // the exact colors below are a design choice and may change without
+        // a render.rs edit. Light-* are the ANSI *bright* variants, so the
+        // scheme reads well on a dark terminal.
         Self {
-            label:           Style::default().fg(Color::Gray).add_modifier(Modifier::BOLD),
-            default:         Style::default().fg(Color::Gray),
+            // Headings / panel titles / the `type:` + `→` prefixes: Magenta,
+            // so the *structure* of the screen is its own color family.
+            label:           Style::default().fg(Color::Magenta).add_modifier(Modifier::BOLD),
+            // Body text, row primary value: neutral White, NOT bold — let the
+            // accents (magenta headings, cyan active) do the coloring.
+            default:         Style::default().fg(Color::White),
             dim:             Style::default().fg(Color::DarkGray),
-            active:          Style::default().fg(Color::White).add_modifier(Modifier::BOLD),
+            // The one thing keys act on (value-buffer text): Cyan+BOLD.
+            active:          Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD),
             caret:           Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD),
             // `»` candidate marker (build_value_lines `star`) — plain Green.
             hint:            Style::default().fg(Color::Green),
-            // `◆` gated page (has search_required_phrase) — not yet rendered,
-            // pinned to the "special item" Green+BOLD so it is distinct from
-            // `open` (DarkGray) and from the `»` hint (plain Green).
-            gated:           Style::default().fg(Color::Green).add_modifier(Modifier::BOLD),
-            // `◇` open page (no gate) — not yet rendered, pinned dim.
+            // `◆` gated page (has search_required_phrase): LightGreen+BOLD so it
+            // stands out from `open` (DarkGray) and from the `»` hint (Green).
+            gated:           Style::default().fg(Color::LightGreen).add_modifier(Modifier::BOLD),
+            // `◇` open page (no gate): subtle, one shade below the body.
             open:            Style::default().fg(Color::DarkGray),
             info:            Style::default().fg(Color::Gray),
-            success:         Style::default().fg(Color::Green),
-            // Status Error: plain Red (render.rs line 738 has *no* bold).
-            error:           Style::default().fg(Color::Red),
-            selection:       Style::default().fg(Color::Black).bg(Color::White),
-            // `▶` current item (build_value_lines `arrow`) — Green+BOLD.
+            success:         Style::default().fg(Color::LightGreen),
+            // Status Error: plain LightRed (no bold) — the `!` glyph (see
+            // build_status_line) carries the severity on top of this color.
+            error:           Style::default().fg(Color::LightRed),
+            // Row highlight: black-on-Blue (a saturated, readable selection).
+            selection:       Style::default().fg(Color::Black).bg(Color::Blue),
+            // `▶` current item (build_value_lines `arrow`): Green+BOLD.
             selection_ctx:   Style::default().fg(Color::Green).add_modifier(Modifier::BOLD),
         }
     }
@@ -240,31 +246,6 @@ impl Palette {
             error:           style(Color::Magenta, true),
             selection:       Style::default().fg(Color::Black).bg(Color::White),
             selection_ctx:   Style::default().fg(Color::White).bg(Color::DarkGray),
-        }
-    }
-
-    /// A monochrome palette: every role is `fg` only, `dim`/`hint` use the
-    /// terminal's native DIM modifier, and `selection` uses REVERSED.
-    /// Exists to prove the *symbols* (not the color) carry the meaning —
-    /// a user in a 2-color terminal, or printing the TUI, still reads it.
-    pub fn mono() -> Self {
-        let fg = |c: Color, mods: Modifier| -> Style {
-            Style::default().fg(c).add_modifier(mods)
-        };
-        Self {
-            label:           fg(Color::White, Modifier::BOLD),
-            default:         Style::default(),
-            dim:             fg(Color::White, Modifier::DIM),
-            active:          fg(Color::White, Modifier::BOLD),
-            caret:           fg(Color::White, Modifier::BOLD),
-            hint:            fg(Color::White, Modifier::DIM),
-            gated:           fg(Color::White, Modifier::BOLD),
-            open:            fg(Color::White, Modifier::DIM),
-            info:            Style::default(),
-            success:         fg(Color::White, Modifier::BOLD),
-            error:           fg(Color::White, Modifier::BOLD),
-            selection:       Style::default().add_modifier(Modifier::REVERSED),
-            selection_ctx:   Style::default().add_modifier(Modifier::REVERSED),
         }
     }
 
@@ -328,12 +309,12 @@ impl Palette {
     }
 
     /// Built-in palettes, in display order. `kb tui --list-palettes` shows
-    /// this.
+    /// this. The `default` entry now describes a colored (non-gray) palette,
+    /// so the no-flag run reads as the colorful option it actually is.
     pub fn builtins() -> &'static [(&'static str, &'static str)] {
         const BUILTINS: &[(&str, &str)] = &[
-            ("default",    "the default palette — identical to the no-flag run"),
+            ("default",    "the default palette — the colorful, out-of-the-box look"),
             ("colorblind", "no red/green pair; red → magenta, green → cyan/blue"),
-            ("mono",       "all roles fg-only; selection uses REVERSED"),
         ];
         BUILTINS
     }
@@ -344,7 +325,6 @@ impl Palette {
         Some(match name {
             "default"    => Self::default_palette(),
             "colorblind" => Self::colorblind(),
-            "mono"       => Self::mono(),
             _            => return None,
         })
     }
@@ -422,9 +402,10 @@ impl Palette {
     /// Resolve a user-supplied `--palette` argument to a loaded `Palette`.
     ///
     /// Resolution order:
-    /// 1. a **built-in name** (`default` / `colorblind` / `mono`) — the common
-    ///    case, and the value `kb tui --list-palettes` prints;
-    /// 2. otherwise treat it as a **file path** and parse the TOML from disk.
+    /// 1. a **built-in name** (`default` / `colorblind`) — the common case,
+    ///    and the value `kb tui --list-palettes` prints;
+    /// 2. otherwise treat it as a **file path** (e.g. `~/.kb_config/default.toml`)
+    ///    and parse the TOML from disk.
     ///
     /// Every failure (unknown name, unreadable file, bad TOML, a color typo,
     /// a missing role) becomes an `Err(String)` so the CLI can print it and
@@ -446,38 +427,31 @@ mod tests {
     use super::*;
     use ratatui::style::{Color, Modifier};
 
-    /// The `default_palette()` is *pinned*: it must match the exact inline
-    /// styles that `render.rs` was using before the palette refactor. Any
-    /// change to `render.rs` that wants to *change* the default must also
-    /// change this constructor (and this test).
+    /// The `default_palette()` is *pinned*: the colors below are an explicit
+    /// design choice (colorful, the out-of-the-box look). A change to
+    /// `default_palette()` without a matching update to this test is a bug —
+    /// the palette is no longer "pinned" (a `--palette default` run would
+    /// silently diverge from the no-flag run).
     #[test]
     fn default_palette_is_pinned() {
         let p = Palette::default_palette();
         assert_eq!(p.label,
-            Style::default().fg(Color::Gray).add_modifier(Modifier::BOLD));
-        // `default` mirrors render.rs `ctx_text` (the value-pane body text).
-        assert_eq!(p.default, Style::default().fg(Color::Gray));
+            Style::default().fg(Color::Magenta).add_modifier(Modifier::BOLD));
+        assert_eq!(p.default, Style::default().fg(Color::White));
         assert_eq!(p.dim,     Style::default().fg(Color::DarkGray));
-        // `active` mirrors render.rs value-buffer text (White+BOLD).
         assert_eq!(p.active,
-            Style::default().fg(Color::White).add_modifier(Modifier::BOLD));
+            Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD));
         assert_eq!(p.caret,
             Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD));
-        // `hint` mirrors the `»` candidate marker (plain Green).
         assert_eq!(p.hint,    Style::default().fg(Color::Green));
-        // `gated`/`open` are not yet painted by render.rs — pinned to the
-        // "special item" (Green+BOLD) vs. "dim" (DarkGray) so they are
-        // distinct from each other and from the `»` hint.
         assert_eq!(p.gated,
-            Style::default().fg(Color::Green).add_modifier(Modifier::BOLD));
+            Style::default().fg(Color::LightGreen).add_modifier(Modifier::BOLD));
         assert_eq!(p.open,    Style::default().fg(Color::DarkGray));
         assert_eq!(p.info,    Style::default().fg(Color::Gray));
-        assert_eq!(p.success, Style::default().fg(Color::Green));
-        // Status Error is *unbolded* Red (render.rs line 738).
-        assert_eq!(p.error,   Style::default().fg(Color::Red));
+        assert_eq!(p.success, Style::default().fg(Color::LightGreen));
+        assert_eq!(p.error,   Style::default().fg(Color::LightRed));
         assert_eq!(p.selection,
-            Style::default().fg(Color::Black).bg(Color::White));
-        // `selection_ctx` mirrors the `▶` current-item arrow (Green+BOLD).
+            Style::default().fg(Color::Black).bg(Color::Blue));
         assert_eq!(p.selection_ctx,
             Style::default().fg(Color::Green).add_modifier(Modifier::BOLD));
     }
@@ -495,56 +469,59 @@ mod tests {
     }
 
     /// A fully-specified default TOML file parses and equals the pinned
-    /// default. This is the "no-visual-change-on-default" guarantee,
-    /// machine-checked rather than eyeballed.
+    /// default. This is the "a `--palette <file>` pointing at a TOML that
+    /// matches `default_palette()` produces an *identical* `Palette`"
+    /// guarantee — machine-checked, not eyeballed. The TOML uses the same
+    /// color names as the inline constructor on the other side of the
+    /// equality assert.
     #[test]
     fn default_toml_parses_and_is_pinned() {
         let toml = r#"
- [label]
- fg   = "gray"
- bold = true
+  [label]
+  fg   = "magenta"
+  bold = true
 
- [default]
- fg = "gray"
+  [default]
+  fg = "white"
 
- [dim]
- fg = "dark-gray"
+  [dim]
+  fg = "dark-gray"
 
- [active]
- fg   = "white"
- bold = true
+  [active]
+  fg   = "cyan"
+  bold = true
 
- [caret]
- fg   = "yellow"
- bold = true
+  [caret]
+  fg   = "yellow"
+  bold = true
 
- [hint]
- fg = "green"
+  [hint]
+  fg = "green"
 
- [gated]
- fg   = "green"
- bold = true
+  [gated]
+  fg   = "light-green"
+  bold = true
 
- [open]
- fg = "dark-gray"
+  [open]
+  fg = "dark-gray"
 
- [info]
- fg = "gray"
+  [info]
+  fg = "gray"
 
- [success]
- fg = "green"
+  [success]
+  fg = "light-green"
 
- [error]
- fg = "red"
+  [error]
+  fg = "light-red"
 
- [selection]
- fg = "black"
- bg = "white"
+  [selection]
+  fg = "black"
+  bg = "blue"
 
- [selection_ctx]
- fg   = "green"
- bold = true
- "#;
+  [selection_ctx]
+  fg   = "green"
+  bold = true
+  "#;
         let p = Palette::from_toml(toml).expect("parses");
         // Every role must equal the pinned default.
         let d = Palette::default_palette();
@@ -599,12 +576,12 @@ fg = "definitely-not-a-color"
         assert_eq!(Palette::builtin("not-a-real-palette"), None);
     }
 
-    /// The three *shipped* palette files on disk are valid TOML and define
+    /// The two *shipped* palette files on disk are valid TOML and define
     /// all 13 roles. These are the files a user can `--palette <name>` or
     /// copy as a starting point, so a typo in them is a release blocker.
     #[test]
     fn shipped_palette_files_parse() {
-        for name in ["default", "colorblind", "mono"] {
+        for name in ["default", "colorblind"] {
             // kb-user/../../kb/tui/palettes/<name>.toml
             let p = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
                 .join("../kb/tui/palettes")

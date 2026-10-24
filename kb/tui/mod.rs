@@ -2414,7 +2414,7 @@ fn print_palettes() {
     println!("To use a custom file: kb tui --palette /path/to/palette.toml");
     println!("(Every role is required in a file; a missing role is an error, not a fallback.)");
     println!("To inspect a built-in as a starting point, see the shipped files:");
-    println!("    kb/tui/palettes/{{default,colorblind,mono}}.toml");
+    println!("    kb/tui/palettes/{{default,colorblind}}.toml");
 }
 
 /// Enter the alt screen + raw mode, install the cleanup guard, run the

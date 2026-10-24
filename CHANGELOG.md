@@ -39,7 +39,6 @@ the API is still moving; breaking changes are called out explicitly.
   never splits. The pane is `p.selection`-ready when M8.2's Enter-to-jump
   lands. Two new tests pin the shape: `outline_line_is_single_line_per_heading`.
 
-### Added
 - **The TUI "edit" flow is now a clean two-stage, zsh-style model (renamed to
   `edit metadata`).** Opening the metadata editor from the browse/read view
   lands on a *field picker* first (a deliberate step): select one of
@@ -117,13 +116,14 @@ the API is still moving; breaking changes are called out explicitly.
   `caret`, `hint`, `gated`, `open`, `info`, `success`, `error`,
   `selection`, `selection_ctx`) map to concrete styles via a tiny TOML
   file, and the roles are *stable* so a user-supplied file (e.g. a
-  personal colorblind palette) only has to re-map colors without touching
-  any render code. Three palettes ship: **`default`** (pinned to the
-  pre-palette baseline), **`colorblind`** (red→magenta, green→cyan/blue),
-  and **`mono`** (foreground-only; the selection role uses REVERSED).
-  `kb tui --list-palettes` renders a small ANSI swatch table of the four
-  most user-visible roles (`label`/`active`/`error`/`selection`) so you
-  can compare without launching the TUI.
+   personal colorblind palette) only has to re-map colors without touching
+   any render code. Two palettes ship: **`default`** (the colorful,
+   out-of-the-box look) and **`colorblind`** (red→magenta, green→
+   cyan/blue; for red–green colorblind users). Use `--palette path/to.toml`
+   for a custom file.
+   `kb tui --list-palettes` renders a small ANSI swatch table of the four
+   most user-visible roles (`label`/`active`/`error`/`selection`) so you
+   can compare without launching the TUI.
 - **Gate markers in the browse list and the field picker.** Every browse
   row and every field-picker row now *double-encodes* "is this gated?" —
   a symbol (`◆` for gated / open, `◇` for un-gated) *and* a palette role
@@ -145,16 +145,28 @@ the API is still moving; breaking changes are called out explicitly.
   the roots row splits into *path* (`p.default`) + any `[options]` /
   `(added: …)` trailing annotations (`p.dim`) — the primary identity
   stays the visual focus in both. Selection highlight on either list now
-  uses `p.selection` (the pinned default is black-on-white; the `mono`
-  palette uses REVERSED).
+   uses `p.selection` (the default is black-on-blue).
 - **Tests:** `browse_row_marks_gated_open_differently`,
   `apply_filter_matches_tags_and_gates`, `read_line_styles_headings_only`,
   and `picker_rows_carry_gate_markers_for_each_field` pin the new
   behavior (the marker *symbol*, its *palette role*, and the filter /
   heading logic) so a future `default.toml` edit cannot silently change
   what `◆`/`◇` mean to the user.
+### Removed
+
+- **The `mono` palette is dropped.** It had one audience (a true 2-color
+  terminal or a printed TUI) that is essentially extinct — the only
+  real-world 2-color terminals left are embedded devices over USART, which
+  are not running this TUI. Dropping it also drops the only palette where
+  issue #4 (the "dim locator flips to white on the selected row" blemish)
+  actually shows up — in `default` and `colorblind` the selection is
+  black-on-white / black-on-blue, which is the strongest possible contrast
+  and the symbols already carry the gate meaning. If someone later ships
+  a fixed-2-color build of the TUI it can be re-added as a user-supplied
+  TOML (every role is required in a file, so there's no fallback to guess).
 
 ### Renamed
+
 - **The `search_terms` frontmatter field is now `search_required_phrase`.**
   The old name read as "extra keywords/synonyms that *broaden* recall," which
   is the opposite of what the field does: a page *with* entries is **hidden**

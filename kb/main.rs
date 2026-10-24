@@ -413,9 +413,10 @@ enum Cmd {
     /// this subcommand entirely and rejects `kb tui` as an unknown command.
     #[cfg(feature = "tui")]
     Tui {
-        /// Color palette: a built-in name (`default` / `colorblind` / `mono`,
-        /// listed by `--list-palettes`) or a **path** to a TOML file. When
-        /// omitted, the default palette is used (identical to a no-flag run).
+         /// Color palette: a built-in name (`default` / `colorblind`, listed
+         /// by `--list-palettes`) or a **path** to a TOML file (e.g.
+         /// `~/.kb_config/default.toml`). When omitted, the default palette
+         /// (the colorful out-of-the-box look) is used.
         /// Resolution happens before the TUI enters raw mode, so a typo /
         /// missing file / bad TOML prints a clean error and exits non-zero.
         #[arg(long, value_name = "NAME_OR_PATH")]

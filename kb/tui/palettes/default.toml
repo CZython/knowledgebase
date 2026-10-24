@@ -1,15 +1,22 @@
+# The *colorful* out-of-the-box default. White body text; magenta headings;
+# cyan for the active field; green family for emphasis / gated / success;
+# light-red for error; black-on-blue for the selection bar. This file is a
+# user-editable *starting point* — `kb tui --palette default` reads the
+# inline `default_palette()` in palette.rs, NOT this file (this file exists
+# so a user can copy it to ~/.kb_config/default.toml and tweak colors).
+
 [label]
-fg   = "gray"
+fg   = "magenta"
 bold = true
 
 [default]
-fg = "gray"
+fg = "white"
 
 [dim]
 fg = "dark-gray"
 
 [active]
-fg   = "white"
+fg   = "cyan"
 bold = true
 
 [caret]
@@ -20,25 +27,25 @@ bold = true
 fg = "green"
 
 [gated]
-fg   = "green"
-bold = true
+fg   = "light-green"
+bold = true                # ◆ (has search_required_phrase)
 
 [open]
-fg = "dark-gray"
+fg = "dark-gray"           # ◇ (no gate)
 
 [info]
 fg = "gray"
 
 [success]
-fg = "green"
+fg = "light-green"
 
 [error]
-fg = "red"
+fg = "light-red"           # the `!` glyph marks the severity (not just color)
 
 [selection]
 fg = "black"
-bg = "white"
+bg = "blue"
 
 [selection_ctx]
 fg   = "green"
-bold = true
+bold = true                # ▶ current item
