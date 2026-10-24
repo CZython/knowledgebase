@@ -722,7 +722,7 @@ pub fn append_list_item(data: &[u8], key: &str, value: &str) -> Result<Vec<u8>, 
     }
     // If already a list, append at the tail of the block/inline list.
     match list_values(data, key) {
-        Some(_) => Ok(list_rewrite_add(data, key, &value)),
+        Some(_) => list_rewrite_add(data, key, &value),
         None => {
             // Not a list. If scalar, upgrade; else create a fresh field.
             match scalar_value(data, key) {
@@ -847,11 +847,17 @@ fn list_rewrite_upgrade(data: &[u8], key: &str, scalar: &str, added: &str)
 }
 
 /// Extend an existing list (block or inline) by appending `added`.
-fn list_rewrite_add(data: &[u8], key: &str, added: &str) -> Vec<u8> {
+fn list_rewrite_add(data: &[u8], key: &str, added: &str) -> Result<Vec<u8>, FmError> {
     // SECURITY_REPORT 3.7 — same `from_utf8_lossy` fix.
     let s = String::from_utf8_lossy(data);
     let mut lines: Vec<String> = s.split_inclusive('\n').map(|l| l.to_string()).collect();
-    let idx = locate_key_line(data, key).unwrap_or(0); // guarded by caller
+    // B2: the caller has confirmed the key is a list (via `list_values`), so
+    // `locate_key_line` must find it; but guard the index so a desync (e.g. BOM
+    // shifting line numbers) yields an `Err` rather than an out-of-bounds panic.
+    let idx = locate_key_line(data, key).ok_or(FmError::NotScalar)?;
+    if idx >= lines.len() {
+        return Err(FmError::NotScalar);
+    }
     let line = lines[idx].clone();
     let trimmed = line.trim_start_matches('\u{feff}').trim().to_string();
     if trimmed.contains(':') {
@@ -876,7 +882,7 @@ fn list_rewrite_add(data: &[u8], key: &str, added: &str) -> Vec<u8> {
             parts.push(added.to_string());
             let joined = parts.join(", ");
             lines[idx] = format!("{leading}{}: [{joined}]{nl}", key_part.trim());
-            return join_lines(&lines).into_bytes();
+            return Ok(join_lines(&lines).into_bytes());
         }
     }
     // Block list: append a `- added` line right after the last block item.
@@ -894,7 +900,7 @@ fn list_rewrite_add(data: &[u8], key: &str, added: &str) -> Vec<u8> {
     let leading = &line_at_last[..line_at_last.len() - line_at_last.trim_start().len()];
     let item = format!("{leading}- {}{nl}", added);
     new_lines.insert(last + 1, item);
-    join_lines(&new_lines).into_bytes()
+    Ok(join_lines(&new_lines).into_bytes())
 }
 
 /// Rewrite a list field in place so its *values* are exactly `vals`. (Used by

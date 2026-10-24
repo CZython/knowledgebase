@@ -17,8 +17,7 @@ vstd = { workspace = true }
 [package.metadata.verus]
 verify = true
 
-[lints.rust]
-# The `verus_only` cfg is turned on by Verus during verification; rustc
-# will warn about the unknown cfg otherwise. Mirrors the scaffold the
-# Verus toolchain generates (see `cargo verus new --lib out`).
-unexpected_cfgs = { level = "warn", check-cfg = ['cfg(verus_only)'] }
+[lints]
+# Inherit the workspace lint levels verbatim (`unsafe_code = "forbid"`,
+# plus the Verus `verus_only` check-cfg).
+workspace = true

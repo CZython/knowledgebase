@@ -23,6 +23,10 @@ license.workspace = true
 rust-version.workspace = true
 description = "kb — the full knowledge-base CLI (interactive TUI + $EDITOR flow + every verb): search, browse, and section/patch edits over a Markdown corpus in SQLite/FTS5. Package `kb-user`, binary `kb`."
 
+[lints]
+# Inherit the workspace lint levels verbatim (`unsafe_code = "forbid"`).
+workspace = true
+
 [features]
 default = ["editor", "tui"]
 editor = []

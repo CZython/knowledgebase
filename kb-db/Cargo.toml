@@ -6,6 +6,10 @@ license.workspace = true
 rust-version.workspace = true
 description = "kb-db — the SQLite/FTS5 shell of `kb`: page upsert, root registration + walk, refresh reconcile, and the tag-alias map. Bundled SQLite, sync (no tokio), no system lib."
 
+[lints]
+# Inherit the workspace lint levels verbatim (`unsafe_code = "forbid"`).
+workspace = true
+
 [dependencies]
 kb-core  = { workspace = true }
 rusqlite = { workspace = true }

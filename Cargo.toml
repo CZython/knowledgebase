@@ -14,6 +14,21 @@
 resolver = "2"
 members = ["kb-core", "kb-db", "kb-user", "kb-hardened"]
 
+# Shared lint levels, inherited by every crate (PLAN §9/§10: the whole tree
+# is `unsafe`-free — no `unsafe` in kb-core, kb-db, the CLI body, or any
+# workspace member). `forbid` makes it a hard *error* across the entire
+# project, so a future `unsafe` block (a TUI-backend FFI fix, a raw-pointer
+# shortcut) is a compile error in *any* crate unless someone deliberately
+# opts out with `#[allow(unsafe_code)]` + a reason. Single source of truth —
+# each member inherits this, rather than carrying its own copy.
+[workspace.lints.rust]
+unsafe_code = "forbid"
+# The `verus_only` cfg is turned on by Verus during verification; rustc will
+# warn about the unknown cfg otherwise. Mirrors the scaffold the Verus
+# toolchain generates (see `cargo verus new --lib out`). Required in the
+# workspace so kb-core's `[lints.rust]` can inherit it via `workspace = true`.
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(verus_only)'] }
+
 [workspace.package]
 version = "0.1.0"
 edition = "2021"

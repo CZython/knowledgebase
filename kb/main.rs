@@ -1264,7 +1264,7 @@ fn cmd_search(dbpath: Option<&Path>, query: &str, json: bool, limit: usize) -> K
         // both sides of the comparison the same case-fold.
         let in_list: Vec<String> = match_set
             .iter()
-            .map(|t| format!("'{}'", t.to_lowercase().replace('\'', "''")))
+            .map(|t| sql_quote_lower(t))
             .collect();
         wheres.push(format!(
             "EXISTS (SELECT 1 FROM page_tags pt WHERE pt.abs_path = pages.abs_path\nAND lower(pt.tag) IN ({}))",
@@ -1315,8 +1315,17 @@ fn cmd_search(dbpath: Option<&Path>, query: &str, json: bool, limit: usize) -> K
     sql.push_str(&format!("\nLIMIT {limit}"));
 
     let db_ref = &db;
-    let mut stmt = db_ref.conn.prepare(&sql)
-        .map_err(|e| (format!("prepare search: {e}\nSQL: {sql}"), EXIT_ERR))?;
+    let mut stmt = db_ref.conn.prepare(&sql).map_err(|e| {
+        // F5: the full query is a side-channel of the error message and is
+        // far louder than the failure warrants; keep it gated behind an
+        // explicit debug switch for when we actually want to inspect the SQL.
+        let msg = if std::env::var_os("KB_DEBUG_SQL").is_some() {
+            format!("prepare search: {e}\nSQL: {sql}")
+        } else {
+            format!("prepare search: {e}")
+        };
+        (msg, EXIT_ERR)
+    })?;
     let rows: Vec<SearchRow> = stmt
         .query_map(rusqlite::params_from_iter(params_vec.iter()), |r| {
             Ok(SearchRow {
@@ -1671,7 +1680,7 @@ fn cmd_tag(dbpath: Option<&Path>, tag: &str, json: bool) -> Kb {
     // IN ('Czech',…)` → no match. Folding to lowercase matches both sides.
     let in_list: Vec<String> = match_set
         .iter()
-        .map(|t| format!("'{}'", t.to_lowercase().replace('\'', "''")))
+        .map(|t| sql_quote_lower(t))
         .collect();
 
     let sql = format!(
@@ -2294,14 +2303,16 @@ fn cmd_info(dbpath: Option<&Path>, path: &Path, json: bool) -> Kb {
         .query_row(
             "SELECT COUNT(*) FROM links WHERE from_path = ?1",
             params![abs_path],
-            |r| r.get(0),
-        ).unwrap_or(0);
+            |r| r.get::<_, i64>(0),
+        )
+        .map_err(|e| (format!("count links out: {e}"), EXIT_ERR))?;
     let back_count = db.conn
         .query_row(
             "SELECT COUNT(*) FROM links WHERE to_path = ?1",
             params![abs_path],
-            |r| r.get(0),
-        ).unwrap_or(0);
+            |r| r.get::<_, i64>(0),
+        )
+        .map_err(|e| (format!("count links in: {e}"), EXIT_ERR))?;
     let secs_f = (mtime_ns as f64) / 1e9;
     let mtime_str = format!("{secs_f:.1}s since unix epoch");
     let search_required_phrase = search_required_phrase.unwrap_or_default();
@@ -3227,6 +3238,14 @@ pub(crate) fn atomic_write(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
 /// the hash can no longer desync the `--if-unchanged` check across the two.
 pub(crate) fn etag_of(b: &[u8]) -> String {
     kb_core::etag::of(b)
+}
+
+/// Lowercase a value and render it as a single-quoted SQLite literal for a
+/// hand-built `IN (…)` list (SQLite's escape is doubling the quote). One
+/// owner so the "did we escape?" and "did we case-fold?" questions are the
+/// same answer at every call site — SECURITY_REPORT 3.4 (C4).
+fn sql_quote_lower(s: &str) -> String {
+    format!("'{}'", s.to_lowercase().replace('\'', "''"))
 }
 
 /// Minimal JSON string encoder (no external dep — `kb` stays a single

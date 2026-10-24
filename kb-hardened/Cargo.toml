@@ -23,6 +23,10 @@ license.workspace = true
 rust-version.workspace = true
 description = "kb-hardened — the headless, agent-facing build of `kb`: no TUI, no $EDITOR fork surface, everything pipe-able and deterministic. Package `kb-hardened`, binary `kb-hardened`."
 
+[lints]
+# Inherit the workspace lint levels verbatim (`unsafe_code = "forbid"`).
+workspace = true
+
 [features]
 default = []
 # Both surfaces exist but are OFF by default. Toggling them on is allowed

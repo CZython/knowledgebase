@@ -254,14 +254,48 @@ the API is still moving; breaking changes are called out explicitly.
    wrap, pinning that exact message + `EXIT_ERR` in two places. `confirm` now
    returns `Result<(), (String, i32)>` and each caller writes
    `confirm(…)?;` — the abort outcome lives in exactly one place.
-- **The `cron` verb derives the default DB path from `Db::default_db_path()`
-   (F9).** `kb cron` hardcoded `~/.local/share/knowledgebase/kb.db`, which is
-   wrong on macOS (where `dirs::data_local_dir()` is
-   `~/Library/Application Support`) — so the emitted crontab line could point
-   at a DB the tool never opened. The path is now built in exactly one place
-   (`kb_db::Db::default_db_path`), shared by `open_default` and the `cron`
-   verb, and the hardcoded literal is the fallback only when `data_local_dir`
-   is unavailable.
+ - **The `cron` verb derives the default DB path from `Db::default_db_path()`
+    (F9).** `kb cron` hardcoded `~/.local/share/knowledgebase/kb.db`, which is
+    wrong on macOS (where `dirs::data_local_dir()` is
+    `~/Library/Application Support`) — so the emitted crontab line could point
+    at a DB the tool never opened. The path is now built in exactly one place
+    (`kb_db::Db::default_db_path`), shared by `open_default` and the `cron`
+    verb, and the hardcoded literal is the fallback only when `data_local_dir`
+    is unavailable.
+- **Whole-project `unsafe_code = "forbid"` via `[workspace.lints.rust]` (C2).**
+    The tree is `unsafe`-free (verified: no `unsafe` in `kb-core`, `kb-db`, the
+    shared CLI body, or any workspace member). That invariant is now a hard
+    compile *error* across **all four** crates, declared once in workspace
+    `Cargo.toml` and inherited by every member (each has `[lints] workspace =
+    true`), so a future `unsafe` block — a TUI-backend FFI fix, a raw-pointer
+    shortcut — fails to build anywhere unless someone deliberately opts out
+    with `#[allow(unsafe_code)]` + a reason. Single source of truth; no
+    per-file attributes to drift. Verified: injecting an `unsafe` block into
+    `kb-core` is rejected; removing it builds again.
+- **The frontmatter `append` path can no longer index out of bounds (B2).**
+    `list_rewrite_add` did `locate_key_line(data, key).unwrap_or(0)` then
+    `lines[idx]`; a desync (e.g. a BOM shifting line numbers) with an index
+    `≥ lines.len()` used to panic. It now bounds-checks and returns
+    `Err(FmError::NotScalar)` on both missing and out-of-range indices, and the
+    function returns `Result<Vec<u8>, FmError>` end-to-end (its single caller
+    already propagated `Result`, so the `append` verb surface is unchanged).
+- **`cmd_info` link counts `?`-propagate instead of `unwrap_or(0)` (B7).**
+    The two `SELECT COUNT(*)` `query_row` calls used `unwrap_or(0)`, hiding a
+    real query failure as `0 out / 0 in` with exit 0. They now
+    `map_err(…) → EXIT_ERR` (with the same `"<verb>: <e>"` shape as every other
+    error), so a genuine failure surfaces instead of a silent zero.
+- **The hand-built SQLite `IN (…)` lowercase-escape has one owner (C4,
+    SECURITY_REPORT 3.4).** `cmd_search` and `cmd_tag` each inlined
+    `format!("'{}'", t.to_lowercase().replace('\'', "''"))` (two copies, two
+    variable names), and the same `''` doubling appeared a third time in the
+    shell-quoting helper. The tag-IN-list sites now call one
+    `sql_quote_lower(s)` helper, so the "did we escape?" and "did we
+    case-fold?" questions have a single answer at every call site.
+- **The `prepare search` error no longer leaks the full SQL text (F5).** On a
+    prepare failure the whole query (SELECT list, column names, table names,
+    gate subquery) was printed to stderr — a schema side-channel and louder than
+    the failure warrants. The message is now the clean `prepare search: <err>`,
+    with the full SQL appended only when `KB_DEBUG_SQL` is set.
 - **A TUI metadata commit that only *removed* a list item never wrote to
   disk.** The commit's write-gate compared its result to the in-memory
   *working* copy, but a tail-removal was already baked into that copy — so a
