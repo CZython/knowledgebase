@@ -7,6 +7,22 @@ the API is still moving; breaking changes are called out explicitly.
 ## [Unreleased]
 
 ### Added
+- **The status bar now carries a severity glyph (`✓` for success, `!` for
+  error; none for info).** In the *colorblind* palette, or in any user TOML
+  where the user has collapsed `error` and `success` onto the same color, the
+  glyph is the only thing that still tells a write-success apart from a
+  validation-failure. Same "symbols carry the meaning" principle as the
+  `◆`/`◇` gate markers — the `!` symbol is what a colorblind reader relies on.
+  Test: `status_bar_glyph_distincts_success_from_error`.
+- **The default palette is now *colorful* (the out-of-the-box look).**
+  Previously it was the historical gray palette; it now uses:
+  magenta/bold for headings and panel titles, white for body, cyan/bold for
+  the active field, light-green for gated / success, light-red for errors,
+  and black-on-blue for the selection bar. `default.toml` is a shipped
+  starting point (users can copy it to `~/.kb_config/default.toml` and tweak
+  it) and its tests now pin the *colorful* scheme, not the old gray one.
+   `--list-palettes` now describes `default` as "the colorful,
+   out-of-the-box look" — which is what it actually is.
 - **Browse/picker pane titles now carry identity + count only; the
   keybinding legend lives in the status bar, the one place a user glances
   for "what do I press".** Before this pass the same hints were printed in

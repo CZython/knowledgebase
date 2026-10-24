@@ -78,7 +78,7 @@ fn draw_browse(f: &mut Frame, app: &App, area: ratatui::layout::Rect) {
     // Each row is `<gate marker> <id> <rel_path>` fitted to the pane's
     // inner width (the ALL-side borders eat one cell per side). The gate
     // marker (◆ / ◇) is *double-encoded*: as a symbol and as a palette
-    // role, so it survives even in mono and colorblind palettes.
+    // role, so it survives even a colorblind or user-recolor palette.
     let row_width = chunks[1].width.saturating_sub(2) as usize;
     let p = &app.palette;
     let items: Vec<ListItem> = app
@@ -763,13 +763,38 @@ fn body_window_height(h: u16) -> usize {
     h.saturating_sub(2) as usize
 }
 
-fn render_status_bar(f: &mut Frame, app: &App, area: ratatui::layout::Rect) {
-    let bar_style = match app.status.kind {
-        StatusKind::Info => app.palette.info,
-        StatusKind::Success => app.palette.success,
-        StatusKind::Error => app.palette.error,
+/// Build the status bar as one `Line` (a list of `Span`s). The *severity
+/// glyph* is its own span — `✓ ` for success, `! ` for error, none for info —
+/// so the meaning survives even if a user's palette makes `error` and
+/// `success` the same color (a real-world recolor, e.g. a terminal that
+/// doesn't distinguish LightGreen from LightRed). Same "symbols carry
+/// meaning" principle as the `◆`/`◇` gate markers — the `!` glyph is the
+/// one thing that tells a write-success apart from a validation-failure if
+/// the user's `error` and `success` roles collapse onto the same style.
+///
+/// Returns a single `Line` so `render_status_bar` is a one-liner (the
+/// match lives here, where it's testable without a `Frame`).
+fn build_status_line(p: &Palette, kind: &StatusKind, text: &str) -> Line<'static> {
+    let (glyph, style) = match kind {
+        StatusKind::Info => ("", p.info),
+        StatusKind::Success => ("✓ ", p.success),
+        StatusKind::Error => ("! ", p.error),
     };
-    let bar = Paragraph::new(format!("  {}", app.status.text)).style(bar_style);
+    if glyph.is_empty() {
+        return Line::from(vec![Span::styled(format!("  {text}"), style)]);
+    }
+    // Two-space left margin (matches the pre-glyph shape), then the glyph,
+    // then the message — all in the severity role.
+    Line::from(vec![
+        Span::styled("  ".to_string(), style),
+        Span::styled(glyph.to_string(), style),
+        Span::styled(text.to_string(), style),
+    ])
+}
+
+fn render_status_bar(f: &mut Frame, app: &App, area: ratatui::layout::Rect) {
+    let line = build_status_line(&app.palette, &app.status.kind, &app.status.text);
+    let bar = Paragraph::new(line);
     f.render_widget(bar, area);
 }
 
@@ -852,7 +877,8 @@ fn ellipsize_cells(s: &str, max: usize) -> String {
 /// ```
 ///
 /// The gate marker is double-encoded (the symbol *and* the palette role —
-/// `gated` vs `open`) so a colorblind user sees the distinction in monochrome.
+/// `gated` vs `open`) so a colorblind user sees the distinction even
+/// after recoloring.
 /// `rel_path` (the locator) is kept whole, and the `id` ellipsizes to what
 /// fits; total + width-bounded. If the pane is too narrow to fit the 4-cell
 /// marker overhead, the marker drops and the row degrades to the old
@@ -1242,5 +1268,41 @@ mod tests {
         assert_eq!(blank.spans.len(), 2);
         assert_eq!(blank.spans[1].content.as_ref(), "¶", "empty title uses the paragraph glyph");
         assert_eq!(blank.spans[1].style, p.label);
+    }
+
+    /// The *severity glyph* is what makes a write-success distinguishable
+    /// from a validation-failure even when the user's palette makes `error`
+    /// and `success` the same color — a real-world recolor, not a bug.
+    /// Pin the glyph (and its absence on `Info`) across *every* shipped
+    /// palette, since the glyph is the only thing standing between "success"
+    /// and "error" if the two roles collapse onto one color.
+    #[test]
+    fn status_bar_glyph_distincts_success_from_error() {
+        for p in [
+            Palette::default_palette(),
+            Palette::colorblind(),
+        ] {
+            let err = build_status_line(&p, &crate::tui::StatusKind::Error, "field required: title");
+            let ok = build_status_line(&p, &crate::tui::StatusKind::Success, "saved 2 fields");
+            let info = build_status_line(&p, &crate::tui::StatusKind::Info, " 4 page(s)");
+            let flat = |l: &Line<'static>| l.spans.iter().map(|s| s.content.as_ref()).collect::<String>();
+            assert!(flat(&err).starts_with("  ! "), "error carries the `!` glyph: {err:?}");
+            assert!(flat(&ok).starts_with("  ✓ "), "success carries the `✓` glyph: {ok:?}");
+            assert!(
+                !flat(&info).trim_start().starts_with('!') && !flat(&info).trim_start().starts_with('✓'),
+                "info has no severity glyph: {info:?}"
+            );
+            // Glyph + message both carry the severity role's style (the
+            // palette is not split — the glyph takes on the message color).
+            assert_eq!(err.spans[1].style, p.error, "error glyph is the `error` role");
+            assert_eq!(err.spans[2].style, p.error, "error message is the `error` role");
+            assert_eq!(ok.spans[1].style, p.success, "success glyph is the `success` role");
+            assert_eq!(ok.spans[2].style, p.success, "success message is the `success` role");
+            assert_eq!(info.spans.len(), 1, "info is a single span (no glyph split)");
+            assert_eq!(info.spans[0].style, p.info, "info is the `info` role");
+            // The glyph is the thing that makes "success" vs "error" survive
+            // an equal-color recolor — assert the two are different strings.
+            assert_ne!(flat(&err), flat(&ok), "error and success must never be identical");
+        }
     }
 }
