@@ -92,20 +92,32 @@ impl Db {
         })
     }
 
+    /// The *projected* default DB location
+    /// (`~/<data-local>/knowledgebase/kb.db`) — the one place the path is
+    /// built. `open_default` and the CLI's `cron` verb both derive from this so
+    /// the emitted crontab line can never disagree with the DB the tool actually
+    /// opens (F9: previously `cron` printed a hardcoded `~/.local/share/…` that
+    /// was wrong on macOS, where `data_local_dir()` is
+    /// `~/Library/Application Support`).
+    pub fn default_db_path() -> Option<PathBuf> {
+        Some(dirs::data_local_dir()?.join("knowledgebase").join("kb.db"))
+    }
+
     /// Open the DB at its *projected* location under
     /// `~/.local/share/knowledgebase/`. Exposed as a constructor so
     /// tests (M0) and the CLI (M7) share one code path.
     pub fn open_default() -> Result<Db> {
-        let dir = dirs::data_local_dir()
-            .ok_or_else(|| rusqlite::Error::InvalidPath(PathBuf::from(".")))?
-            .join("knowledgebase");
-        std::fs::create_dir_all(&dir).map_err(|e| {
-            rusqlite::Error::SqliteFailure(
-                rusqlite::ffi::Error::new(-1),
-                Some(format!("create_dir_all failed: {e}")),
-            )
-        })?;
-        Self::open(&dir.join("kb.db"))
+        let path = Self::default_db_path()
+            .ok_or_else(|| rusqlite::Error::InvalidPath(PathBuf::from(".")))?;
+        if let Some(dir) = path.parent() {
+            std::fs::create_dir_all(dir).map_err(|e| {
+                rusqlite::Error::SqliteFailure(
+                    rusqlite::ffi::Error::new(-1),
+                    Some(format!("create_dir_all failed: {e}")),
+                )
+            })?;
+        }
+        Self::open(&path)
     }
 
     /// Minimal M0 schema: one non-derivable state table (`roots`).

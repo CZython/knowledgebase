@@ -229,9 +229,39 @@ the API is still moving; breaking changes are called out explicitly.
   `list_rewrite_upgrade` aborted via
   `.expect("scalar_value found a scalar…")` when the key's line wasn't found —
   a caller-contract panic on an agent *write* path (and a counter-example to the
-  module's own invariant **I4**, which promises no `.unwrap()`/`.expect()` in the
-  non-test zone). It now returns `Err(FmError::NotScalar)`.
-  Regression-tested: `upgrade_scalar_missing_returns_err_not_panic`.
+   module's own invariant **I4**, which promises no `.unwrap()`/`.expect()` in the
+   non-test zone). It now returns `Err(FmError::NotScalar)`.
+   Regression-tested: `upgrade_scalar_missing_returns_err_not_panic`.
+- **The `etag` FNV-1a hash now has a single owner (B6).** Three copies of the
+   identical 16-hex FNV-1a-64 lived in `kb/main.rs`, `kb-db/src/index.rs`, and
+   the CLI path — so a fix to the prime/offset in one would silently desync the
+   `--if-unchanged` optimistic-concurrency check across the indexer and the CLI.
+   The canonical implementation is now `kb_core::etag::of`, and both the CLI
+   (`etag_of` wrapper) and `kb-db`'s indexer delegate to it. The
+   empty-string golden (`cbf29ce484222325`) is pinned in `kb-core`.
+- **The interactive editor read-back no longer swallows a real error (B5) and
+   its temp file is now unique (F8).** `run_editor` read back the buffer with
+   `std::fs::read(&tmp).unwrap_or_default()`, so a failed read after a
+   *successful* editor exit (buffer vanished) was silently treated as "no
+   changes" (`[]`). It now surfaces `read back edit buffer …: <err>` with
+   `EXIT_ERR`. The buffer file name was also just `<pid>.md`, guessable by a
+   competing `kb` or a `chmod` race on a shared `/tmp`; it is now
+   `kb-edit-<pid>-<seq>-<nanos>.md` (atomic counter + nanos), matching the
+   per-test isolation fix applied to the TUI metadata tests.
+- **`confirm()` returns the abort as an error instead of a re-wrapped `bool`
+   (C1).** Both call sites (`create` and `commit`) spelled the identical
+   `if !confirm(…) { return Err(("aborted (not confirmed)".into(), EXIT_ERR)); }`
+   wrap, pinning that exact message + `EXIT_ERR` in two places. `confirm` now
+   returns `Result<(), (String, i32)>` and each caller writes
+   `confirm(…)?;` — the abort outcome lives in exactly one place.
+- **The `cron` verb derives the default DB path from `Db::default_db_path()`
+   (F9).** `kb cron` hardcoded `~/.local/share/knowledgebase/kb.db`, which is
+   wrong on macOS (where `dirs::data_local_dir()` is
+   `~/Library/Application Support`) — so the emitted crontab line could point
+   at a DB the tool never opened. The path is now built in exactly one place
+   (`kb_db::Db::default_db_path`), shared by `open_default` and the `cron`
+   verb, and the hardcoded literal is the fallback only when `data_local_dir`
+   is unavailable.
 - **A TUI metadata commit that only *removed* a list item never wrote to
   disk.** The commit's write-gate compared its result to the in-memory
   *working* copy, but a tail-removal was already baked into that copy — so a

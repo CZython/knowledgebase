@@ -81,6 +81,7 @@
 //!   (M2).
 
 pub mod aliases;
+pub mod etag;
 pub mod frontmatter;
 pub mod fs_snapshot;
 pub mod graph;

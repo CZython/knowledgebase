@@ -659,6 +659,7 @@ fn run(cli: &Cli) -> i32 {
                 .db
                 .as_ref()
                 .map(|p| p.display().to_string())
+                .or_else(|| Db::default_db_path().map(|p| p.display().to_string()))
                 .unwrap_or_else(|| "~/.local/share/knowledgebase/kb.db".into());
             let q = shell_quote(&bin);
             let dq = shell_quote(&dbp);
@@ -877,9 +878,7 @@ fn cmd_create(dbpath: Option<&Path>, filename: &str, a: &CreateArgs) -> Kb {
         return Ok(EXIT_OK);
     }
 
-    if !confirm("create?", yes || json) {
-        return Err(("aborted (not confirmed)".into(), EXIT_ERR));
-    }
+    confirm("create?", yes || json)?;
 
     // ---- write (atomic: same-dir temp + rename) ---------------------------
     if let Some(parent) = target.parent() {
@@ -2982,9 +2981,7 @@ fn commit(path: &Path, orig: Vec<u8>, new: Vec<u8>, dry_run: bool, assume_yes: b
     }
 
     // `--json` implies an applied, non-interactive write.
-    if !confirm("apply?", assume_yes || json) {
-        return Err(("aborted (not confirmed)".into(), EXIT_ERR));
-    }
+    confirm("apply?", assume_yes || json)?;
     // Hash guard: the file on disk must still be exactly what we read —
     // i.e. nobody else wrote to it between our read and this write.
     let cur = std::fs::read(path).map_err(|e| (format!("re-read {}: {e}", path.display()), EXIT_ERR))?;
@@ -3062,11 +3059,28 @@ fn parse_placement(s: &str) -> Result<SectionPlacement, (String, i32)> {
 // a hardened build strips them at compile time:
 //   cargo build -p kb-hardened   → binary with no editor calls
 
+// Monotonic counter for the per-invocation editor buffer file name (pid alone
+// is not unique: a competing `kb` on the same host, or a `chmod` race on a
+// shared `/tmp`, can swap the buffer the editor edits). Combined with pid +
+// nanos it yields a name no other process can guess (F8).
+#[cfg(feature = "editor")]
+static EDITOR_BUFFER_SEQ: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
 #[cfg(feature = "editor")]
 fn run_editor(initial: &[u8]) -> Result<Vec<u8>, (String, i32)> {
-    // Open `initial` in $VISUAL, then $EDITOR, then `vi`, in a temp file;
-    // return the post-edit bytes.
-    let tmp = std::env::temp_dir().join(format!("kb-edit-{}.md", std::process::id()));
+    // Open `initial` in $VISUAL, then $EDITOR, then `vi`, in a uniquely-named
+    // temp file; return the post-edit bytes.
+    let seq = EDITOR_BUFFER_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    let tmp = std::env::temp_dir().join(format!(
+        "kb-edit-{}-{}-{}.md",
+        std::process::id(),
+        seq,
+        nanos
+    ));
     std::fs::write(&tmp, initial).map_err(|e| (format!("write temp edit buffer: {e}"), EXIT_ERR))?;
     let editor = pick_editor();
     let st = std::process::Command::new(&editor)
@@ -3077,7 +3091,10 @@ fn run_editor(initial: &[u8]) -> Result<Vec<u8>, (String, i32)> {
         let _ = std::fs::remove_file(&tmp);
         return Err((format!("editor {editor} exited with {st}"), EXIT_ERR));
     }
-    let bytes = std::fs::read(&tmp).unwrap_or_default();
+    // A read failure after a successful editor exit is real (e.g. the buffer
+    // vanished), so surface it as an error rather than silently treating it as
+    // "no changes" (B5: the old `unwrap_or_default()` swallowed it to `[]`).
+    let bytes = std::fs::read(&tmp).map_err(|e| (format!("read back edit buffer {}: {e}", tmp.display()), EXIT_ERR))?;
     let _ = std::fs::remove_file(&tmp);
     Ok(bytes)
 }
@@ -3152,25 +3169,36 @@ fn edit_in_place(path: &Path) -> Result<(), (String, i32)> {
 }
 
 /// Interactive `y/N` prompt. Non-interactive stdin (piped / no TTY) never
-/// auto-approves — the caller must pass `--yes`.
-fn confirm(prompt: &str, assume_yes: bool) -> bool {
+/// auto-approves — the caller must pass `--yes`. On "no" (or a read failure)
+/// returns the abort as a normal `(String, i32)` error, so a caller writes
+/// `confirm(prompt, assume_yes)?;` instead of re-wrapping a `bool` — the
+/// "aborted (not confirmed)" outcome and its `EXIT_ERR` live in exactly one
+/// place (C1).
+fn confirm(prompt: &str, assume_yes: bool) -> Result<(), (String, i32)> {
     if assume_yes {
-        return true;
+        return Ok(());
     }
     use std::io::IsTerminal;
-    if !std::io::stdin().is_terminal() {
-        return false;
+    let approved = std::io::stdin().is_terminal()
+        && {
+            print!("{prompt} [y/N]? ");
+            let _ = std::io::stdout().flush();
+            let mut line = String::new();
+            std::io::stdin()
+                .read_line(&mut line)
+                .map(|_| {
+                    matches!(
+                        line.trim().to_ascii_lowercase().as_str(),
+                        "y" | "yes"
+                    )
+                })
+                .unwrap_or(false)
+        };
+    if approved {
+        Ok(())
+    } else {
+        Err(("aborted (not confirmed)".into(), EXIT_ERR))
     }
-    print!("{prompt} [y/N]? ");
-    let _ = std::io::stdout().flush();
-    let mut line = String::new();
-    if std::io::stdin().read_line(&mut line).is_err() {
-        return false;
-    }
-    matches!(
-        line.trim().to_ascii_lowercase().as_str(),
-        "y" | "yes"
-    )
 }
 
 /// Write `bytes` to `path` atomically: same-directory temp file + rename.
@@ -3194,15 +3222,11 @@ pub(crate) fn atomic_write(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
 }
 
 /// FNV-1a 64-bit hash, rendered as 16 lowercase hex chars (the `etag`).
+/// Thin wrapper over the single canonical implementation in `kb-core` so the
+/// CLI (7 call sites) and the `kb-db` indexer share one definition — a fix to
+/// the hash can no longer desync the `--if-unchanged` check across the two.
 pub(crate) fn etag_of(b: &[u8]) -> String {
-    const OFFSET: u64 = 0xcbf2_9ce4_8422_2325;
-    const PRIME: u64 = 0x0000_0100_0000_01b3;
-    let mut h = OFFSET;
-    for &x in b {
-        h ^= x as u64;
-        h = h.wrapping_mul(PRIME);
-    }
-    format!("{h:016x}")
+    kb_core::etag::of(b)
 }
 
 /// Minimal JSON string encoder (no external dep — `kb` stays a single

@@ -92,17 +92,11 @@ impl IndexOutcome {
     }
 }
 
-/// FNV-1a 64-bit, rendered as 16 lowercase hex chars (the `etag`;
-/// identical to the `kb` CLI's `etag_of`).
+/// FNV-1a 64-bit, rendered as 16 lowercase hex chars (the `etag`).
+/// Delegates to the single canonical implementation in `kb-core` so the
+/// indexer and the CLI's optimistic-concurrency check can never drift.
 pub fn etag_of(bytes: &[u8]) -> String {
-    const OFFSET: u64 = 0xcbf2_9ce4_8422_2325;
-    const PRIME: u64 = 0x0000_0100_0000_01b3;
-    let mut h = OFFSET;
-    for &b in bytes {
-        h ^= b as u64;
-        h = h.wrapping_mul(PRIME);
-    }
-    format!("{h:016x}")
+    kb_core::etag::of(bytes)
 }
 
 /// The `page_type` string (lowercase — the §8 `pages.type` contract and the
