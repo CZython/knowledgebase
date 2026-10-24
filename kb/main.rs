@@ -524,9 +524,15 @@ fn main() {
     // everything else → `search` (multi-token strings with spaces would have
     // been captured earlier by the shell as one argument and would also
     // trigger this path — treat as search).
+    // A token is "non-flag" iff it does not start with `-`. (We deliberately do
+    // **not** filter on `=`: a bare token such as `E=mc2` is a legitimate
+    // single search term, and it is always reconstructed as `kb search "<token>"`
+    // — one argument, never a `--flag=val` — so keeping it does not break clap
+    // parsing. The real flags are still split off by the separate `starts_with('-')`
+    // predicate below and re-appended to the reconstructed command.)
     let non_flag: Vec<&String> = args
         .iter()
-        .filter(|a| !a.starts_with('-') && !a.contains('='))
+        .filter(|a| !a.starts_with('-'))
         .collect();
     // A bare search/info arg is a single non-flag token that is *not* itself a
     // known subcommand (those route normally, e.g. `kb roots`, `kb stats`).
@@ -1199,7 +1205,7 @@ fn cmd_search(dbpath: Option<&Path>, query: &str, json: bool, limit: usize) -> K
                 if !json {
                     println!("0 results (no pages tagged {tag_val:?} in the corpus)");
                 } else {
-                    println!("[{{}}]");
+                    println!("[]");
                 }
                 return Ok(EXIT_OK);
             }
@@ -1567,7 +1573,7 @@ fn cmd_browse(dbpath: Option<&Path>, path: Option<&Path>, json: bool) -> Kb {
     // JSON: a clean array of page objects.
     if json {
         if pages.is_empty() {
-            println!("[ ]");
+            println!("[]");
         } else {
             let mut items = Vec::new();
             for (abs_path, id, pt, title, _root, rel_path, search_required_phrase) in pages.iter() {
@@ -1699,7 +1705,7 @@ fn cmd_tag(dbpath: Option<&Path>, tag: &str, json: bool) -> Kb {
         // An empty match-set is still a clean empty array (the agent does not
         // need the human "match-set was: ..." hint).
         if pages.is_empty() {
-            println!("[ ]");
+            println!("[]");
         } else {
             let mut items = Vec::new();
             for (abs_path, id, pt, title, _root, rel_path) in pages.iter() {
@@ -1888,7 +1894,7 @@ fn cmd_tag_alias(dbpath: Option<&Path>, o: &TagAliasOpts, json: bool) -> Kb {
             .map_err(|e| (format!("rows: {e}"), EXIT_ERR))?;
         if json {
             if aliases.is_empty() {
-                println!("[ ]");
+                println!("[]");
             } else {
                 let items: Vec<String> = aliases.iter().map(|(alias, canonical)| {
                     format!(

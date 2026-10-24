@@ -29,7 +29,7 @@ default = []
 # (e.g. `cargo build -p kb-hardened --features tui`) — the shared body then
 # compiles in the same way as `kb-user` does.
 editor = []
-tui = ["dep:ratatui", "dep:crossterm", "dep:unicode-width"]
+tui = ["dep:ratatui", "dep:crossterm", "dep:unicode-width", "dep:serde", "dep:toml"]
 
 [[bin]]
 name = "kb-hardened"
@@ -48,3 +48,9 @@ crossterm = { workspace = true, optional = true }
 # Render.rs (shared with the `kb-user` build) measures rows in display cells;
 # needs this only when `tui` is on — the default hardened build never links it.
 unicode-width = { workspace = true, optional = true }
+# `--palette` support (P1): `toml` parses the palette TOML files and
+# `serde` + `serde_derive` give structured deserialization of `StyleSpec`
+# and `Palette` (kb/tui/palette.rs). Feature-gated behind `tui` so a
+# hardened build never links them — mirrors `kb-user` exactly.
+serde = { workspace = true, optional = true }
+toml  = { workspace = true, optional = true }

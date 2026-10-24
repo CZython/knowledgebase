@@ -726,7 +726,7 @@ pub fn append_list_item(data: &[u8], key: &str, value: &str) -> Result<Vec<u8>, 
         None => {
             // Not a list. If scalar, upgrade; else create a fresh field.
             match scalar_value(data, key) {
-                Some(s) => Ok(list_rewrite_upgrade(data, key, &s, &value)),
+                Some(s) => list_rewrite_upgrade(data, key, &s, &value),
                 None => Ok(list_rewrite_new(data, key, &value)),
             }
         }
@@ -823,12 +823,15 @@ fn list_rewrite_new(data: &[u8], key: &str, value: &str) -> Vec<u8> {
 }
 
 /// Upgrade a scalar field to an inline 2-element list: `key: scal, val`.
-fn list_rewrite_upgrade(data: &[u8], key: &str, scalar: &str, added: &str) -> Vec<u8> {
+fn list_rewrite_upgrade(data: &[u8], key: &str, scalar: &str, added: &str)
+    -> Result<Vec<u8>, FmError> {
     // SECURITY_REPORT 3.7 — same `from_utf8_lossy` fix.
     let s = String::from_utf8_lossy(data);
     let mut lines: Vec<String> = s.split_inclusive('\n').map(|l| l.to_string()).collect();
-    let idx = locate_key_line(data, key)
-        .expect("scalar_value found a scalar with this key, so the line must exist");
+    let idx = match locate_key_line(data, key) {
+        Some(i) => i,
+        None => return Err(FmError::NotScalar),
+    };
     let line = lines[idx].clone();
     // Preserve leading indentation (unlikely but keep it faithful).
     let leading = &line[..line.len() - line.trim_start().len()];
@@ -840,7 +843,7 @@ fn list_rewrite_upgrade(data: &[u8], key: &str, scalar: &str, added: &str) -> Ve
         ""
     };
     lines[idx] = format!("{leading}{}: {scalar}, {added}{nl}", key);
-    join_lines(&lines).into_bytes()
+    Ok(join_lines(&lines).into_bytes())
 }
 
 /// Extend an existing list (block or inline) by appending `added`.
@@ -1346,6 +1349,20 @@ mod fm_tests {
         assert_eq!(
             append_list_item(s("# h\ntags: [a]").as_slice(), "tags", "b"),
             Err(FmError::NoFrontmatter)
+        );
+    }
+
+    // B1: when the scalar line is *not* found (key absent), `list_rewrite_upgrade`
+    // used to `.expect(...)` and **abort** (a panic on an agent write path). It must
+    // now return a clean `Err`, so the caller gets a named outcome instead of a
+    // stack trace. Calling the rewrite directly exercises the branch that
+    // `append_list_item` normally gates behind `scalar_value`.
+    #[test]
+    fn upgrade_scalar_missing_returns_err_not_panic() {
+        let d = s("---\ntype: wiki\n---\nbody"); // no `tags` field at all
+        assert_eq!(
+            list_rewrite_upgrade(d.as_slice(), "tags", "a", "b"),
+            Err(FmError::NotScalar)
         );
     }
 

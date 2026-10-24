@@ -238,13 +238,15 @@ fn browse_tag_json() {
         );
     }
     {
-        // A tag no one uses — a clean empty array, not a human "no pages".
+        // A tag no one uses — the canonical empty array `[]` (not `[ ]`,
+        // not the phantom record `[{}]`). `jq 'length'` / `json.loads` must
+        // see a genuinely empty list. (F6 / C3 exact-pin.)
         let (code, out, _) = run(&s, &["tag", "nobody", "--json"]);
         assert_eq!(code, 0);
-        let t = out.trim();
-        assert!(
-            t == "[]" || t.starts_with("[") && t.ends_with("]"),
-            "empty tag --json must be a JSON array; got: {out}"
+        assert_eq!(
+            out.trim(),
+            "[]",
+            "empty tag --json must be exactly the canonical empty array; got: {out:?}"
         );
     }
 }
@@ -257,14 +259,14 @@ fn tag_alias_json_roundtrip() {
     let (code, _, _) = run(&s, &["add", &root]);
     assert_eq!(code, 0);
 
-    // empty list
+    // empty list — canonical `[]` (F6 / C3 exact-pin)
     {
         let (code, out, _) = run(&s, &["tag-alias", "--list", "--json"]);
         assert_eq!(code, 0);
-        let t = out.trim();
-        assert!(
-            t == "[]" || t.starts_with('[') && t.ends_with(']'),
-            "empty alias --list --json must be a JSON array; got: {out}"
+        assert_eq!(
+            out.trim(),
+            "[]",
+            "empty alias --list --json must be exactly the canonical empty array; got: {out:?}"
         );
     }
     // add
@@ -628,5 +630,73 @@ fn search_json_still_works() {
     assert!(
         out.contains("Unique-Slug") || out.contains("gatedword"),
         "search --json must include the page; got: {out}"
+    );
+}
+
+// ==================== F6 / C3 — canonical empty array (exact) ====================
+
+#[test]
+fn search_empty_tag_filter_emits_canonical_empty_array() {
+    // Regression for F6: `search "tag:<missing>" --json` used to emit `[{}]`
+    // (a single phantom empty record) while the text-filter path emitted `[]`.
+    // Both "no rows" outcomes must now be the identical canonical `[]`, so
+    // `jq 'length'` / `len(json.loads(...))` see a genuinely empty list either
+    // way. (The text path is already exact-pinned in browse_tag_json.)
+    let s = Setup::new("emptytagfilter");
+    let root = s.root.to_string_lossy().into_owned();
+    write_page(&s, "a.md", "type: note\ntitle: A\ntags:\n  - foo\n", "body\n");
+    let (code, _, _) = run(&s, &["add", &root]);
+    assert_eq!(code, 0);
+
+    // tag: filter with a value no page carries -> empty match-set branch.
+    let (code, out, err) = run(&s, &["search", "tag:nobodyexists", "--json"]);
+    assert_eq!(code, 0, "empty tag filter should succeed; stderr: {err}");
+    assert_eq!(
+        out.trim(),
+        "[]",
+        "empty `tag:` search --json must be exactly the canonical `[]`, got: {out:?}"
+    );
+
+    // And the plain-text no-match path must agree byte-for-byte.
+    let (code, out, _) = run(&s, &["search", "zzz_no_match_term", "--json"]);
+    assert_eq!(code, 0);
+    assert_eq!(
+        out.trim(),
+        "[]",
+        "no-match text search --json must be exactly the canonical `[]`, got: {out:?}"
+    );
+}
+
+// ==================== F4 — bare-token dispatch ====================
+
+#[test]
+fn bare_token_containing_equals_routes_to_search() {
+    // Regression for F4: a bare token that contains `=` (e.g. `E=mc2`) is a
+    // legitimate single search term. Before the fix the `!a.contains('=')`
+    // filter dropped it from the bare-token set, so the shortcut was skipped
+    // and clap rejected the whole thing with "unrecognized subcommand 'E=mc2'".
+    // It must route to `search` (which then reports an FTS-level error about
+    // the `=` inside the query — *not* clap's "unrecognized subcommand").
+    let s = Setup::new("bareeq");
+    let root = s.root.to_string_lossy().into_owned();
+    write_page(&s, "a.md", "type: note\ntitle: A\n", "body\n");
+    let (code, _, _) = run(&s, &["add", &root]);
+    assert_eq!(code, 0);
+
+    // `E=mc2` is the only non-flag token -> bare path fires -> `search E=mc2`.
+    // FTS chokes on the literal `=` ("syntax error near") — proof we reached
+    // the search verb. The *wrong* outcome is clap's "unrecognized subcommand".
+    let (_code, out, err) = run(&s, &["E=mc2"]);
+    let combined = format!("{out}{err}");
+    assert!(
+        !combined.contains("unrecognized subcommand"),
+        "bare `E=mc2` must not be rejected by clap as an unknown subcommand; got: {combined}"
+    );
+    // We must have been routed *to* search, not swallowed as a no-op.
+    assert!(
+        combined.to_lowercase().contains("search")
+            || combined.contains("syntax error")
+            || combined.contains("fts5"),
+        "bare `E=mc2` should reach the search verb; got: {combined}"
     );
 }

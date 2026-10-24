@@ -201,6 +201,37 @@ the API is still moving; breaking changes are called out explicitly.
    the retry path. See the README's agent-contract section.
 
 ### Fixed
+- **`kb tui` no longer breaks `kb-hardened --features tui` (F1).** The
+  `kb-hardened` package declared a `tui` feature that *looked* like
+  `kb-user`'s but was missing `serde` + `toml`, so `cargo build -p
+  kb-hardened --features tui` failed with 10 unresolved-`serde`/`toml` errors
+  (the `--palette` machinery in `kb/tui/palette.rs` derives them). The feature
+  now mirrors `kb-user` exactly (`dep:serde` + `dep:toml`, both optional and
+  never linked in the default headless build — the dep-tree gate still passes),
+  so the two packages truly are "the same body, different default flags."
+- **A bare search token containing `=` is no longer rejected (F4).**
+  `kb E=mc2` (a legitimate single search term) hit the bare-dispatch filter
+  `!a.contains('=')`, which dropped it from the bare-token set, so the shortcut
+  was skipped and clap answered `unrecognized subcommand 'E=mc2'`. The filter is
+  gone — a bare token is always reconstructed as `kb search "<token>"` (one
+  argument, never a `--flag=val`), so it routes to `search` and only then
+  surfaces the FTS-level "syntax error near `=`" (correct: the `=` is *inside*
+  the query, not a flag). Real subcommands still route normally. Regression-tested.
+- **`--json` "no rows" is one canonical `[]` across every verb (F6/C3).** The
+  empty-result branches disagreed byte-for-byte: `search … tag:<missing>` emitted
+  a phantom record `[{}]`, while `browse`/`tag`/`tag-alias` empty lists emitted
+  `[ ]` (with a space) and the text path `[]`. An agent doing `len(json.loads(s))`
+  or `jq 'map(.id)'` saw a spurious element in one shape and not the other. Every
+  empty branch now prints the identical canonical `[]` (the populated `[{}]`
+  item-rendering is untouched), and the integration suite exact-pins it (not just
+  "is an array"). Regression-tested.
+- **`append` on an absent field returns a clean `Err`, not a panic (B1).**
+  `list_rewrite_upgrade` aborted via
+  `.expect("scalar_value found a scalar…")` when the key's line wasn't found —
+  a caller-contract panic on an agent *write* path (and a counter-example to the
+  module's own invariant **I4**, which promises no `.unwrap()`/`.expect()` in the
+  non-test zone). It now returns `Err(FmError::NotScalar)`.
+  Regression-tested: `upgrade_scalar_missing_returns_err_not_panic`.
 - **A TUI metadata commit that only *removed* a list item never wrote to
   disk.** The commit's write-gate compared its result to the in-memory
   *working* copy, but a tail-removal was already baked into that copy — so a
