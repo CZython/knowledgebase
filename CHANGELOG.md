@@ -7,6 +7,29 @@ the API is still moving; breaking changes are called out explicitly.
 ## [Unreleased]
 
 ### Added
+- **Windows is now a first-class target (runtime, not just "it compiles").**
+  The build machinery was already there (`dist/build-windows.sh` — native MSVC
+  or `mingw-w64` cross), but the *behavior* was POSIX-baked. Every place that
+  read "unix" or printed a unix-only command now branches on the build target:
+  * **`kb cron`** emits a `schtasks /create …` line on Windows and the familiar
+    `0 * * * * …` crontab line on POSIX, so the printed fragment is paste-ready
+    for the OS the binary was built for (previously it always printed a
+    crontab line and relied on the user to translate).
+  * **`shell_quote`** uses the Windows cmd.exe scheme (double-quoted, backslash
+    escapes) and the POSIX single-quote scheme elsewhere — so the emitted
+    `cron` command is correct in both shells.
+  * **`pick_editor`** falls back to `notepad` on Windows (a stock install has
+    no `vi`) and `vi` elsewhere; `VISUAL`/`EDITOR` still take precedence.
+  * **Editor error hints** stop printing `$VISUAL`/`$EDITOR`/`$PATH` shell
+    syntax that means nothing in `cmd.exe`; they now name the env vars plainly.
+  * **The integration tests that pin JSON** invoke `python3` on POSIX and
+    `python` on Windows; the editor-saves-bytes test (which drives a
+    `#!/bin/sh` + `sed -i` stand-in editor) is now gated `#[cfg(unix)]`; and
+    the TUI roots-form test derives its path from `std::env::temp_dir()`
+    instead of hardcoded `/tmp`. `kb-core` cross-checks clean for
+    `x86_64-pc-windows-gnu`; `kb-db`/`kb` need the `mingw-w64` C cross-compiler
+    (a toolchain prerequisite, documented in `dist/build-windows.sh`), not a
+    code restriction.
 - **The status bar now carries a severity glyph (`✓` for success, `!` for
   error; none for info).** In the *colorblind* palette, or in any user TOML
   where the user has collapsed `error` and `success` onto the same color, the

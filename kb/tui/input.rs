@@ -695,14 +695,17 @@ mod tests {
     }
 
     /// The roots add form is a *path* input — `j`/`k` are common in paths
-    /// and must be typed when the form is focused (regression: `"/tmp/xjk-root"`
-    /// used to land as `"/tmp/x-root"`).
+    /// and must be typed when the form is focused (regression: a typed `j` and
+    /// `k` once caused those chars to be dropped, e.g. `...-jk-root` landing as
+    /// `...-root`).
     #[test]
     fn roots_form_types_jk_in_path() {
         let db = crate::tui::Db::open_in_memory_test().unwrap();
         db.migrate().unwrap();
-        let path = "/tmp/xjk-root";
-        std::fs::create_dir_all(path).unwrap();
+        // W7: derive the path from the platform temp dir so the test builds
+        // and runs on Windows, not just POSIX (where /tmp exists).
+        let path = std::env::temp_dir().join("xjk-root").display().to_string();
+        std::fs::create_dir_all(&path).unwrap();
         let mut app = App::new(db).unwrap();
         app.open_roots().unwrap();
         for c in path.chars() {

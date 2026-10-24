@@ -82,7 +82,9 @@ fn add(setup: &Setup) {
 
 /// Validate that `s` parses as a single JSON *object*.
 fn assert_json(s: &str, what: &str) {
-    let mut v = Command::new("python3");
+    // W6: the interpreter is `python3` on POSIX but `python` on Windows.
+    let py = if cfg!(windows) { "python" } else { "python3" };
+    let mut v = Command::new(py);
     v.arg("-c").arg(
         "import json,sys\n\
          d = json.loads(sys.stdin.read())\n\
@@ -94,7 +96,7 @@ fn assert_json(s: &str, what: &str) {
         .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())
         .spawn()
-        .expect("python3 available for JSON validation");
+        .expect("a Python interpreter is available for JSON validation");
     child
         .stdin
         .as_mut()
@@ -320,6 +322,7 @@ fn create_skips_indexing_outside_every_registered_root() {
 
 #[test]
 #[cfg(feature = "editor")]
+#[cfg(unix)]
 fn create_indexes_the_bytes_the_editor_saved() {
     let s = Setup::new("edit");
     add(&s);

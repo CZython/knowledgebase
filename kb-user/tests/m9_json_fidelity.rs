@@ -54,11 +54,13 @@ fn run(s: &S, args: &[&str]) -> (i32, String, String) {
     )
 }
 
-/// Feed `stdin` through `python3 -c prog [--arg1 ...]`; return (ok, out+err).
+/// Feed `stdin` through Python's `-c prog [--arg1 ...]`; return (ok, out+err).
 /// Extra args go to `sys.argv[1:]` so arbitrary text (quotes, backslash,
 /// unicode) can be passed without any nested escaping.
 fn py(stdin: &str, prog: &str, args: &[String]) -> (bool, String) {
-    let mut c = Command::new("python3");
+    // W6: `python3` on POSIX, `python` on Windows.
+    let py = if cfg!(windows) { "python" } else { "python3" };
+    let mut c = Command::new(py);
     c.arg("-c").arg(prog);
     for a in args {
         c.arg(a);

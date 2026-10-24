@@ -71,7 +71,7 @@ fn write_page(setup: &Setup, rel: &str, fm: &str, body: &str) {
 /// Validate that `s` parses as a single JSON document and the top-level
 /// kind matches (`array` for list-shaped verbs, `object` for record-shaped).
 fn assert_json(s: &str, what: &str, is_array: bool, is_object: bool) {
-    let mut v = Command::new("python3");
+    let mut v = Command::new(if cfg!(windows) { "python" } else { "python3" });
     v.arg("-c").arg(
         "import json,sys\n\
          d = json.loads(sys.stdin.read())\n\

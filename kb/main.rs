@@ -663,20 +663,35 @@ fn run(cli: &Cli) -> i32 {
                 .unwrap_or_else(|| "~/.local/share/knowledgebase/kb.db".into());
             let q = shell_quote(&bin);
             let dq = shell_quote(&dbp);
-            // The "command" is the bare refresh invocation; the "line" is the
-            // paste-ready crontab fragment (hourly). Both are surfaced so a
-            // script can pick whichever shape it wants.
+            // The platform scheduler differs: POSIX uses `crontab`, Windows
+            // uses Task Scheduler. Emit the matching invocation so the printed
+            // line is paste-ready for the OS the binary was built for (W1).
+            let (command, line, how) = if cfg!(windows) {
+                (
+                    format!("{q} {dq} refresh"),
+                    format!(
+                        "schtasks /create /tn \"kb-refresh\" /tr \"{q} {dq} refresh\" /sc hourly"
+                    ),
+                    "paste into `schtasks` (hourly)",
+                )
+            } else {
+                (
+                    format!("{q} {dq} refresh"),
+                    format!("0 * * * * {q} {dq} refresh >> ~/.kb-cron.log 2>&1"),
+                    "paste into `crontab -e` (hourly)",
+                )
+            };
             if *json {
                 println!(
                     "{{\n  \"command\": {},\n  \"db\": {},\n  \"line\": {}\n}}",
-                    jstr(&format!("{q} {dq} refresh")),
+                    jstr(&command),
                     jstr(&dbp),
-                    jstr(&format!("0 * * * * {q} {dq} refresh >> ~/.kb-cron.log 2>&1")),
+                    jstr(&line),
                 );
             } else {
-                println!("{q} {dq} refresh");
-                println!("# paste into `crontab -e`, e.g. hourly:");
-                println!("0 * * * * {q} {dq} refresh >> ~/.kb-cron.log 2>&1");
+                println!("{command}");
+                println!("# {how}:");
+                println!("{line}");
             }
             Ok(EXIT_OK)
         }
@@ -2419,8 +2434,12 @@ fn cmd_stats(dbpath: Option<&Path>, json: bool) -> Kb {
     let alias_count: i64 = db.conn
         .query_row("SELECT COUNT(*) FROM tag_aliases", [], |r| r.get(0))
         .unwrap_or(0);
-    // db file size
-    let db_path = db_path_str(dbpath);
+    // db file size (W-dedup: derive from Db::default_db_path(), not a hardcoded
+    // ~/.local/share/... string; consistent with open_default and the cron verb).
+    let db_path = dbpath
+        .map(|p| p.to_string_lossy().to_string())
+        .or_else(|| Db::default_db_path().map(|p| p.display().to_string()))
+        .unwrap_or_else(|| "~/.local/share/knowledgebase/kb.db".into());
     let size: u64 = std::fs::metadata(&db_path).map(|m| m.len()).unwrap_or(0);
     let last = db.conn
         .query_row(
@@ -2469,23 +2488,30 @@ fn cmd_stats(dbpath: Option<&Path>, json: bool) -> Kb {
     Ok(EXIT_OK)
 }
 
-fn db_path_str(dbpath: Option<&Path>) -> String {
-    dbpath
-        .map(|p| p.to_string_lossy().to_string())
-        .unwrap_or_else(|| format!("{}/.local/share/knowledgebase/kb.db", dirs::home_dir().map(|h| h.display().to_string()).unwrap_or_else(|| "~".into())))
-}
-
 // ---- shell-quote helper (for kb cron) ----
 
 fn shell_quote(s: &str) -> String {
     if s.is_empty() {
-        return "''".into();
+        return if cfg!(windows) { "\"\"".into() } else { "''".into() };
     }
-    let safe: bool = s.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_' || c == '/' || c == '.' || c == ':');
-    if safe {
-        s.to_string()
+    if cfg!(windows) {
+        // W2: the scheduling shell is cmd.exe, which quotes with double quotes
+        // (and a backslash escapes an inner quote). Single-quoting is a no-op
+        // in cmd, so use the POSIX scheme only off-Windows.
+        let needs_quote = s.chars().any(|c| c == ' ' || c == '"');
+        if needs_quote {
+            let inner = s.replace('\\', "\\\\").replace('"', "\\\"");
+            format!("\"{inner}\"")
+        } else {
+            s.to_string()
+        }
     } else {
-        format!("'{}'", s.replace('\'', "'\\''"))
+        let safe = s.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_' || c == '/' || c == '.' || c == ':');
+        if safe {
+            s.to_string()
+        } else {
+            format!("'{}'", s.replace('\'', "'\\''"))
+        }
     }
 }
 
@@ -3117,7 +3143,14 @@ fn pick_editor() -> String {
             return v.split_whitespace().next().unwrap_or("vi").to_string();
         }
     }
-    "vi".to_string()
+    // W3: the hard fallback is platform-appropriate. `vi` is not present on a
+    // stock Windows install, but `notepad` (invoked as `notepad`) is; on POSIX
+    // the conventional fallback is `vi`.
+    if cfg!(windows) {
+        "notepad".to_string()
+    } else {
+        "vi".to_string()
+    }
 }
 
 /// The *name* of the env var that chose the current editor, for a clear
@@ -3166,10 +3199,10 @@ fn edit_in_place(path: &Path) -> Result<(), (String, i32)> {
             let hint = match editor_source() {
                 Some(k) => {
                     format!(
-                        "$ {k}={editor} was not found / could not be launched. Set $VISUAL or $EDITOR to an editor you have installed (and make sure it is on $PATH), then retry."
+                        "{k}={editor} was not found / could not be launched. Set VISUAL or EDITOR to an editor you have installed (and make sure it is on the PATH), then retry."
                     )
                 }
-                None => "no editor available: $VISUAL and $EDITOR are unset and the fallback `vi` is not on $PATH. Set $VISUAL or $EDITOR to an editor you have installed, then retry.".to_string(),
+                None => "no editor available: VISUAL and EDITOR are unset and the fallback editor is not on the PATH. Set VISUAL or EDITOR to an editor you have installed, then retry.".to_string(),
             };
             Err((
                 format!("could not launch {editor}: {e} — {hint}"),
@@ -3355,7 +3388,7 @@ assert d['links']       == 3, d['links']
 assert d['refs']        == ['x\ny'], d['refs']
 print('round-trip-ok')
 "#;
-        let mut cmd = std::process::Command::new("python3");
+        let mut cmd = std::process::Command::new(if cfg!(windows) { "python" } else { "python3" });
         cmd.arg("-c").arg(prog);
         cmd.stdin(std::process::Stdio::piped());
         cmd.stdout(std::process::Stdio::piped());
