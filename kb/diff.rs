@@ -359,11 +359,12 @@ fn parse_unified(patch: &str) -> Result<Patch, String> {
                     i += 1;
                     continue; // `\ No newline at end of file`
                 }
-                Some(b' ') | Some(b'-') | Some(b'+') => {
-                    body.push(PatchLine {
-                        kind: l.as_bytes()[0] as char,
-                        text: l[1..].to_string(),
-                    });
+                Some(kind @ (b' ' | b'-' | b'+')) => {
+                    // `kind` matched an ASCII prefix, so byte offset 1 is a char
+                    // boundary: `split_at` splits the prefix off exactly once
+                    // (no second index read of `l`).
+                    let (_, rest) = l.split_at(1);
+                    body.push(PatchLine { kind: *kind as char, text: rest.to_string() });
                     i += 1;
                 }
                 Some(_) => break, // next `@@` header

@@ -254,6 +254,11 @@ pub struct ReadState {
 /// A field the Edit mode can show — either a *scalar* (free text) or a
 /// *list* (the value is the next item to append). Both are edited over the
 /// already-verified `kb-core::frontmatter` ops; the TUI just composes them.
+///
+/// **D1 note:** `SearchRequiredPhrase` is the *TUI's name* for the
+/// `search_required_phrase` *corpus field*; the two share an identifier by
+/// convention. The SQL column itself is owned by `kb-core::frontmatter`; see
+/// the `pages.search_required_phrase` column on `SearchRow` in `kb/main.rs`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum EditField {
     Title,

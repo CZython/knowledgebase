@@ -55,6 +55,14 @@ const EXIT_ERR: i32 = 1;
 const EXIT_SECTION: i32 = 2;
 const EXIT_ETAG: i32 = 3;
 
+/// D7: the *package* this body was compiled into, as a value the code can
+/// branch on. `kb-user` (the full build) compiles with `editor` ON;
+/// `kb-hardened` compiles with it OFF (see the `Cli` doc block). A single
+/// `cfg!` here is the one place the answer is decided, so every call site
+/// that needs "am I the agent build?" can compare `VARIANT == "hardened"`
+/// instead of re-evaluating the feature by hand.
+pub const VARIANT: &str = if cfg!(feature = "editor") { "user" } else { "hardened" };
+
 /// A success code, or `(message, exit-code)` for a typed failure. `?` over any
 /// `Result<_, (String, i32)>` therefore unwinds the whole command with the
 /// right exit code, so fallible steps compose cleanly.
@@ -72,11 +80,11 @@ type Kb = Result<i32, (String, i32)>;
 /// `kb-hardened` — the agent build: neither ON by default, ` [hardened]` suffix
 #[derive(Parser)]
 #[command(
-    name = if cfg!(feature = "editor") { "kb" } else { "kb-hardened" },
-    version = if cfg!(feature = "editor") {
-        env!("CARGO_PKG_VERSION")
-    } else {
+    name = if VARIANT == "hardened" { "kb-hardened" } else { "kb" },
+    version = if VARIANT == "hardened" {
         concat!(env!("CARGO_PKG_VERSION"), " [hardened]")
+    } else {
+        env!("CARGO_PKG_VERSION")
     },
     about = "A single-binary Markdown knowledge base over embedded SQLite + FTS5 —\nindex a tree of notes, search them, and edit them by section.",
     long_about = "kb is a single-binary Markdown knowledge base backed by an embedded\nSQLite + FTS5 index. Register roots of note files, search them (with\n`type:`/`tag:` filters, OR/NOT, phrases, and tag-alias expansion), and\ncorrectly-shaped edits that take a whole new section's bytes in place of\na diff, or apply external `diff -u` / `git diff` patches. All of the\nedit / resolve / alias / index logic is in a Verus-verified pure-Rust\ncrate; the DB shell is an assumed boundary. The full build ships a TUI\nplus an in-editor flow; the hardened build is headless for agents.",
@@ -555,8 +563,11 @@ fn main() {
         "edit",
         "rm",
     ];
-    if non_flag.len() == 1 && !SUBCMDS.contains(&non_flag[0].as_str()) {
-        let s = non_flag[0];
+    if non_flag.len() == 1 {
+        let s = non_flag
+            .first()
+            .expect("len()==1 guarantees non-empty");
+        if !SUBCMDS.contains(&s.as_str()) {
         // Preserve any flags the caller passed (e.g. `--db PATH`), so the
         // reconstructed command runs against the same DB as an explicit one.
         let flags: Vec<String> = args
@@ -578,6 +589,7 @@ fn main() {
             let cli = Cli::parse_from(make("search", s));
             let code = run(&cli);
             std::process::exit(code);
+        }
         }
     }
     let cli = Cli::parse();
@@ -1160,6 +1172,13 @@ struct SearchRow {
     description: Option<String>,
     root: String,
     rel_path: String,
+    /// The `pages.search_required_phrase` **corpus field** (a list of
+    /// gate-phrase values, owned by `kb-core::frontmatter`). Not to be
+    /// confused with the *TUI palette role* `gated` in `kb/tui/palette.rs`,
+    /// which is the *role name* the TUI uses to style pages that *have* this
+    /// field — a different concept that happens to share the identifier for
+    /// discoverability (see the `EditField::SearchRequiredPhrase` note in
+    /// `kb/tui/mod.rs`).
     search_required_phrase: Option<String>,
     score: Option<f64>,
 }

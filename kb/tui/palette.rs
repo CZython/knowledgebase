@@ -28,6 +28,13 @@
 //! | `selection`     | highlight row (lists: browse / alias / roots / picker)    | —      |
 //! | `selection_ctx` | sub-selection (an item within a list value)               | —      |
 //!
+//! **Naming note (D1):** `gated` / `open` style pages on the *corpus*
+//! `search_required_phrase` field — a DB column owned by `kb-core::frontmatter`
+//! (queries in `kb/main.rs`). The palette role is *this file's* name for "a
+//! page with a gate," not the SQL column itself; the two are linked by
+//! convention only. Touching either without the other can desync what `◆`
+//! means visually from what the frontmatter actually stores.
+//!
 //! The symbols are **palette-independent** (they live in `render.rs`, not
 //! here) so any `--palette` user gets the same visual language — only the
 //! foreground/background colors change.

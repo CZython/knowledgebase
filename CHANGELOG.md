@@ -7,6 +7,12 @@ the API is still moving; breaking changes are called out explicitly.
 ## [Unreleased]
 
 ### Added
+- **`D7` — the package identity is now a `const` in the shared body.**
+  `kb/main.rs` defines `pub const VARIANT: &str = "user" | "hardened"` once,
+  and the existing `Cli` derive (`name = …`, `version = …`) now reads
+  `VARIANT` instead of re-evaluating `cfg!(feature = "editor")` inline. Any
+  future call site that needs "am I the agent build?" can `VARIANT ==
+  "hardened"` and not re-derive the answer from a feature flag.
 - **Windows is now a first-class target (runtime, not just "it compiles").**
   The build machinery was already there (`dist/build-windows.sh` — native MSVC
   or `mingw-w64` cross), but the *behavior* was POSIX-baked. Every place that
@@ -206,6 +212,13 @@ the API is still moving; breaking changes are called out explicitly.
   2 (marker; no on-disk DBs existed to migrate).
 
 ### Changed
+- **`D10` — the README now enumerates every root-level document, with a
+  one-line "what is it for" summary.** Previously a newcomer had to open each
+  of `PLAN.md` / `CONTRIBUTING.md` / `HARDENED_BUILD.md` /
+  `SECURITY_REPORT.md` / `PENTEST_HARDENED.md` / `CODEBASE_REVIEW.md` /
+  `TODO-palette.md` to figure out whether it was "build", "verify", or "the bug
+  catalogue." A *Further reading* table at the bottom of the README answers that
+  question in one place.
 - **`edit in place` (`-e`) / `v` failures now tell you *why*.** A failed
   *launch* (no editor found) and a non-zero *exit* are reported distinctly, and
   the launch case names the env var tried (`$VISUAL`/`$EDITOR`) and that the
@@ -224,6 +237,25 @@ the API is still moving; breaking changes are called out explicitly.
    the retry path. See the README's agent-contract section.
 
 ### Fixed
+- **`B4` — the bare-token dispatch guard is now local to the site that uses it.**
+  The old form read `non_flag[0]` inside `if non_flag.len() == 1 && …`; the
+  guard was a *couple of lines* from the index, so a reader could not tell at a
+  glance the index was safe. Now the first element is pinned (`non_flag.first()`)
+  *under* the `len()==1` check, and every later use is the bound name — the
+  "am I allowed to index?" question is answered right where the value is read.
+- **`B3` — `diff.rs` no longer re-indexes a line it just pattern-matched.**
+  The `Some(b' ') | Some(b'-') | Some(b'+')` arm read `l.as_bytes()[0]` *and*
+  `l[1..]` from the same string. It now matches the first byte by name
+  (`kind @ (b' ' | b'-' | b'+')`) and takes the rest with `split_at(1)` — a
+  single pass over the line, and the one char boundary is provably valid
+  because the matched arm is an ASCII prefix. A future refactor that loosens
+  the arm to `Some(_)` can't silently reach the old second index.
+- **`D1` — `search_required_phrase` now carries a cross-reference at both of
+  its sites.** The identifier is used for a *corpus field* (the SQL column,
+  `kb-core::frontmatter`) and for a *TUI palette role* (`gated` in
+  `kb/tui/palette.rs`), which are different concepts that happened to share a
+  name. Each site now points at the other, so "change the colour of the
+  gate" and "change the SQL column" no longer send a reader to the wrong file.
 - **`kb tui` no longer breaks `kb-hardened --features tui` (F1).** The
   `kb-hardened` package declared a `tui` feature that *looked* like
   `kb-user`'s but was missing `serde` + `toml`, so `cargo build -p

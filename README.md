@@ -218,6 +218,28 @@ comments for the full rationale of the two-package split.
 
 ---
 
+## Further reading
+
+The repo root holds the supporting docs and the verification entry points —
+one-line summaries of each:
+
+| File | What it is |
+|------|------------|
+| [`PLAN.md`](PLAN.md) | Original design and milestone plan (M0–M9) for the single-binary KB. |
+| [`CONTRIBUTING.md`](CONTRIBUTING.md) | The dev loop (`./gate.sh`), feature-flag matrix, and shared-body gotchas. |
+| [`HARDENED_BUILD.md`](HARDENED_BUILD.md) | What `kb-hardened` strips (no ratatui, no crossterm, no unicode-width) and why. |
+| [`SECURITY_REPORT.md`](SECURITY_REPORT.md) | Threat model and hardening decisions for the SQLite + editor boundary. |
+| [`PENTEST_HARDENED.md`](PENTEST_HARDENED.md) | Hardened-build-specific pentest findings, with the closure notes. |
+| [`CODEBASE_REVIEW.md`](CODEBASE_REVIEW.md) | Catalogue of findings from a codebase-level review (the *source* for many of the fixes recorded in `CHANGELOG.md`). |
+| [`TODO-palette.md`](TODO-palette.md) | TUI palette follow-ups (the "palettes are automatically bottom-tier" rule lives here too). |
+| [`CHANGELOG.md`](CHANGELOG.md) | Semver history, including every fix batch in this session. |
+| [`gate.sh`](gate.sh) | Seven-stage gate: build, single-package build, clippy -D warnings, tests, Verus + z3, behavior, dep-tree. |
+| [`verify.sh`](verify.sh) | Verus + z3 spec pass over `kb-core/spec`. |
+| [`LICENSE`](LICENSE) | MIT. |
+
+The two `.sh` scripts are the *only* entry points you need to trust the build.
+Everything else is documentation *about* the build.
+
 ## Contributing
 
 See [CONTRIBUTING.md](CONTRIBUTING.md) for the dev loop (`./gate.sh`), the
