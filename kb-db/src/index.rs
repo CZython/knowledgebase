@@ -370,28 +370,31 @@ pub fn upsert_page(db: &Db, rec: &PageRecord) -> Result<usize> {
     // 4. The page row. The FTS5 triggers (migrate) keep `pages_fts` in
     //    lockstep — we do not touch it directly.
     let now = now_iso8601();
+    let gate = super::migrate::COL_SEARCH_REQUIRED_PHRASE;
     let res = tx.execute(
-        r#"
-        INSERT INTO pages (
-          abs_path, id, type, root, rel_path, title, language,
-          description, search_required_phrase, frontmatter_text, body,
-          mtime_ns, content_hash, created_at, updated_at
-        ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?14)
-        ON CONFLICT (abs_path) DO UPDATE SET
-          id = excluded.id,
-          type = excluded.type,
-          root = excluded.root,
-          rel_path = excluded.rel_path,
-          title = excluded.title,
-          language = excluded.language,
-          description = excluded.description,
-          search_required_phrase = excluded.search_required_phrase,
-          frontmatter_text = excluded.frontmatter_text,
-          body = excluded.body,
-          mtime_ns = excluded.mtime_ns,
-          content_hash = excluded.content_hash,
-          updated_at = excluded.updated_at
-        "#,
+        &format!(
+            r#"
+         INSERT INTO pages (
+           abs_path, id, type, root, rel_path, title, language,
+           description, {gate}, frontmatter_text, body,
+           mtime_ns, content_hash, created_at, updated_at
+         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?14)
+         ON CONFLICT (abs_path) DO UPDATE SET
+           id = excluded.id,
+           type = excluded.type,
+           root = excluded.root,
+           rel_path = excluded.rel_path,
+           title = excluded.title,
+           language = excluded.language,
+           description = excluded.description,
+           {gate} = excluded.{gate},
+           frontmatter_text = excluded.frontmatter_text,
+           body = excluded.body,
+           mtime_ns = excluded.mtime_ns,
+           content_hash = excluded.content_hash,
+           updated_at = excluded.updated_at
+         "#
+        ),
         params![
             rec.abs_path,
             rec.id,

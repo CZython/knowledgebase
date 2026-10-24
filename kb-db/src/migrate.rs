@@ -24,6 +24,14 @@ use rusqlite::{Connection, Result};
 /// Current schema version (recorded in `meta.version` for future upgrades).
 pub const SCHEMA_VERSION: &str = "2";
 
+/// D2: the *single owner* of the `pages` gate-phrase column name. The SQL
+/// column literal used to be hand-typed in 4+ queries across `kb/main.rs` —
+/// a rename was a multi-file edit with no compiler help. Query sites now
+/// `format!` this in, so a future schema rename touches `SCHEMA_SQL` (below)
+/// and this one const, and every query follows automatically. (The DDL in
+/// `SCHEMA_SQL` stays a literal: it is the definition site.)
+pub const COL_SEARCH_REQUIRED_PHRASE: &str = "search_required_phrase";
+
 /// The complete v0 schema (PLAN §8 + FTS5 sync triggers). Idempotent.
 const SCHEMA_SQL: &str = r#"
 CREATE TABLE IF NOT EXISTS roots (

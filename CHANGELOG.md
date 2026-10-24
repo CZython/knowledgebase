@@ -211,7 +211,21 @@ the API is still moving; breaking changes are called out explicitly.
   (`page_gates`, `GateClass`, "gated page") is unchanged. `SCHEMA_VERSION` is
   2 (marker; no on-disk DBs existed to migrate).
 
-### Changed
+ ### Changed
+- **`A1` — the shared CLI body is split into a `kb/cli/` module tree.**
+  `kb/main.rs` was a single ~3.4k-line file holding all the CLI verbs plus the
+  shared core. It is now a thin crate root (constants, the clap schema,
+  `main`/`run`, and the shared helpers) that declares `mod cli;` and pulls the
+  verbs in with `use crate::cli::*;`. The verbs live in one file per
+  responsibility — `search`, `browse`, `tag`, `links`, `info`, `section`,
+  `show`, `roots`, `create`, `cmd_add`, `json`, `writeops`, `textsrc`,
+  `editor` — wired up by `kb/cli/mod.rs`. Each verb file does `use crate::*;`
+  so it reaches the shared helpers and sibling verbs through the one root
+  namespace (the same single-file namespace the body always had — just with a
+  file per concern). The `editor` module is `#[cfg(feature = "editor")]`-gated
+  end-to-end (declaration, re-export, and inner import), so a `kb-hardened`
+  build still compiles it away with zero unused-import warnings under
+  `clippy -D warnings`. No behavior changed; the 448-test gate is byte-identical.
 - **`D10` — the README now enumerates every root-level document, with a
   one-line "what is it for" summary.** Previously a newcomer had to open each
   of `PLAN.md` / `CONTRIBUTING.md` / `HARDENED_BUILD.md` /
@@ -236,7 +250,16 @@ the API is still moving; breaking changes are called out explicitly.
    doing `serde_json::from_str(&stdout)` no longer get a silent empty string on
    the retry path. See the README's agent-contract section.
 
-### Fixed
+ ### Fixed
+- **`D2` — the `pages.search_required_phrase` SQL column now has one owner.**
+  Every query site hand-typed the literal string `"search_required_phrase"`, so
+  renaming the column would silently break any site the reader missed. The name
+  now lives in a single `pub const COL_SEARCH_REQUIRED_PHRASE` in `kb-db`
+  (the crate that owns the schema DDL), and the five shell query sites in the
+  CLI (`search` FTS + non-FTS, `browse` LIKE + NONE, `info`) plus the `index`
+  upsert `format!` it into the SQL. Rename the constant once and every
+  statement follows; a mismatch between two of the six sites can no longer
+  compile into a silent "no such column".
 - **`B4` — the bare-token dispatch guard is now local to the site that uses it.**
   The old form read `non_flag[0]` inside `if non_flag.len() == 1 && …`; the
   guard was a *couple of lines* from the index, so a reader could not tell at a
