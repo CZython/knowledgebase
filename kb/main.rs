@@ -700,12 +700,11 @@ pub(crate) fn run(cli: &Cli) -> i32 {
                 )
             };
             if *json {
-                println!(
-                    "{{\n  \"command\": {},\n  \"db\": {},\n  \"line\": {}\n}}",
-                    jstr(&command),
-                    jstr(&dbp),
-                    jstr(&line),
-                );
+                let mut o = JObject::new();
+                o.s("command", &command);
+                o.s("db", &dbp);
+                o.s("line", &line);
+                println!("{}", o.render());
             } else {
                 println!("{command}");
                 println!("# {how}:");
@@ -777,15 +776,14 @@ pub(crate) fn roots_with_seq(db: &Db) -> Result<Vec<(String, i64)>, (String, i32
 /// The `RefreshSummary` as a JSON object (or `None` if the refresh failed — the
 /// caller maps the error before this is invoked).
 pub(crate) fn refresh_summary_json(full: bool, s: &kb_db::refresh::RefreshSummary) -> String {
-    format!(
-        "{{\n  \"full\": {},\n  \"indexed\": {},\n  \"skipped_no_type\": {},\n  \"skipped_missing_slug\": {},\n  \"gc\": {},\n  \"roots_walked\": {}\n}}",
-        jbool(full),
-        s.indexed,
-        s.skipped_no_type,
-        s.skipped_missing_slug,
-        s.gc,
-        s.roots_walked,
-    )
+    let mut o = JObject::new();
+    o.b("full", full);
+    o.i("indexed", s.indexed as i64);
+    o.i("skipped_no_type", s.skipped_no_type as i64);
+    o.i("skipped_missing_slug", s.skipped_missing_slug as i64);
+    o.i("gc", s.gc as i64);
+    o.i("roots_walked", s.roots_walked as i64);
+    o.render()
 }
 
 // ---- search ----
@@ -891,16 +889,15 @@ pub(crate) fn commit(path: &Path, orig: Vec<u8>, new: Vec<u8>, dry_run: bool, as
     let changed = new != orig;
 
     let emit_json = |applied: bool| {
-        println!(
-            "{{\n  \"file\": {},\n  \"changed\": {},\n  \"dry_run\": {},\n  \"applied\": {},\n  \"bytes_before\": {},\n  \"bytes_after\": {},\n  \"diff\": {}\n}}",
-            jstr(&path.display().to_string()),
-            jbool(changed),
-            jbool(dry_run),
-            jbool(applied),
-            orig.len(),
-            new.len(),
-            jstr(&d),
-        );
+        let mut o = JObject::new();
+        o.s("file", &path.display().to_string());
+        o.b("changed", changed);
+        o.b("dry_run", dry_run);
+        o.b("applied", applied);
+        o.i("bytes_before", orig.len() as i64);
+        o.i("bytes_after", new.len() as i64);
+        o.s("diff", &d);
+        println!("{}", o.render());
     };
 
     if !changed {

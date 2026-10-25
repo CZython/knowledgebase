@@ -57,22 +57,23 @@ pub(crate) fn cmd_info(dbpath: Option<&Path>, path: &Path, json: bool) -> Kb {
     let search_required_phrase = search_required_phrase.unwrap_or_default();
     if json {
         let tag_arr: Vec<String> = tags.split(',')
-            .filter(|s| !s.trim().is_empty()).map(|s| jstr(s.trim())).collect();
-        println!(
-            "{{\n  \"id\": {},\n  \"type\": {},\n  \"title\": {},\n  \"abs_path\": {},\n  \"rel_path\": {},\n  \"description\": {},\n  \"search_required_phrase\": {},\n  \"tags\": [{}],\n  \"links\": {{\n    \"out\": {},\n    \"in\": {}\n  }},\n  \"mtime\": {},\n  \"created_at\": {}\n}}",
-            jstr(&id),
-            jstr(&pt),
-            jstr_opt(&title),
-            jstr(&abs_path),
-            jstr(&_rel_path),
-            jstr_opt(&description),
-            jstr(&search_required_phrase),
-            tag_arr.join(","),
-            fwd_count,
-            back_count,
-            secs_f,
-            jstr_opt(&created_at),
-        );
+            .filter(|s| !s.trim().is_empty()).map(|s| s.trim().to_string()).collect();
+        let mut o = JObject::new();
+        o.s("id", &id);
+        o.s("type", &pt);
+        o.opt("title", &title);
+        o.s("abs_path", &abs_path);
+        o.s("rel_path", &_rel_path);
+        o.opt("description", &description);
+        o.s("search_required_phrase", &search_required_phrase);
+        o.raw("tags", inline_array(&tag_arr));
+        let mut links = JObject::new();
+        links.i("out", fwd_count);
+        links.i("in", back_count);
+        o.raw("links", links.render());
+        o.n1("mtime", secs_f);
+        o.opt("created_at", &created_at);
+        println!("{}", o.render());
         return Ok(EXIT_OK);
     }
     println!("path:    {abs_path}");
@@ -176,26 +177,35 @@ pub(crate) fn cmd_stats(dbpath: Option<&Path>, json: bool) -> Kb {
         .flatten();
 
     if json {
-        let root_items: Vec<String> = root_stats.iter().map(|(path, exts, inc, count)| {
-            let mut o = format!("\n    {{\n      \"path\": {}", jstr(path));
+        let mut root_items: Vec<String> = Vec::new();
+        for (path, exts, inc, count) in root_stats.iter() {
+            let mut ro = JObject::new();
+            ro.s("path", path);
             if let Some(v) = exts {
-                let arr: Vec<String> = v.iter().map(|e| jstr(e)).collect();
-                o.push_str(&format!(",\n      \"ext\": [{}]", arr.join(",")));
+                ro.raw("ext", inline_array(v));
             }
-            o.push_str(&format!(",\n      \"include_hidden\": {}", jbool(*inc != 0)));
-            o.push_str(&format!(",\n      \"pages\": {count}\n    }}\n"));
-            o
-        }).collect();
+            ro.b("include_hidden", *inc != 0);
+            ro.i("pages", *count);
+            root_items.push(ro.render());
+        }
         let last_val = match last {
-            Some(ns) => format!("{:?}", ns as f64 / 1e9),
-            None => "null".into(),
+            Some(ns) => (ns as f64 / 1e9).to_string(),
+            None => "null".to_string(),
         };
-        println!(
-            "{{\n  \"roots\": [{}{}],\n  \"totals\": {{\n    \"pages\": {total},\n    \"tags\": {tag_count},\n    \"links\": {link_count},\n    \"tag_aliases\": {alias_count}\n  }},\n  \"db\": {{\n    \"path\": {},\n    \"size_bytes\": {size},\n    \"last_touch\": {last_val}\n  }}\n}}",
-            if root_items.is_empty() { String::new() } else { root_items.join(",") },
-            if root_items.is_empty() { "" } else { " " },
-            jstr(&db_path),
-        );
+        let mut totals = JObject::new();
+        totals.i("pages", total);
+        totals.i("tags", tag_count);
+        totals.i("links", link_count);
+        totals.i("tag_aliases", alias_count);
+        let mut dbo = JObject::new();
+        dbo.s("path", &db_path);
+        dbo.i("size_bytes", size as i64);
+        dbo.raw("last_touch", last_val);
+        let mut o = JObject::new();
+        o.raw("roots", block_array(&root_items));
+        o.raw("totals", totals.render());
+        o.raw("db", dbo.render());
+        println!("{}", o.render());
         return Ok(EXIT_OK);
     }
 

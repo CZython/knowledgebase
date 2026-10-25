@@ -201,20 +201,18 @@ pub(crate) fn cmd_resolve(dbpath: Option<&Path>, query: &str, json: bool) -> Kb 
     if json {
         let items: Vec<String> = resolved.iter().map(|abs| {
             let p = idx.get(abs.as_str()).unwrap();
-            format!(
-                "\n  {{\n    \"id\": {},\n    \"type\": {},\n    \"slug\": {},\n    \"abs_path\": {}\n  }}",
-                jstr(&format!("{}:{}", p.typ, p.slug)),
-                jstr(&p.typ),
-                jstr(&p.slug),
-                jstr(&p.abs_path),
-            )
+            let mut o = JObject::new();
+            o.s("id", &format!("{}:{}", p.typ, p.slug));
+            o.s("type", &p.typ);
+            o.s("slug", &p.slug);
+            o.s("abs_path", &p.abs_path);
+            o.render()
         }).collect();
-        println!(
-            "{{\n  \"query\": {},\n  \"outcome\": {},\n  \"candidates\": [{}]\n}}",
-            jstr(query),
-            jstr(kind),
-            items.join(","),
-        );
+        let mut o = JObject::new();
+        o.s("query", query);
+        o.s("outcome", kind);
+        o.raw("candidates", block_array(&items));
+        println!("{}", o.render());
         return Ok(EXIT_OK);
     }
     if resolved.is_empty() {

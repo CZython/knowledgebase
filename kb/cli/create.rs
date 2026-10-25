@@ -240,19 +240,19 @@ pub(crate) struct CreateReport<'a> {
 
 impl CreateReport<'_> {
     pub(crate) fn to_json(&self) -> String {
-        format!(
-            "{{\n  \"file\": {},\n  \"type\": {},\n  \"title\": {},\n  \"id\": {},\n  \"created\": {},\n  \"edited\": {},\n  \"indexed\": {},\n  \"dry_run\": {},\n  \"bytes\": {},\n  \"diff\": {}\n}}",
-            jstr(&self.target.display().to_string()),
-            jstr(self.kind),
-            jstr(self.title),
-            self.id.map(jstr).unwrap_or_else(|| "null".to_string()),
-            jbool(self.created),
-            jbool(self.edited),
-            jbool(self.indexed),
-            jbool(self.dry_run),
-            self.bytes,
-            jstr(self.diff),
-        )
+        let mut o = JObject::new();
+        o.s("file", &self.target.display().to_string());
+        o.s("type", self.kind);
+        o.s("title", self.title);
+        let id_opt: Option<String> = self.id.map(|s| s.to_string());
+        o.opt("id", &id_opt);
+        o.b("created", self.created);
+        o.b("edited", self.edited);
+        o.b("indexed", self.indexed);
+        o.b("dry_run", self.dry_run);
+        o.i("bytes", self.bytes as i64);
+        o.s("diff", self.diff);
+        o.render()
     }
 }
 

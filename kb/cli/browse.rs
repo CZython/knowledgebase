@@ -65,27 +65,23 @@ pub(crate) fn cmd_browse(dbpath: Option<&Path>, path: Option<&Path>, json: bool)
             }
         };
 
-    // JSON: a clean array of page objects.
+    // JSON: a clean array of page objects (or the canonical `[]` when empty).
     if json {
-        if pages.is_empty() {
-            println!("[]");
-        } else {
-            let mut items = Vec::new();
-            for (abs_path, id, pt, title, _root, rel_path, search_required_phrase) in pages.iter() {
-                let tags: Vec<String> = page_tags_str(&db, abs_path).split(',')
-                    .filter(|s| !s.trim().is_empty()).map(|s| s.trim().to_string()).collect();
-                let refs = if pt == "label" { Some(label_expand(&db, abs_path)) } else { None };
-                let gj = PageJson {
-                    id: id.clone(), pt: pt.clone(),
-                    title: title.clone(), abs: abs_path.clone(), rel: rel_path.clone(),
-                    tags, gates: search_required_phrase.clone().unwrap_or_default(),
-                    links: Some(page_link_count(&db, abs_path)),
-                    refs, description: None,
-                };
-                items.push(gj.render());
-            }
-            println!("[{}]", items.join(","));
+        let mut items = Vec::new();
+        for (abs_path, id, pt, title, _root, rel_path, search_required_phrase) in pages.iter() {
+            let tags: Vec<String> = page_tags_str(&db, abs_path).split(',')
+                .filter(|s| !s.trim().is_empty()).map(|s| s.trim().to_string()).collect();
+            let refs = if pt == "label" { Some(label_expand(&db, abs_path)) } else { None };
+            let gj = PageJson {
+                id: id.clone(), pt: pt.clone(),
+                title: title.clone(), abs: abs_path.clone(), rel: rel_path.clone(),
+                tags, gates: search_required_phrase.clone().unwrap_or_default(),
+                links: Some(page_link_count(&db, abs_path)),
+                refs, description: None,
+            };
+            items.push(gj.render());
         }
+        println!("{}", top_array(&items));
         return Ok(EXIT_OK);
     }
 

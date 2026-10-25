@@ -211,7 +211,29 @@ the API is still moving; breaking changes are called out explicitly.
   (`page_gates`, `GateClass`, "gated page") is unchanged. `SCHEMA_VERSION` is
   2 (marker; no on-disk DBs existed to migrate).
 
- ### Changed
+  ### Changed
+- **`C3` — all `--json` output now flows through one mini-library.**
+  Previously every verb hand-rolled its own JSON — `search` built compact single-line
+  rows, `info`/`roots`/`stats`/`create`/`add`/`refresh`/`commit`/`etag-error`
+  each `push_str`-ed a different `format!` template, and the *empty-array*
+  case was decided per-emitter (hence the `F6` `[ ]` vs `[]` vs `[{}]`
+  inconsistency). `kb/cli/json.rs` now owns the shape:
+  * `JObject` — an ordered object with a fixed layout; string values always go
+    through the one `jstr` escaper, numbers/booleans are inline literals, and
+    nested objects/arrays are passed in pre-rendered. Two renders —
+    `render()` (pretty, the `info`/`create` family) and `render_compact()`
+    (the `search` row family, byte-pinned in `m7_multifile`).
+  * `inline_array` / `block_array` / `top_array` — one owner of the
+    *empty* list for each of the three shapes: `["a","b"]` (string values),
+    one-object-per-line (result lists), and the top-level `[…]` stdout
+    result (browse / tag / search). All collapse to the identical canonical
+    `[]` when empty — `roots` no longer emits a stray `[ ]`.
+  * `PageJson` — the single page-record shape shared by `browse`/`tag`/
+    `info`/`search` — is now built *through* the same `JObject`/`JArray`
+    primitives, so the page shape is one thing in exactly one place.
+  No decoded value changed; the `jstr` / `jbool` / `PageJson::render` unit
+  tests and the `m9_json_fidelity` / `m9_agent_surface` / `m7` byte pins are
+  all green.
 - **`A1` — the shared CLI body is split into a `kb/cli/` module tree.**
   `kb/main.rs` was a single ~3.4k-line file holding all the CLI verbs plus the
   shared core. It is now a thin crate root (constants, the clap schema,

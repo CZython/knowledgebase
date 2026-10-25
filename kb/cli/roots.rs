@@ -19,28 +19,22 @@ pub(crate) fn cmd_roots(dbpath: Option<&Path>, json: bool) -> Kb {
         .map_err(|e| (format!("rows: {e}"), EXIT_ERR))?;
 
     if json {
-        if roots.is_empty() {
-            println!(r#"[ ]"#);
-            return Ok(EXIT_OK);
-        }
         let items: Vec<String> = roots.iter().map(|(path, added_at, extra_exts, include_hidden)| {
-            let mut o = String::new();
-            o.push_str(&format!("\n  {{\n    \"path\": {}", jstr(path)));
+            let mut o = JObject::new();
+            o.s("path", path);
             if let Some(a) = added_at {
-                o.push_str(&format!(",\n    \"added_at\": {}", jstr(a)));
+                o.s("added_at", a);
             }
             if let Some(exts) = extra_exts {
                 let v: Vec<String> = exts.lines().map(|l| l.to_string()).filter(|l| !l.is_empty()).collect();
                 if !v.is_empty() {
-                    let arr: Vec<String> = v.iter().map(|e| jstr(e)).collect();
-                    o.push_str(&format!(",\n    \"ext\": [{}]", arr.join(",")));
+                    o.raw("ext", inline_array(&v));
                 }
             }
-            o.push_str(&format!(",\n    \"include_hidden\": {}", jbool(*include_hidden != 0)));
-            o.push_str("\n  }\n");
-            o
+            o.b("include_hidden", *include_hidden != 0);
+            o.render()
         }).collect();
-        println!("[{}]", items.join(","));
+        println!("{}", top_array(&items));
         return Ok(EXIT_OK);
     }
 

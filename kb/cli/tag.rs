@@ -73,23 +73,25 @@ pub(crate) fn cmd_tag(dbpath: Option<&Path>, tag: &str, json: bool) -> Kb {
         // An empty match-set is still a clean empty array (the agent does not
         // need the human "match-set was: ..." hint).
         if pages.is_empty() {
-            println!("[]");
-        } else {
-            let mut items = Vec::new();
-            for (abs_path, id, pt, title, _root, rel_path) in pages.iter() {
-                let tags: Vec<String> = page_tags_str(&db, abs_path).split(',')
-                    .filter(|s| !s.trim().is_empty()).map(|s| s.trim().to_string()).collect();
-                let refs = if pt == "label" { Some(label_expand(&db, abs_path)) } else { None };
-                let gj = PageJson {
-                    id: id.clone(), pt: pt.clone(),
-                    title: title.clone(), abs: abs_path.clone(), rel: rel_path.clone(),
-                    tags, gates: String::new(),
-                    links: None, refs, description: None,
-                };
-                items.push(gj.render());
-            }
-            println!("[{}]", items.join(","));
+            // Canonical empty array — `json.loads` must see a genuinely empty
+            // list (F6 / C3 exact pin, asserted in `m9_agent_surface`).
+            println!("{}", top_array(&[]));
+            return Ok(EXIT_OK);
         }
+        let mut items = Vec::new();
+        for (abs_path, id, pt, title, _root, rel_path) in pages.iter() {
+            let tags: Vec<String> = page_tags_str(&db, abs_path).split(',')
+                .filter(|s| !s.trim().is_empty()).map(|s| s.trim().to_string()).collect();
+            let refs = if pt == "label" { Some(label_expand(&db, abs_path)) } else { None };
+            let gj = PageJson {
+                id: id.clone(), pt: pt.clone(),
+                title: title.clone(), abs: abs_path.clone(), rel: rel_path.clone(),
+                tags, gates: String::new(),
+                links: None, refs, description: None,
+            };
+            items.push(gj.render());
+        }
+        println!("{}", top_array(&items));
         return Ok(EXIT_OK);
     }
 
@@ -243,9 +245,10 @@ pub(crate) fn cmd_tag_alias(dbpath: Option<&Path>, o: &TagAliasOpts, json: bool)
         tx.commit()
             .map_err(|e| (format!("commit import: {e}"), EXIT_ERR))?;
         if json {
-            println!(
-                "{{\n  \"loaded\": {loaded},\n  \"skipped\": {skipped}\n}}"
-            );
+            let mut o = JObject::new();
+            o.i("loaded", loaded as i64);
+            o.i("skipped", skipped as i64);
+            println!("{}", o.render());
         } else {
             println!(
                 "imported {loaded} alias row(s) (last-wins on duplicate aliases); {skipped} line(s) skipped (blank/comment/malformed)",
@@ -264,18 +267,13 @@ pub(crate) fn cmd_tag_alias(dbpath: Option<&Path>, o: &TagAliasOpts, json: bool)
             .collect::<Result<Vec<_>, _>>()
             .map_err(|e| (format!("rows: {e}"), EXIT_ERR))?;
         if json {
-            if aliases.is_empty() {
-                println!("[]");
-            } else {
-                let items: Vec<String> = aliases.iter().map(|(alias, canonical)| {
-                    format!(
-                        "\n  {{\n    \"alias\": {},\n    \"canonical\": {}\n  }}",
-                        jstr(alias),
-                        jstr(canonical),
-                    )
-                }).collect();
-                println!("[{}]", items.join(","));
-            }
+            let items: Vec<String> = aliases.iter().map(|(alias, canonical)| {
+                let mut o = JObject::new();
+                o.s("alias", alias);
+                o.s("canonical", canonical);
+                o.render()
+            }).collect();
+            println!("{}", top_array(&items));
             return Ok(EXIT_OK);
         }
         if aliases.is_empty() {

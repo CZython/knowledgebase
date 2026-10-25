@@ -13,11 +13,10 @@ pub(crate) fn cmd_add(dbpath: Option<&Path>, path: &Path, ext: &[String], includ
     if json {
         let summary = kb_refresh::refresh(&db)
             .map_err(|e| (format!("refresh: {e}"), EXIT_ERR))?;
-        println!(
-            "{{\n  \"registered\": {},\n  \"refresh\": {}\n}}",
-            jstr(&canonical.to_string_lossy()),
-            refresh_summary_json(false, &summary),
-        );
+        let mut o = JObject::new();
+        o.s("registered", &canonical.to_string_lossy());
+        o.raw("refresh", refresh_summary_json(false, &summary));
+        println!("{}", o.render());
         return Ok(EXIT_OK);
     }
     println!("root registered: {}", canonical.display());

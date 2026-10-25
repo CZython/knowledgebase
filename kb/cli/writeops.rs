@@ -7,14 +7,16 @@ use crate::*;
 /// `run` prints the human message to stderr and the process exits `EXIT_ETAG`.
 /// `scope` disambiguates a section ref (`"1.2"`) from the whole file (`"*"`).
 pub(crate) fn emit_etag_error_json(scope: &str, expected: &str, actual: &str) {
-    println!(
-        "{{\n  \"ok\": false,\n  \"applied\": false,\n  \"op\": \"etag_check\",\n  \"scope\": {},\n  \"code\": {},\n  \"error\": {},\n  \"etag_expected\": {},\n  \"etag_actual\": {}\n}}",
-        jstr(scope),
-        EXIT_ETAG,
-        jstr(&format!("etag mismatch: expected {expected}, got {actual} (section/file changed since read)")),
-        jstr(expected),
-        jstr(actual),
-    );
+    let mut o = JObject::new();
+    o.b("ok", false);
+    o.b("applied", false);
+    o.s("op", "etag_check");
+    o.s("scope", scope);
+    o.i("code", EXIT_ETAG as i64);
+    o.s("error", &format!("etag mismatch: expected {expected}, got {actual} (section/file changed since read)"));
+    o.s("etag_expected", expected);
+    o.s("etag_actual", actual);
+    println!("{}", o.render());
 }
 
 

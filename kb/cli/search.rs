@@ -233,17 +233,17 @@ pub(crate) fn cmd_search(dbpath: Option<&Path>, query: &str, json: bool, limit: 
                 Some(s) => format!("{s:.6}"),
                 None => "null".to_string(),
             };
-            format!(
-                "{{\"id\":{},\"type\":{},\"title\":{},\"description\":{},\"abs_path\":{},\"rel_path\":{},\"score\":{score}}}",
-                jstr(&r.id),
-                jstr(&r.pt),
-                jstr_opt(&r.title),
-                jstr_opt(&r.description),
-                jstr(&r.abs_path),
-                jstr(&r.rel_path),
-            )
+            let mut o = JObject::new();
+            o.s("id", &r.id);
+            o.s("type", &r.pt);
+            o.opt("title", &r.title);
+            o.opt("description", &r.description);
+            o.s("abs_path", &r.abs_path);
+            o.s("rel_path", &r.rel_path);
+            o.raw("score", score);
+            o.render_compact()
         }).collect();
-        println!("[{}]", items.join(","));
+        println!("{}", top_array(&items));
     } else {
         if rows.is_empty() {
             println!("0 results for {query:?} (the query was too strict, or the page is gated)");
