@@ -160,12 +160,12 @@ pub(crate) fn cmd_stats(dbpath: Option<&Path>, json: bool) -> Kb {
     let alias_count: i64 = db.conn
         .query_row("SELECT COUNT(*) FROM tag_aliases", [], |r| r.get(0))
         .unwrap_or(0);
-    // db file size (W-dedup: derive from Db::default_db_path(), not a hardcoded
-    // ~/.local/share/... string; consistent with open_default and the cron verb).
+    // db file size (derive from `default_db_display()` — one shared,
+    // OS-correct source of the default path; consistent with `open_default`,
+    // the `cron` verb, and `Db::default_db_path()`).
     let db_path = dbpath
         .map(|p| p.to_string_lossy().to_string())
-        .or_else(|| Db::default_db_path().map(|p| p.display().to_string()))
-        .unwrap_or_else(|| "~/.local/share/knowledgebase/kb.db".into());
+        .unwrap_or_else(default_db_display);
     let size: u64 = std::fs::metadata(&db_path).map(|m| m.len()).unwrap_or(0);
     let last = db.conn
         .query_row(

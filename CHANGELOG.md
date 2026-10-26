@@ -36,7 +36,39 @@ the API is still moving; breaking changes are called out explicitly.
     `x86_64-pc-windows-gnu`; `kb-db`/`kb` need the `mingw-w64` C cross-compiler
     (a toolchain prerequisite, documented in `dist/build-windows.sh`), not a
     code restriction.
-- **The status bar now carries a severity glyph (`✓` for success, `!` for
+- **Windows build scripts no longer require Git Bash.** Two new `dist/`
+  entry points run a stock Windows shell — `build-windows.bat` (cmd.exe) and
+  `build-windows.ps1` (PowerShell, with an `-Install` switch) — and
+  `build-windows.sh` now surfaces the exact prerequisites when a cross tool
+  is missing. Full details: "### Windows build scripts (added)" below.
+- **The default DB path is now OS-correct at every call site.** The `kb
+  cron` and `kb info` verbs each hard-coded a `~/.local/share/knowledgebase/
+  kb.db` *fallback* string that would print a lie on Windows (the real path
+  via `dirs::data_local_dir()` is `%LOCALAPPDATA%\knowledgebase\kb.db`). Both
+  now call one shared `default_db_display()` (next to `shell_quote`) that
+  resolves the per-user data dir and only falls back to a `~` / `%VAR%`
+  placeholder a human can read when that is unset — and the placeholder is
+  now the right one for the OS the binary was built for. The `--db` help text
+  and the `kb-db` canonical-path docs now name both the POSIX and the
+  Windows location instead of only the former.
+
+### Windows build scripts (added)
+- **`dist/build-windows.bat`** — cmd.exe build+stage+verify (runs everywhere,
+  no shell prerequisites beyond `cargo` + the rust target).
+- **`dist/build-windows.ps1`** — PowerShell build+stage+verify with an
+  `-Install` switch (copy to `%LOCALAPPDATA%\knowledgebase\`, create the dir,
+  `setx` the user PATH); `-Target` / `-Out` flags for control.
+
+### Changed
+- **`default_db_display()` (new, shared body)** now owns the *display* form
+  of the default DB path for every human-facing call site; the two call sites
+  that previously hard-coded a POSIX string now branch on `cfg!(windows)`
+  through it. No behavior change on POSIX — the path is byte-identical — but
+  on a Windows build the `cron` / `info` / help output now shows the correct
+  `%LOCALAPPDATA%` location instead of a `~/.local/share/...` the user would
+  not find. `Db::default_db_path()` (the actual *open* path) was already
+  cross-platform via `dirs` and is untouched; these were the *display-only*
+  fallbacks. (`✓` for success, `!` for
   error; none for info).** In the *colorblind* palette, or in any user TOML
   where the user has collapsed `error` and `success` onto the same color, the
   glyph is the only thing that still tells a write-success apart from a

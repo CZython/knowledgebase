@@ -33,6 +33,22 @@ case "$(uname)" in
     ;;
   Linux)
     echo "==> cargo build --release --target x86_64-pc-windows-gnu -p kb-user (Linux→Windows cross)"
+    # The bundled SQLite (the `-sys` crate) compiles a C translation unit
+    # against a *C* cross-compiler, which must already be installed. On
+    # Debian/Ubuntu that is a two-package job:
+    #   sudo apt-get install -y gcc-mingw-w64-x86-64 binutils-mingw-w64-x86-64
+    #   (optionally: mingw-w64-tools   → provides `x86_64-w64-mingw32-wine`
+    #    to smoke-run the .exe)
+    command -v x86_64-w64-mingw32-gcc >/dev/null 2>&1 || {
+      echo "build-windows.sh: x86_64-w64-mingw32-gcc not found — install:" >&2
+      echo "    sudo apt-get install -y gcc-mingw-w64-x86-64 binutils-mingw-w64-x86-64" >&2
+      exit 1
+    }
+    cargo target list --installed | grep -q "x86_64-pc-windows-gnu" || {
+      echo "build-windows.sh: rust target x86_64-pc-windows-gnu not installed — install:" >&2
+      echo "    rustup target add x86_64-pc-windows-gnu" >&2
+      exit 1
+    }
     CC="${CC:-x86_64-w64-mingw32-gcc}" \
     AR="${AR:-x86_64-w64-mingw32-ar}" \
     CARGO_TARGET_X86_64_PC_WINDOWS_GNU_LINKER="${CARGO_TARGET_X86_64_PC_WINDOWS_GNU_LINKER:-x86_64-w64-mingw32-gcc}" \

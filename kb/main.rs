@@ -96,7 +96,9 @@ pub(crate) type Kb = Result<i32, (String, i32)>;
     long_about = "kb is a single-binary Markdown knowledge base backed by an embedded\nSQLite + FTS5 index. Register roots of note files, search them (with\n`type:`/`tag:` filters, OR/NOT, phrases, and tag-alias expansion), and\ncorrectly-shaped edits that take a whole new section's bytes in place of\na diff, or apply external `diff -u` / `git diff` patches. All of the\nedit / resolve / alias / index logic is in a Verus-verified pure-Rust\ncrate; the DB shell is an assumed boundary. The full build ships a TUI\nplus an in-editor flow; the hardened build is headless for agents.",
 )]
 pub(crate) struct Cli {
-    /// Path to the SQLite DB (default: `~/.local/share/knowledgebase/kb.db`).
+    /// Path to the SQLite DB (default: the per-user data dir —
+    /// `~/.local/share/knowledgebase/kb.db` on POSIX,
+    /// `%LOCALAPPDATA%\knowledgebase\kb.db` on Windows).
     #[arg(long, value_name = "PATH", global = true)]
     db: Option<PathBuf>,
     #[command(subcommand)]
@@ -677,8 +679,7 @@ pub(crate) fn run(cli: &Cli) -> i32 {
                 .db
                 .as_ref()
                 .map(|p| p.display().to_string())
-                .or_else(|| Db::default_db_path().map(|p| p.display().to_string()))
-                .unwrap_or_else(|| "~/.local/share/knowledgebase/kb.db".into());
+                .unwrap_or_else(default_db_display);
             let q = shell_quote(&bin);
             let dq = shell_quote(&dbp);
             // The platform scheduler differs: POSIX uses `crontab`, Windows
@@ -872,6 +873,25 @@ pub(crate) fn shell_quote(s: &str) -> String {
         }
     }
 }
+
+/// The display string for the default DB location. Prefers the real
+/// (cross-platform) path via `dirs::data_local_dir()` (XDG_DATA_HOME on
+/// POSIX, `%LOCALAPPDATA%` on Windows); only if that is unset does it fall
+/// back to a `~` / `%VAR%` placeholder a human can read. One owner, so the
+/// `cron` verb, `info`, and `Db::default_db_path()` all agree on *which file*
+/// the tool would open by default, and the answer is right for the OS the
+/// binary was built for (W3 — previously the fallback string was hard-coded
+/// to a POSIX path and would have been a lie on Windows).
+pub(crate) fn default_db_display() -> String {
+    if let Some(d) = dirs::data_local_dir() {
+        return d.join("knowledgebase").join("kb.db").display().to_string();
+    }
+    if cfg!(windows) {
+        "%LOCALAPPDATA%\\knowledgebase\\kb.db".to_string()
+    } else {
+        "~/.local/share/knowledgebase/kb.db".to_string()
+    }
+} 
 
 // ========================== M6 single-file namespace ==========================
 

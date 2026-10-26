@@ -103,9 +103,10 @@ impl Db {
         Some(dirs::data_local_dir()?.join("knowledgebase").join("kb.db"))
     }
 
-    /// Open the DB at its *projected* location under
-    /// `~/.local/share/knowledgebase/`. Exposed as a constructor so
-    /// tests (M0) and the CLI (M7) share one code path.
+    /// Open the DB at its *projected* location under the per-user data dir
+    /// (`~/.local/share/knowledgebase/` on POSIX, `%LOCALAPPDATA%\knowledgebase\`
+    /// on Windows). Exposed as a constructor so tests (M0) and the CLI (M7)
+    /// share one code path.
     pub fn open_default() -> Result<Db> {
         let path = Self::default_db_path()
             .ok_or_else(|| rusqlite::Error::InvalidPath(PathBuf::from(".")))?;
