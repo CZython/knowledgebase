@@ -1,6 +1,6 @@
 //! Golden fixture structural test (M0).
 //!
-//! The five MD pages under `tests/fixtures/` are the **single source of truth**
+//! The MD pages under `kb-core/testdata/` are the **single source of truth**
 //! for frontmatter shape (PLAN.md Appendix A.1–A.1b) used by the M1
 //! `kb-core::frontmatter` parser and the M5 `kb-db` indexer. This test does
 //! NOT depend on either — it parses just enough (the `---` frontmatter block)
@@ -13,13 +13,15 @@
 
 use std::path::{Path, PathBuf};
 
-/// The workspace-root `tests/fixtures` dir, resolved at build time from
-/// `kb-core`'s manifest so the test works regardless of CWD.
+/// The `kb-core/testdata` fixture tree (the package's own golden set — D9:
+/// fixtures live with their owner package, not in the workspace root).
+/// Resolved at build time from `kb-core`'s manifest so the test works
+/// regardless of CWD.
 fn fixtures() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../tests/fixtures")
+        .join("testdata")
         .canonicalize()
-        .expect("tests/fixtures must exist (M0 deliverable)")
+        .expect("kb-core/testdata must exist (M0 deliverable)")
 }
 
 /// A row of the Appendix A.6 identity table: root sub-dir, file (rel to root),

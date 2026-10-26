@@ -390,7 +390,11 @@ name, which depends on the *caller's feature choice* (see pentest F1/F2). A
 "user" : "hardened";` at the top of `kb/main.rs` would make every call site
 that needs "am I the agent build?" a one‑line check.
 
-### D8 · `tests/` is a directory containing only `fixtures/` — [L]
+### D8 · `tests/` is a directory containing only `fixtures/` — [L] **RESOLVED**
+
+The root `tests/` dir is gone: its sole content, `fixtures/`, moved to
+`kb-core/testdata/` alongside the package that owns it (D9 below). The
+workspace-root `tests/` no longer exists.
 
 ```
 $ ls tests/
@@ -406,15 +410,24 @@ so `cargo test --workspace` includes it. Right now it is a dead directory and
 a newcomer will look there first for integration fixtures and find only a
 `fixtures/` sub‑folder.
 
-### D9 · `kb/testdata/` vs. `kb-user/testdata/` vs. `tests/fixtures/` — [M]
+### D9 · `kb/testdata/` vs. `kb-user/testdata/` vs. `tests/fixtures/` — [M] **RESOLVED**
 
-`grep -rn 'testdata' kb kb-user kb-core kb-db tests` returns *three* different
-fixture locations. The diff‑parser golden (`standard.diff`) is in
-`kb/testdata/` (`kb/diff.rs:491`), the integration tests look in
-`kb/testdata/` *by relative path from the package dir* (`kb-user/tests/`), and
-the orphan `tests/fixtures/` has what, currently, no consumer. A single
-`testdata/` at the repo root, or one per *package* (with the root one removed),
-would make "where's the fixture?" one grep.
+**Resolved** by taking the "one per package (with the root one removed)"
+option: `tests/fixtures/` → `kb-core/testdata/` (its only code consumer is
+`kb-core/tests/golden_fixtures.rs`, now joined as `.join("testdata")`);
+`kb/testdata/` stays as the shared-body diff-parser golden (reached by
+`kb/diff.rs` + `kb-user/tests/section_cli.rs`). The root `tests/` dir no
+longer exists, and "where's the fixture?" is now a single `grep -rn testdata`
+that returns exactly the two package-owned locations.
+
+_Previously `grep -rn 'testdata' kb kb-user kb-core kb-db tests` returned
+three different fixture locations. The diff‑parser golden
+(`standard.diff`) was in `kb/testdata/` (`kb/diff.rs:491`); the
+integration tests looked in `kb/testdata/` by relative path from the package
+dir (`kb-user/tests/`); the orphan `tests/fixtures/` had what, then, no
+consumer at the workspace root. A single `testdata/` at the repo root, or one
+per package (with the root one removed), would make "where's the fixture?" one
+grep._
 
 ### D10 · `gate.sh`, `verify.sh`, `SECURITY_REPORT.md`, `PLAN.md`, `HARDENED_BUILD.md`, `TODO-palette.md` — [L]
 
@@ -479,6 +492,7 @@ explains the why.
    TUI role that shares a name with the DB column.
 5. **(C1)** Make `confirm` return `Kb` (or `(String,i32)`) and kill the
    five identical "wrap the `false` to a `Kb`" call sites.
-6. **(D8+D9)** Consolidate fixture locations: one `testdata/` or one
-   `tests/` directory with a real `Cargo.toml`.
+6. **(D8+D9)** Consolidate fixture locations. **Resolved** by moving
+   `tests/fixtures/` → `kb-core/testdata/` (its owner) and keeping
+   `kb/testdata/` as the shared-body diff golden — the one-per-package option.
 7. **(C2)** Add `#![forbid(unsafe_code)]` to the three binary/crate roots.

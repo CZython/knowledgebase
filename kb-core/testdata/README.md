@@ -9,7 +9,7 @@ the appendix and the golden test.
 ## Layout = three registered roots
 
 Each top-level directory here is a *distinct root* (the `~/notes`, `~/work`,
-`~/library` of the plan). `kb` is never given `tests/fixtures` itself — it is
+`~/library` of the plan). `kb` is never given `kb-core/testdata` itself — it is
 given each of the three as a registered root, so multi-root identity is real:
 
 | Root (this dir)    | MD page(s)                                   | non-MD (label targets, never indexed) |
