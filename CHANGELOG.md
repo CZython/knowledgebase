@@ -57,7 +57,14 @@ the API is still moving; breaking changes are called out explicitly.
   no shell prerequisites beyond `cargo` + the rust target).
 - **`dist/build-windows.ps1`** — PowerShell build+stage+verify with an
   `-Install` switch (copy to `%LOCALAPPDATA%\knowledgebase\`, create the dir,
-  `setx` the user PATH); `-Target` / `-Out` flags for control.
+  `setx` the user PATH); `-Target` / `-Out` flags for control. Hardened: the
+  build-output path is composed with `Join-Path` (not a hardcoded backslash
+  string) so it works under pwsh on POSIX too; the verify step smoke-runs
+  under `wine` on a cross host (native on Windows, size check if neither);
+  and `-Install` persists the PATH via `[Environment]::SetEnvironmentVariable`
+  (not `setx`), sidestepping `setx`'s ~1024-char truncation. Executed here
+  under pwsh 7.5.2 (mingw gnu target): build → stage `dist/kb-x86_64-pc-
+  windows.exe` → wine run → `kb 0.1.0`, exit 0.
 - **`dist/build-windows.sh` (Linux, updated)** — now *gates* the cross
   prerequisites before failing deep in the build (points at the exact
   `apt-get install -y gcc-mingw-w64-x86-64 binutils-mingw-w64-x86-64` and

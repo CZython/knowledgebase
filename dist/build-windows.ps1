@@ -45,7 +45,11 @@ Write-Host "==> cargo build --release --target $Target -p kb-user"
 & cargo build --release --target $Target -p kb-user
 if ($LASTEXITCODE -ne 0) { throw "cargo build failed ($LASTEXITCODE)" }
 
-$Src = Join-Path "$Root\target\$Target\release" "kb.exe"
+# Build the expected output path with platform-correct separators
+# (Join-Path, not a hardcoded backslash string — so this also works if the
+# script is ever run under pwsh on a POSIX host with a cross-compiler).
+$releaseRoot = Join-Path (Join-Path (Join-Path $Root "target") $Target) "release"
+$Src = Join-Path $releaseRoot "kb.exe"
 if (-not (Test-Path $Src)) { throw "expected build output $Src was not produced" }
 
 $OutDir = if ($Out) { $Out } else { Join-Path $Root "dist" }
@@ -55,8 +59,24 @@ Copy-Item -Force $Src $Dest
 Write-Host "==> staged $Dest"
 
 # ---- verify -------------------------------------------------------------------
-& $Dest --version
-if ($LASTEXITCODE -ne 0) { throw "kb --version failed" }
+# Exec the staged .exe: natively on Windows; under wine when we're on a POSIX
+# cross host (parity with build-windows.sh). Degrades to a size check if wine
+# is unavailable, so a plain build still exits 0.
+$verifyMode = if ($IsWindows) { "native" }
+              elseif (Get-Command wine -ErrorAction SilentlyContinue) { "wine" }
+              else { "none" }
+
+if ($verifyMode -eq "native") {
+    & $Dest --version
+    if ($LASTEXITCODE -ne 0) { throw "kb --version failed" }
+} elseif ($verifyMode -eq "wine") {
+    Write-Host "==> (POSIX host) smoke-running the staged .exe under wine"
+    & wine $Dest --version
+    if ($LASTEXITCODE -ne 0) { throw "kb --version failed" }
+} else {
+    Write-Host "==> wine not found; skipping smoke-run (the .exe will run natively on Windows)"
+    Write-Host "    staged $($Dest) = $((Get-Item $Dest).Length) bytes"
+}
 
 # ---- optional install ---------------------------------------------------------
 if ($Install) {
@@ -66,11 +86,14 @@ if ($Install) {
     Copy-Item -Force $Dest $Installed
     Write-Host "==> installed $Installed"
 
-    # Ensure the dir is on the user's PATH (persist via setx).
+    # Ensure the dir is on the user's PATH (persist via the Win32 env API).
+    # [Environment]::SetEnvironmentVariable (unlike the DOS `setx` command)
+    # is not subject to the ~1024-character limit, so it won't silently
+    # truncate an existing long PATH.
     $UserPath = [Environment]::GetEnvironmentVariable("Path", "User")
     if (-not ($UserPath -split ";" -contains $InstallDir)) {
         $NewPath = if ($UserPath) { "$UserPath;$InstallDir" } else { $InstallDir }
-        & setx PATH $NewPath | Out-Null
+        [Environment]::SetEnvironmentVariable("Path", $NewPath, "User")
         Write-Host "==> added $InstallDir to the user PATH (open a NEW shell to see it)"
     } else {
         Write-Host "==> $InstallDir already on the user PATH"

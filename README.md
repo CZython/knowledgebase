@@ -65,8 +65,10 @@ chmod +x kb-x86_64-linux-musl
 ```
 
 To build a platform artifact yourself, run the matching script (each
-detects the host OS): `dist/build-linux.sh`, `dist/build-windows.sh`,
-`dist/build-macos.sh`.
+detects the host OS): `dist/build-linux.sh`, `dist/build-macos.sh`, and for
+Windows either a stock-Windows entry point (`dist/build-windows.bat` /
+`dist/build-windows.ps1`, the `.ps1` adding an `-Install` switch) or the
+cross build from Linux/macOS (`dist/build-windows.sh`).
 
 ### Prerequisites
 
