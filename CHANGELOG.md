@@ -295,6 +295,15 @@ the API is still moving; breaking changes are called out explicitly.
    `kb-db` tests, per-test `.db` files inside removed by `Db::drop` — and
    `kbdb_schema_version_3_15/` — a schema-version marker dir), not a per-
    call accumulation. No new dependency; the guards are ~20 lines each.
+- **`D5` / `D6` — `SECURITY_REPORT.md` and `PLAN.md` now each carry a
+   table-of-contents / findings-index at the top, so the ~25
+   `SECURITY_REPORT 3.x` and ~30 `PLAN §N` cross-refs in the source comments
+   can be resolved against a single anchor table (previously a reader had to
+   open the target file *and* scroll to the right numbered section).** The
+   SECURITY_REPORT table maps every `3.x` finding to its one-line summary and
+   stable `#…` anchor; the PLAN table maps `§1`–`§13o` to their headings
+   (with `§9` "proven vs. assumed" and `§10` workspace layout flagged as the
+   load-bearing ones). No code, tests, or gate behaviour changed.
 - **`D10` — the README now enumerates every root-level document, with a
   one-line "what is it for" summary.** Previously a newcomer had to open each
   of `PLAN.md` / `CONTRIBUTING.md` / `HARDENED_BUILD.md` /

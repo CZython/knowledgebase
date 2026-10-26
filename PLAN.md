@@ -1,5 +1,40 @@
 # `kb` — a Rust knowledge-base tool (search, browse, tag, link, **and** edit)
 
+## Contents
+
+Source-comment cross-refs throughout the workspace cite these numbers (e.g. `PLAN §9`, `PLAN §10`, `§13f`); this table is the one place to resolve any of them. The **§9** proven-vs-assumed split and the **§10** workspace layout are the load-bearing ones — the comments that gate "is this line verified or assumed?" point at them.
+
+| §        | Title |
+|----------|-------|
+| [1](#1-what-it-is) | What it is |
+| [2](#2-guiding-principles) | Guiding principles |
+| [3](#3-locked-decisions) | Locked decisions |
+| [4](#4-page--identity-model) | Page & identity model |
+| [5](#5-search-model) | Search model |
+| [6](#6-tags-and-labels-two-separate-ideas) | Tags and Labels (two separate ideas) |
+| [7](#7-section-editing-full-mdtoolpy-port) | Section editing (full `mdtool.py` port) |
+| [8](#8-database-schema-rusqlite--fts5) | Database schema (rusqlite / FTS5) |
+| [9](#9-verification-verus-proven-vs-assumed) | Verification (Verus: proven vs. assumed) |
+| [10](#10-workspace-layout) | Workspace layout |
+| [11](#11-cli-reference-flat-kb-cmd---db-path-defaults-to-localsharekbkbdb) | CLI reference (flat `kb <cmd>`) |
+| [12](#12-milestones) | Milestones |
+| [13](#13-m0-open-items-to-settle-non-blocking-for-the-design) | M0 open items to settle |
+| [13a](#13a-m0-results--verified-and-pinned-in-code) | 13a — M0 results |
+| [13b](#13b-m1-results--frontmatter--identity-verified-and-pinned-in-code) | 13b — M1 results |
+| [13c](#13c-m2-results--tags--links--graph--labels--fuzz-corpus) | 13c — M2 results |
+| [13d](#13d-m3-results--search_grammar--semantics--fs_snapshot-verified) | 13d — M3 results |
+| [13e](#13e-m4-results--section-port-of-mdtoolpy-verified-and-pinned) | 13e — M4 results |
+| [13f](#13f-m6-results--the-kb-single-file-agent-cli-built--tested) | 13f — M6 results (single-file agent CLI) |
+| [13g](#13g-m6b-results--frontmatter-kernel-ops--fmfmkey-cli-surface) | 13g — M6b results (frontmatter kernel) |
+| [13h](#13h-m5-results--the-kb-db-indexer-built--tested) | 13h — M5 results (kb-db indexer) |
+| [13i](#13i-m7-results--the-kb-multi-file-namespace-cli-built--tested) | 13i — M7 results (multi-file CLI) |
+| [13j](#13j-m7b-results--cross-page-link-resolution-built--tested) | 13j — M7b results (link resolution) |
+| [13k](#13k-m7c-results--tag-alias-importexport-the-recovery-table-built--tested) | 13k — M7c results (tag-alias import/export) |
+| [13l](#13l-m80-results--kb-tui-scaffold--browse-built--tested) | 13l — M8.0 results (TUI scaffold + browse) |
+| [13m](#13m-m81-results--kb-tui-read--filter-built--tested) | 13m — M8.1 results (TUI read + filter) |
+| [13n](#13n-m82-results--kb-tui-edit--autocomplete-built--tested) | 13n — M8.2 results (TUI edit + autocomplete) |
+| [13o](#13o-m83-results--kb-tui-alias--roots-manager-built--tested) | 13o — M8.3 results (TUI alias + roots) |
+
 ## 1. What it is
 
 A single Rust CLI, `kb`, with two flat command namespaces that share one **Verus-verified**

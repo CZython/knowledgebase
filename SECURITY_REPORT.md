@@ -38,6 +38,28 @@ The rest of the binary is in-process `std::fs` + `rusqlite` (all prepared statem
 
 Each finding lists **Where** (file:line), the **impact**, the **trigger**, and a concrete **fix**. Severity is rated as HIGH / MED / LOW with respect to the stated threat model (attacker has the CLI and the files it reads).
 
+**Findings index (number → summary).** The source-comment cross-refs throughout `kb-core` / `kb-db` / `kb` cite these numbers (e.g. `SECURITY_REPORT 3.17`); this table is the one place to resolve any of them.
+
+| ID     | Severity     | Summary |
+|--------|--------------|---------|
+| [3.1](#31--high--rce-via-visualeditor-kb-section-edit--reproduced-7179) | HIGH | RCE via `$VISUAL`/`$EDITOR` (`kb section edit`) |
+| [3.2](#32--med--predictable-editor-temp-file-no-o_excl--eliminated-by-31s-edit-removal) | MED | Predictable editor temp file, no `O_EXCL` |
+| [3.3](#33--high--kb-refresh-gcs-pages-after-a-transient-walk-error--reproduced-76) | HIGH | `kb refresh` GCs pages after a transient walk error |
+| [3.4](#34--med--tag-filter-is-case-sensitive-despite-case-insensitive-docs--reproduced-72) | MED | Tag filter is case-sensitive despite case-insensitive docs |
+| [3.5](#35--med--not-only-search-is-a-silent-no-op--reproduced-73) | MED | NOT-only search is a silent no-op |
+| [3.6](#36--med--typeslug-colon-ref-short-circuits-the-resolver--reproduced-74) | MED | `type:slug` colon ref short-circuits the resolver |
+| [3.7](#37--med--non-utf-8-byte-makes-a-whole-files-frontmatter-un-editable--reproduced-75) | MED | Non-UTF-8 byte makes a whole file's frontmatter un-editable |
+| [3.8](#38--med--tag-alias---import-leaves-a-transaction-open-on-error--code-confirmed-78) | MED | `tag-alias --import` leaves a transaction open on error |
+| [3.9](#39--med--full_rebuild-swallows-per-page-errors-and-exits-0--reproduced-77) | MED | `full_rebuild` swallows per-page errors and exits 0 |
+| [3.10](#310-low--extract_language-matches-languages-and-language_x) | LOW | `extract_language` matches `languages:` and `language_x:` |
+| [3.11](#311-low--crlf-line-endings-dropped-on-one-frontmatter-rewrite-path) | LOW | CRLF line endings dropped on one frontmatter rewrite path |
+| [3.12](#312-low--splice-capacity-can-underflow-in-release-build) | LOW | `splice` capacity can underflow in release build |
+| [3.13](#313-low--insert-child-under-a-level-6-heading-lands-at-the-same-level) | LOW | Insert-Child under a level-6 heading lands at the same level |
+| [3.14](#314-low--dbopen-memory--documented-but-errors) | LOW | `Db::open(":memory:")` documented but errors |
+| [3.15](#315-low--schema_version--on-an-unmigrated-db-returns-err-not-none) | LOW | `schema_version()` on an unmigrated DB returns `Err`, not `None` |
+| [3.16](#316-low-perf--quadratic--onm-scans-in-kb-core) | LOW (perf) | Quadratic / O(n·m) scans in `kb-core` |
+| [3.17](#317-low-perf--per-iteration-sql-prep-in-kb-cli) | LOW (perf) | Per-iteration SQL prep in `kb` CLI |
+
 ### 3.1  HIGH — RCE via `$VISUAL`/`$EDITOR` (`kb section edit`) · **reproduced (§7.1/§7.9)**
 
 **Status: to be eliminated at compile time (agreed).**
