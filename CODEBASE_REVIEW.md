@@ -24,9 +24,17 @@ The "CLI shell" (`kb/main.rs` + `kb/tui/*`) is where every non‑trivial
 behaviour lives. The verified core (`kb-core`) and `kb-db` are well‑decomposed;
 the problem is concentrated in the shell + TUI.
 
-### A1 · `kb/main.rs` is 3,331 lines / 59 fns in one file — [H]
+### A1 · `kb/main.rs` is 3,331 lines / 59 fns in one file — [H] **RESOLVED**
 
-`kb/main.rs` is *the* shared body for **both** binaries. 59 functions mix, in a
+**Resolved.** `kb/main.rs` went from 3,331 lines to 1,224; the verb
+handlers, JSON emitters, and the diff/edit/path/etag helpers now live in
+`kb/cli/{search,links,section,info,tag,create,browse,cmd_add,editor,json,
+roots,show,textsrc,writeops}.rs` (15 files), with `kb/main.rs` remaining
+the `include!` root that declares the module tree and the clap schema.
+The TUI (`kb/tui/mod.rs`) was already split into `palette.rs` / `render.rs`
+/ `input.rs` during the M8 series (see `PLAN.md §13l–§13o`).
+
+**Original observation.** `kb/main.rs` is *the* shared body for **both** binaries. 59 functions mix, in a
 single file, the clap schema, ~18 verb handlers, SQL builders, the JSON
 encoders, the diff glue, the `editor` fork, path / etag / confirm helpers, *and
 a ~100‑line `#[cfg(test)]` (lines ~3222‑3331)*. This is the single most
@@ -71,9 +79,15 @@ a **searchability** win (each verb is now a 1:1 grep‑able file) *and* a
 cognitive‑load win with zero behaviour change. This is the highest‑leverage
 single refactor in the repo.
 
-### A2 · Individual oversized functions in the shell — [M]
+### A2 · Individual oversized functions in the shell — [M] **RESOLVED**
 
-Worst offenders (line counts from a brace‑depth scan; these are *single* fns):
+**Resolved** as a consequence of the A1 split: the verb handlers now live in
+their own files under `kb/cli/`, so each of the previously oversized fns is
+one file's worth of context rather than a scroll-past-ten-unrelated-ones
+exercise. The specific line counts in the table below predate the split.
+
+_Pre‑split worst offenders (line counts from a brace‑depth scan; these are
+single fns):_
 
 | LOC | fn | location |
 |----:|----|----|
@@ -86,22 +100,19 @@ Worst offenders (line counts from a brace‑depth scan; these are *single* fns):
 | 118 | `cmd_tag` | `kb/main.rs:1511` |
 | 134 | `apply_key` (core) | `kb-core/src/frontmatter.rs:136` |
 
-These all share the same shape: **do a query, then hand‑format a giant
-`format!`/`println!` JSON blob inline.** `cmd_search` is the clearest example —
-~90 lines are pure WHERE‑clause construction + ~40 lines are the two render
-branches. Suggested split (no behaviour change):
-`build_search_sql(parsed) -> (sql, params)` and `render_search(rows|json)`.
-That drops `cmd_search` to ~60 and makes the FTS/NOT/gate logic independently
-testable (it currently is only testable by running the whole verb).
+_These all shared the same shape pre-split: do a query, then hand‑format a
+giant `format!`/`println!` JSON blob inline. `cmd_search` was the clearest
+example — ~90 lines of pure WHERE‑clause construction + ~40 lines of the two
+render branches. The split into `kb/cli/*.rs` (A1) is what made each of them
+short and independently testable._
 
-### A3 · The `run_editor` / `edit_in_place` pair — [M]
+### A3 · The `run_editor` / `edit_in_place` pair — [M] **RESOLVED**
 
-Two ~50‑line fns (`kb/main.rs:3060`, `3117`) that both "pick editor → spawn →
-read result → clean temp". They differ only in launch vs. in‑place semantics.
-A single `run_editor_in(buf_dir, path) -> Result<Vec<u8>, (..)>` with a
-`in_place: bool` would remove a duplicate `$VISUAL`/`$EDITOR` read loop and
-keep the two failure paths (`launch failed` vs. `non-zero exit`) in one place
-(the current `edit_in_place` re‑implements the hint logic by hand, `3131-3145`).
+**Resolved.** Both public entrypoints now delegate to a single shared body,
+`run_editor_in(initial, in_place: Option<&Path>)` (`kb/cli/editor.rs:68`),
+which is exactly the shape the finding proposed. The unified launch /
+hint / cleanup logic lives in one place; the two failure modes (*launch
+failed* vs. *non‑zero exit*) are branched in that one body.
 
 ---
 
@@ -110,9 +121,14 @@ keep the two failure paths (`launch failed` vs. `non-zero exit`) in one place
 A "pentest / agent‑facing" read must be able to say *which* runtime lines can
 abort *without* a test. Findings (all in non‑test code):
 
-### B1 · `list_rewrite_upgrade::expect(...)` — [M]
+### B1 · `list_rewrite_upgrade::expect(...)` — [M] **RESOLVED**
 
-`kb-core/src/frontmatter.rs:830-831`:
+**Resolved.** The `expect` at the old `frontmatter.rs:830` is now a
+`match locate_key_line(data, key) { Some(i) => i, None => return
+Err(FmError::NotScalar) }` — a caller-contract panic turned into an
+`Err((_, rc 2))` the agent surfaces as a clean failure.
+
+**Original observation.** At `kb-core/src/frontmatter.rs:830-831`:
 
 ```rust
 let idx = locate_key_line(data, key)
@@ -128,22 +144,29 @@ counter‑example inside the *impl* body. Make it `match … { Some(i)=>…,
 None=>err }` and return `Err` so the agent gets a clean `set_scalar`/`append`
 failure (rc 2) instead of a stack trace.
 
-### B2 · `lines[idx]` on a `split_inclusive` vec — [L]
+### B2 · `lines[idx]` on a `split_inclusive` vec — [L] **RESOLVED**
 
-`kb-core/src/frontmatter.rs:832, 852`:
+**Resolved.** The old `.unwrap_or(0)` (the silent-zero trap) is now a
+bound-checked guard: `let idx = locate_key_line(data, key).ok_or(FmError::NotScalar)?;
+if idx >= lines.len() { return Err(FmError::NotScalar); }` at
+`kb-core/src/frontmatter.rs:857-860`. See the inline "B2:" comment right
+above it.
 
-```rust
-let idx = locate_key_line(data, key).unwrap_or(0);   // 851
-let line = lines[idx].clone();                       // 852
-```
+_Pre‑fix, `kb-core/src/frontmatter.rs:851‑852` read `let idx =
+locate_key_line(data, key).unwrap_or(0); let line = lines[idx].clone();`.
+If `locate_key_line` returned an index ≥ `lines.len()` (e.g. an empty document
+where the key line had a BOM the split dropped), the second line panicked._
 
-If `locate_key_line` returns an index ≥ `lines.len()` (e.g. an empty document
-where the key line has a BOM the split dropped), this panics. Guard with
-`if idx >= lines.len() { return Err(..) }`.
+### B3 · `l[1..]` and `l.as_bytes()[0]` in `diff.rs` — [L] **RESOLVED**
 
-### B3 · `l[1..]` and `l.as_bytes()[0]` in `diff.rs` — [L]
+**Resolved.** The double index read is now a single `l.split_at(1)` at
+`kb/diff.rs:366`, which is exactly the second option the finding proposed. The
+arm binds `kind @ (b' ' | b'-' | b'+')` so the prefix is known to be an ASCII
+byte, making offset 1 a char boundary; `split_at` peels it off exactly once and
+the `Some(_) => break` arm that used to be the panic risk now just stops
+parsing.
 
-`kb/diff.rs:364-366`:
+**Original observation.** Pre‑fix, `kb/diff.rs:364‑366`:
 
 ```rust
 Some(b' ') | Some(b'-') | Some(b'+') => {
@@ -156,37 +179,43 @@ pattern to `Some(_) => break` (which already exists at line 369) while a
 `Some(b'\t')` slips through would panic. Recommend `let (kind, text) =
 match l.as_bytes()[0] { b' ' => (…, …), … }` or a single `l.split_at(1)`.
 
-### B4 · `non_flag[0]` in the bare‑dispatch — [L]
+### B4 · `non_flag[0]` in the bare‑dispatch — [L] **RESOLVED**
 
-`kb/main.rs:552-553`:
+**Resolved.** The bare-dispatch now uses
+`non_flag.first().expect("len()==1 guarantees non-empty")` at
+`kb/main.rs:575-577` — the guard is local to the expression and a reader
+can see at a glance why the index is safe.
 
-```rust
-if non_flag.len() == 1 && !SUBCMDS.contains(&non_flag[0].as_str()) {
-    let s = non_flag[0];
-```
+_Pre‑fix, `kb/main.rs` read `if non_flag.len() == 1 && … { let s =
+non_flag[0]; … }` — safe (guarded by `len()==1`), but it was the only place in
+the file where an index was used for agent‑facing dispatch and a reader
+could not tell at a glance that it was guarded._
 
-Safe (guarded by `len()==1`). Listed because it is the *only* place in the
-file where an index is used for agent‑facing dispatch — a reader cannot tell
-at a glance it is guarded. Consider `let Some(s) = non_flag.first() else
-{ /* fall through to clap */ };` which makes the guard local.
+### B5 · `run_editor::read(&tmp).unwrap_or_default()` — [M] **RESOLVED**
 
-### B5 · `run_editor::read(&tmp).unwrap_or_default()` — [M]
+**Resolved.** The read-back now surfaces failure instead of returning
+`[]`: `std::fs::read(t).map_err(|e| (format!("read back edit buffer {}: {e}", t.display()), EXIT_ERR))?`
+at `kb/cli/editor.rs:107-110` (the A3 unification point). See the "B5: this
+used to be swallowed to `[]`" note in that file's doc comment.
 
-`kb/main.rs:3074`. Silently returns `0`‑bytes when the file read fails after a
-successful editor exit. See pentest F8.
+_The original bug was at `kb/main.rs:3074`: it silently returned `0` bytes
+when the file read failed after a successful editor exit (pentest F8)._
 
-### B6 · `etag_of` duplicated in two crates — [M, not a panic but a maintenance risk]
+### B6 · `etag_of` duplicated in two crates — [M, not a panic but a maintenance risk] **RESOLVED**
 
-`kb/main.rs:3191` and `kb-db/src/index.rs:97` both define the *same* FNV‑1a
-64‑bit etag, and the db one even says "identical to the kb CLI's
-`etag_of`" (`index.rs:96`). Two copies of a hash are a classic drift trap: if
-one is corrected (e.g. `as u64` vs. `as u8` promotion) the *other* silently
-emits a different 16‑hex for the same byte string, and the optimistic‑
-concurrency `--if-unchanged` check stops matching. **One** definition should
-live in `kb-core` and both should call it.
+**Resolved.** One canonical implementation, `kb_core::etag::of`
+(`kb-core/src/etag.rs:14`). The two old definitions are now thin delegating
+wrappers that call it: `kb-db/src/index.rs:98-99` and `kb/main.rs:1083-1084`.
+Drift is impossible — there is only one place the hash is computed.
 
-(There is also a **third** copy: `kb-core/src/lib.rs` — see
-`grep -rn 'cbf2_9ce4' kb-core kb kb-db` for all three.)
+_Previously `kb/main.rs:3191` and `kb-db/src/index.rs:97` both defined the
+same FNV‑1a 64‑bit etag; the db copy even said "identical to the kb CLI's
+`etag_of`" (`index.rs:96`). Two copies of a hash were a classic drift trap —
+if one was corrected (e.g. `as u64` vs. `as u8` promotion) the other would
+silently emit a different 16‑hex for the same byte string, and the
+optimistic‑concurrency `--if-unchanged` check would stop matching. There was
+also a third copy in `kb-core/src/lib.rs` — see `grep -rn 'cbf2_9ce4'
+kb-core kb kb-db` for all three._
 
 ### B7 · `unwrap_or(0)` on the `COUNT(*)` query — [L]
 
@@ -199,58 +228,55 @@ instead of an error). Use `?`‑propagate.
 
 ## C. Consistency / error model
 
-### C1 · **`Kb = Result<i32, (String, i32)>` is great; the *one* exception is `confirm`** — [L]
+### C1 · **`Kb = Result<i32, (String, i32)>` is great; the *one* exception is `confirm`** — [L] **RESOLVED**
 
-Every fallible step in the repo returns `(String, i32)` so `?` composes.
-**Except** `confirm` (`kb/main.rs:3150-3168`) returns a bare `bool` and its
-`false` branch is *re‑wrapped* by every caller:
+**Resolved.** `confirm` is now `pub(crate) fn confirm(prompt: &str, assume_yes: bool) -> Result<(), (String, i32)>`
+at `kb/main.rs:1032` — it returns `Ok(())` or an `Err((_ , code))` directly,
+and callers propagate it with `?`. The five identical re-wrap blocks are
+gone.
 
-```rust
-if !confirm("apply?", assume_yes || json) {
-    return Err(("aborted (not confirmed)".into(), EXIT_ERR));
-}
-```
+_Pre‑fix, `confirm` returned a bare `bool` and its `false` branch was
+re‑wrapped by every caller (`if !confirm("apply?", assume_yes || json) {
+return Err(("aborted (not confirmed)".into(), EXIT_ERR)); }`). That wrapper
+block appeared identically in `cmd_section` (via `commit`), `cmd_create`,
+`cmd_patch`, and `cmd_replace`; a new verb that forgot the wrap would have
+had its "aborted" outcome exit `0` with a silent no‑apply._
 
-That wrapper block appears identically in **at least** `cmd_section` (via
-`commit`), `cmd_create` (`kb/main.rs:874`), `cmd_patch`, `cmd_replace`. If a
-new verb forgets the wrap, its "aborted" outcome has exit code `0` with a
-silent no‑apply. Change `confirm` to return `Result<() (String,i32)>` and the
-wrap disappears.
+### C2 · **No `#[rustfmt::skip]` / `rustc -C` anywhere; no `#![deny(unsafe_code)]`** — [L] **RESOLVED**
 
-### C2 · **No `#[rustfmt::skip]` / `rustc -C` anywhere; no `#![deny(unsafe_code)]`** — [L]
+**Resolved.** `unsafe_code = "forbid"` is now a workspace lint at
+`Cargo.toml:25`, inherited by all three crates via `[lints] workspace =
+true`. (Declared as a workspace lint rather than `#![forbid]` in each crate
+root so a new crate that joins the workspace is covered automatically; the
+`[allow(unsafe_code)]` + reason opt‑out the finding anticipated is already
+described in the comment above the lint.) The codebase is unsafe‑free
+(verified: `grep -rn 'unsafe' kb/ kb-core kb-db` → none in non‑test source).
 
-The codebase is `unsafe`‑free (verified: `grep -rn 'unsafe' kb/ kb-core
-kb-db` → none in non‑test source). That is *worth pinning* with
-`#![forbid(unsafe_code)]` at the top of each crate root (and at
-`kb/main.rs`'s real crate entry, `kb-user/src/main.rs` /
-`kb-hardened/src/main.rs`, since those are the *true* crate roots that
-`include!` opens). A future `unsafe` block added by a TUI backend or a FFI
-fix would then be a compile error unless deliberately allowed.
+### C3 · **JSON emission is hand‑rolled and inconsistent** — [M] **RESOLVED**
 
-### C3 · **JSON emission is hand‑rolled and inconsistent** — [M]
+**Resolved.** The proposed `json::Object`/mini‑library now exists as
+`kb/cli/json.rs` — `JObject` (an ordered `{ "k": v, … }` with a single
+`render`) plus a pre-rendered-value escape path. Every string value goes
+through one escape owner, empty containers render as `[]`/`{}` consistently,
+and the verb handlers build JSON documents as data rather than as
+`format!("{{…}}", …)` string templates. This is the other half of the ranked
+#1 (A1+C3) pair.
 
-`jstr` (`kb/main.rs:3204`) is a 19‑line JSON escaper with its own unit test —
-good. But it is used in *five* places with different surrounding templates
-(`commit` line 2945, `cmd_create` 855, `cmd_search` 1339, `cmd_tag` 1702/1655,
-`cmd_info` 2306, `cmd_links` 2066, `CreateReport::to_json` 985, `cmd_browse`
-1511, `cmd_roots` 1017, `cmd_stats` 2346). That is **≥12** different JSON
-documents emitted from **≥9** different fns, none of which shares a single
-"empty array" constant. The inconsistency is visible to the agent and was one
-of the pentest findings (F6, `[{}]` vs. `[]` vs. `[ ]`).
+_Pre‑fix, `jstr` (then `kb/main.rs:3204`) was a 19‑line JSON escaper used in
+≥9 different fns across ≥12 differently-shaped templates (`commit`,
+`cmd_create`, `cmd_search`, `cmd_tag`, `cmd_info`, `cmd_links`,
+`CreateReport::to_json`, `cmd_browse`, `cmd_roots`, `cmd_stats`), none
+sharing a single "empty array" constant. The inconsistency was visible to the
+agent and was a pentest finding (F6, `[{}]` vs. `[]` vs. `[ ]`)._
 
-Fix: introduce a `json::Array { items: Vec<String> }` and
-`json::Object { … }` mini‑library (30 LOC) so:
+### C4 · **SQL literal injection in the IN‑list (already escaped, but by hand)** — [L] **RESOLVED**
 
-* `empty_array().render() == "[]"` everywhere,
-* every object is `{ "k": v, … }` with one escape owner,
-* the ~12 `format!("{{…}}", …)` call sites become data, not strings.
+**Resolved.** The duplicated inline escape is now one helper,
+`pub(crate) fn sql_quote_lower(s: &str) -> String` at `kb/main.rs:1091`, used
+by both call sites: `kb/cli/search.rs:100` and `kb/cli/tag.rs:43`. The
+"did we escape?" question on re‑read is answered by a single lookup.
 
-This is the highest‑ROI *code‑quality* change in the repo after the file
-split (A1).
-
-### C4 · **SQL literal injection in the IN‑list (already escaped, but by hand)** — [L]
-
-`kb/main.rs:1260-1267`:
+**Original observation.** Pre‑fix, `kb/main.rs:1260‑1267`:
 
 ```rust
 .map(|t| format!("'{}'", t.to_lowercase().replace('\'', "''")))
@@ -294,46 +320,52 @@ A newcomer or an LLM agent has to *find* things without already knowing
 where they live. Measured: grep‑ability, naming collisions, doc‑comment
 coverage, and the "obvious first file" for a concept.
 
-### D1 · `search_required_phrase` — the *same* field name in four places with two spellings — [M]
+### D1 · `search_required_phrase` — the *same* field name in four places with two spellings — [M] **RESOLVED**
 
-`grep -rln search_required_phrase` returns files in **four** places:
+**Resolved** by taking the cross‑linking option (not a rename): both sides now
+carry an explicit `D1 note` pointer. On the SQL side, the `SearchRow` field in
+`kb/cli/search.rs:18-24` documents that `search_required_phrase` is the
+*corpus field* (owned by `kb-core::frontmatter`) and is "not to be confused
+with the *TUI palette role* `gated` in `kb/tui/palette.rs`". On the TUI side,
+`kb/tui/palette.rs:31-38` and `kb/tui/mod.rs:258-262` carry the matching
+`D1 note`: the palette role is this file's name for "a page with a gate," not
+the SQL column, the two are "linked by convention only," and the SQL column is
+owned by `kb-core::frontmatter`. A search now resolves unambiguously from
+either side.
 
-* `kb/main.rs` — *SQL column + CLI flag name* (the canonical form).
-* `kb-core/src/lib.rs`
-* `kb-core/tests/frontmatter_smoke.rs`
-* `kb-core/examples/frontmatter/note.example.md`
-* `kb/tui/palette.rs`, `kb/tui/render.rs`, `kb/tui/mod.rs`, `kb/tui/input.rs`,
-  `kb/tui/palettes/{default,colorblind}.toml` — *the TUI's role name* (a label
-  shown in the TUI legend).
+**Original observation.** `grep -rln search_required_phrase` returned files in
+four places (`kb/main.rs` as the SQL column + CLI flag name in canonical form;
+`kb-core/src/lib.rs`, `kb-core/tests/frontmatter_smoke.rs`,
+`kb-core/examples/frontmatter/note.example.md`; and the TUI's role name across
+`kb/tui/{palette,render,mod,input}.rs` + `kb/tui/palettes/{default,
+colorblind}.toml`). Two different concepts used the same identifier — a
+**corpus field** and a **TUI palette‑role / legend label** — so a search for
+"change the colour of the search‑required‑phrase label" led the agent to the
+TUI files *or* the SQL column depending on which phrase they remembered. The
+two options were to rename the TUI role, or to cross‑link both sides.
 
-Two *different* concepts use the same identifier: a **corpus field** and a
-**TUI palette-role / legend label**. A search for
-"change the colour of the search-required-phrase label in the TUI" leads the
-agent to the TUI files *or* the SQL column, depending on which phrase they
-remembered. Pick one of:
+### D2 · `pages.search_required_phrase` SQL column name appears **in 3+ queries as a literal** — [L] **RESOLVED**
 
-* rename the TUI role (it is a *palette* concept; call it something like
-  `gate_term_label` or `gate_phrase_role`), or
-* add a one‑line `/// "the TUI role that renders <code>search_required
-  _phrase<\/code> as a legend label — the DB column itself is owned by
-  `kb-core::frontmatter`. See `kb/main.rs:2262`.` to the TUI usage and a
-  matching pointer on the SQL column.
+**Resolved.** The magic string is now a single `pub const
+COL_SEARCH_REQUIRED_PHRASE: &str` in `kb-db/src/migrate.rs:33`, imported into
+the shared body as `GATE_COL` (`kb/main.rs:51`) and used in every query that
+references it: `kb/cli/search.rs:128,140`, `kb/cli/browse.rs:35,52`,
+`kb/cli/info.rs:21`, and the `kb-db` indexer (`kb-db/src/index.rs:373`). A
+schema rename is now a one‑line change to the `const`.
 
-### D2 · `pages.search_required_phrase` SQL column name appears **in 3+ queries as a literal** — [L]
+**Original observation.** Pre‑fix, the column name was a literal in
+`kb/main.rs:1288‑1290`, `1297‑1299`, `2271`, and `kb-db/src/migrate.rs:46` —
+the same string in ≥4 places; a rename meant editing the `SELECT` in
+`refresh`, `add_root`, `search`, `info`, `browse`, and `tag`.
 
-`kb/main.rs:1288-1290`, `1297-1299`, `2271`, and (in `kb-db`) `kb-db/src/
-migrate.rs:46`. The *column name* is a magic string in ≥4 places. A schema
-rename is a 5‑file edit (4 queries + 1 CREATE TABLE) — manageable, but the
-`refresh` + `add_root` + `search` + `info` + `browse` + `tag` verbs that
-`SELECT` are *not* centrally documented. Add a `struct PagesCols` (or a
-`const SQL_PAGES_SELECT: &str`) in `kb-db/src/` and use it from `kb/main.rs`
-so the column list is defined *once*.
+### D3 · `cmd_search`, `cmd_browse`, `cmd_tag`, `cmd_tag_alias`, `cmd_links`, `cmd_info`, `cmd_stats`, `cmd_resolve`, `cmd_tag` are all **top‑level** in one file — [M → covered by A1] **RESOLVED**
 
-### D3 · `cmd_search`, `cmd_browse`, `cmd_tag`, `cmd_tag_alias`, `cmd_links`, `cmd_info`, `cmd_stats`, `cmd_resolve`, `cmd_tag` are all **top‑level** in one file — [M → covered by A1]
-
-After the A1 split this becomes: `kb/cli/verbs/search.rs`,
-`kb/cli/verbs/browse.rs`, …, and the "which verb does X?" question is answered
-by the file name.
+**Resolved** by the A1 split: each verb handler now lives in its own file —
+`kb/cli/search.rs`, `kb/cli/browse.rs`, `kb/cli/tag.rs`, `kb/cli/links.rs`,
+`kb/cli/info.rs`, `kb/cli/roots.rs`, `kb/cli/show.rs`, `kb/cli/cmd_add.rs`,
+etc. The "which verb does X?" question is answered by the file name.
+(The finding's proposed `kb/cli/verbs/*.rs` nesting was flattened during the
+split to one level, which is equivalent for this purpose.)
 
 ### D4 · The `Kb` type alias is the *one* error abstraction but is only named in one place — [M]
 
@@ -344,51 +376,49 @@ new contributor adding a fn in a *new* file (post A1) has no `use` to write
 because the alias is file‑local. Promote it to `kb/cli/error.rs` (or
 `kb_core` if the core is to own it) so the name travels with the code.
 
-### D5 · `SECURITY_REPORT.md` references (`SECURITY_REPORT 3.1`, `3.3`, `3.4`, `3.5`, `3.6`, `3.7`, `3.16`, `3.17`) — [M]
+### D5 · `SECURITY_REPORT.md` references (`SECURITY_REPORT 3.1`, `3.3`, `3.4`, `3.5`, `3.6`, `3.7`, `3.16`, `3.17`) — [M] **RESOLVED**
 
-`grep -rn 'SECURITY_REPORT'` returns ~25 call‑site comments pointing to a file
-*outside* the repo (`SECURITY_REPORT.md`, 38 KB, at the root). Each call site
-carries a *numbered* reference that is *only* meaningful if you open the
-separate file:
+**Resolved** by adding a **findings index (number → summary)** table to
+`SECURITY_REPORT.md` under §3 — one place to resolve any `SECURITY_REPORT NN`
+cross‑ref, with each row a `[3.17](#317-…)` anchor link to that section. The
+~25 call‑site comments keep their inline "why‑this-line" paraphrase *and* the
+`SECURITY_REPORT NN` provenance tag, and the number now resolves to a stable
+GitHub anchor in both files (the recommendation's "add `#sec‑3‑17`‑style
+anchors, or at least a table of contents" option).
 
-```
-kb/main.rs     : "SECURITY_REPORT 3.1 mitigation: …"
-kb/main.rs     : "SECURITY_REPORT 3.16: cap the DP table size. …"
-kb/main.rs     : "SECURITY_REPORT 3.17: hoist the alias + distinct-tag loads …"
-kb-core/src/frontmatter.rs : "SECURITY_REPORT 3.7 — same `from_utf8_lossy` fix."
-kb-core/src/aliases.rs     : "SECURITY_REPORT 3.6 …"
-kb-db/src/refresh.rs       : "SECURITY_REPORT 3.3 data-loss window"
-kb-db/src/walk_snapshot.rs  : …
-```
+**Original observation.** `grep -rn 'SECURITY_REPORT'` returned ~25 call‑site
+comments pointing to `SECURITY_REPORT.md` (38 KB, at the repo root). Each call
+site carried a numbered reference only meaningful if you opened the separate
+file (e.g. `kb/main.rs`, `kb-core/src/frontmatter.rs`, `kb-core/src/aliases.rs`,
+`kb-db/src/refresh.rs`, `kb-db/src/walk_snapshot.rs`). That was a lot of
+pointer indirection — the number was the fragile part: a section number with no
+link, no anchor, no URL, in a hand‑maintained `.md`.
 
-That is a *lot* of cross‑file pointer indirection. Recommend: copy the
-relevant sentence *from* the SECURITY_REPORT *into* the comment (the
-"why‑this-line" is what the reader needs), and keep the `SECURITY_REPORT
-NN` tail as a *provenance* tag (e.g. "SECURITY_REPORT:3.17"). The current
-call sites do this well (the inline text is already a paraphrase of the
-finding), but the *number* is the most fragile part — it is a *report
-section number* with no link, no anchor, no URL, and the report is a
-hand‑maintained `.md`. Add `https://#sec-3-17`‑style anchors to the
-SECURITY_REPORT (or at least a table of contents), or drop the numbers in
-favour of a short slug that grep‑matches in both files.
+### D6 · `PLAN.md` is 160 KB / §13f / §13p / §9 / §10 — [L] **RESOLVED**
 
-### D6 · `PLAN.md` is 160 KB / §13f / §13p / §9 / §10 — [L]
+**Resolved** the same way as D5: `PLAN.md` now opens with a **Contents**
+table under `## Contents` (one `| § | Title |` table where every row is a
+`[13f](#13f-…)` anchor to that section, including the load‑bearing §9 / §10).
+A `grep -rn '§13'` cross‑ref now resolves to a stable anchor in both files.
 
-`grep -rn '§13'` returns ~30 call sites. Same problem as D5, but at a larger
-scale (the PLAN is the whole design, the SECURITY_REPORT is the bug
-catalogue). The `PLAN §9` / `PLAN §10` references are the **load‑bearing**
-ones (they define the *assumed* vs. *verified* boundary) and they should at
-least carry a link to the section in question or a 1‑line inline summary.
+**Original observation.** `grep -rn '§13'` returned ~30 call sites. The
+`PLAN §9` / `PLAN §10` references were the load‑bearing ones — they define the
+*assumed* vs. *verified* boundary — and should at least carry a link to the
+section in question or a 1‑line inline summary.
 
-### D7 · The "which `kb` binary is this?" question is answered by a compile flag — [M]
+### D7 · The "which `kb` binary is this?" question is answered by a compile flag — [M] **RESOLVED**
 
-`kb/main.rs:73-82` selects the CLI identity on `cfg!(feature = "editor")`.
-The *two packages* are the honest answer (`kb-user` or `kb-hardened`), but
-the *shared body* does not carry the package name — it carries the binary
-name, which depends on the *caller's feature choice* (see pentest F1/F2). A
-`include!`‑side constant like `const VARIANT: &str = cfg!(feature="editor") ?
-"user" : "hardened";` at the top of `kb/main.rs` would make every call site
-that needs "am I the agent build?" a one‑line check.
+**Resolved.** `pub const VARIANT: &str = if cfg!(feature = "editor") { "user" }
+else { "hardened" };` at `kb/main.rs:70` — exactly the shape the finding
+proposed. Every call site that needs "am I the agent build?" now does
+`VARIANT == "hardened"`; the CLI name (`kb-hardened 0.1.0 [hardened]`) is
+derived from it at `kb/main.rs:86-89`.
+
+**Original observation.** Pre‑fix, `kb/main.rs:73‑82` selected the CLI
+identity on `cfg!(feature = "editor")`. The two packages are the honest answer
+(`kb-user` / `kb-hardened`), but the shared body did not carry the package
+name — it carried the binary name, which depends on the caller's feature
+choice (see pentest F1/F2).
 
 ### D8 · `tests/` is a directory containing only `fixtures/` — [L] **RESOLVED**
 
@@ -429,13 +459,20 @@ consumer at the workspace root. A single `testdata/` at the repo root, or one
 per package (with the root one removed), would make "where's the fixture?" one
 grep._
 
-### D10 · `gate.sh`, `verify.sh`, `SECURITY_REPORT.md`, `PLAN.md`, `HARDENED_BUILD.md`, `TODO-palette.md` — [L]
+### D10 · `gate.sh`, `verify.sh`, `SECURITY_REPORT.md`, `PLAN.md`, `HARDENED_BUILD.md`, `TODO-palette.md` — [L] **RESOLVED**
 
-Five root‑level `.md` + two `.sh` scripts. That is normal for a 0.1 project.
-Noted only for *searchability*: `README.md`'s "Getting started" section should
-enumerate *all seven* root‑level docs as "further reading" with a one‑line
-purpose each — right now a newcomer has to open each to find out whether it
-is "how to build", "how to prove", or "the bug catalogue".
+**Resolved.** `README.md` now has a **Further reading** table right before the
+Contributing section that enumerates *every* root‑level doc (PLAN,
+CONTRIBUTING, HARDENED_BUILD, SECURITY_REPORT, PENTEST_HARDENED,
+CODEBASE_REVIEW, TODO‑palette, CHANGELOG, LICENSE) plus the two entry‑point
+scripts (`gate.sh`, `verify.sh`) — one line each — so a newcomer can pick the
+right doc without opening all of them.
+
+The original note: five root‑level `.md` + two `.sh` scripts is normal for a
+0.1 project; the ask was only that `README.md` enumerate all of them as
+"further reading" with a one‑line purpose each, so a newcomer need not open
+each to find out whether it is "how to build", "how to prove", or "the bug
+catalogue".
 
 ---
 
