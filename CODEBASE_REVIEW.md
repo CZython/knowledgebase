@@ -1,17 +1,20 @@
 # `kb` — general codebase review
 
-Date: 2026-10-24 · Branch: `kb-threat-verification`
+Date: 2026-10-24 · Branch: `main`
 Scope: everything *beyond* the hardened-variant pentest (see
 `PENTEST_KB-HARDENED.md`). Concerns: oversized functions, hidden
 `panic`/`unwrap`/index panics on the agent path, duplicated logic, error /
 JSON / SQL consistency, and **searchability** (can a newcomer or agent find a
 thing without already knowing where it lives?).
 
-File sizes (LOC): `kb/main.rs` **3331** · `kb/tui/mod.rs` **4434** ·
-`kb/tui/render.rs` 1308 · `kb/tui/input.rs` 717 · `kb/diff.rs` 527 ·
-`kb-core/src/frontmatter.rs` 1481 · `kb-core/src/section.rs` 1144 ·
+File sizes (LOC) *as of the 2026-10-24 review*: `kb/main.rs` **3331** ·
+`kb/tui/mod.rs` **4434** · `kb/tui/render.rs` 1308 · `kb/tui/input.rs` 717 ·
+`kb/diff.rs` 527 · `kb-core/src/frontmatter.rs` 1481 · `kb-core/src/section.rs` 1144 ·
 `kb-core/src/search_grammar.rs` 614 · `kb-db/src/refresh.rs` 654 ·
-`kb-db/src/index.rs` 650.
+`kb-db/src/index.rs` 650. The `kb/main.rs` figure is pre‑A1: the split in
+finding A1 moved the verb / JSON / diff / edit code into `kb/cli/*`, taking it
+down to ~1240 lines — the numbers below are the *original* measurement, kept
+for before/after.
 
 Severity legend: **[H]** correctness / data-integrity · **[M]** maintainability
 / consistency (an agent or future dev will trip) · **[L]** hygiene.
@@ -324,7 +327,7 @@ stage‑4 exact match was weaker than intended. Use a real `Option<String>` slug
 in `resolver::Page`, or `filter`‑out `slug.is_empty()` during the stage‑2 pass
 *before* treating it as a match._
 
-### C6 · **Error message shape `"{what}: {e}"` is consistent — good.** — [OK]
+### C6 · **Error message shape `"{what}: {e}"` is consistent — good.** — [OK] **CONFORMS**
 
 Verified across `open_db`, `cmd_*`, `refresh_all`, etc. Every `map_err`
 follows `format!("<verb>: <e>")`. This is a model of good error
@@ -505,39 +508,43 @@ catalogue".
 
 ## E. Miscellaneous
 
-### E1 · `rust-version = "1.98.1"` in the *workspace* — [L]
-`Cargo.toml:23`. Pinned to a very recent toolchain; that is fine for a
+### E1 · `rust-version = "1.98.1"` in the *workspace* — [L] **CONFORMS**
+
+**Confirmed.** The concern was that `rust-version = "1.98.1"` is an *upper*
+bound with no pin to build against. There *is* a pin: `rust-toolchain.toml`
+with `channel = "1.98.1"`, which matches `rust-version` exactly — so a
+contributor's `rustup` resolves the identical toolchain the ARIA Verus fork
+and the bundled‑SQLite compile were verified against (see the file's comment:
+deliberately host‑agnostic, no target triple). No `nightly` needed — Verus
+runs as a *separate* binary. Marked **CONFORMS** (a "fine, no action" — see E2)
+rather than *RESOLVED* because it is a positive confirmation, not a defect
+fix; the toolchain pin was already in place.
+
+_Original: `Cargo.toml`. Pinned to a very recent toolchain; that is fine for a
 private project, but it is an *upper* bound (a 1.98 toolchain won't build a
-`rust-version` of 1.98+1). There is no `rust-toolchain.toml` pin to check
-against:
+`rust-version` of 1.98+1). Confirm `rust-toolchain.toml` matches `1.98.1`
+exactly (or use `channel = "nightly-…"` if `vstd` requires nightly — it does
+not)._
 
-```
-$ cat rust-toolchain.toml
-```
-
-confirm it matches `1.98.1` exactly (or use `channel = "nightly-…"` if
-`vstd` requires nightly — it does not, since Verus runs as a *separate*
-binary).
-
-### E2 · `profile.release.panic = "abort"` — [L]
+### E2 · `profile.release.panic = "abort"` — [L] **CONFORMS**
 `Cargo.toml:37`. Combined with the codebase's *no‑unsafe* + hand‑rolled
 error, this is a good default. Combined with `lto = "fat"` +
 `codegen-units = 1` it is a *deliberate* perf/size choice. Good.
 
-### E3 · `.cargo/config.toml` aliases `user` / `hardened` / `kb-user` / `kb-hardened` — [L]
+### E3 · `.cargo/config.toml` aliases `user` / `hardened` / `kb-user` / `kb-hardened` — [L] **CONFORMS**
 `cargo user` works. Documented in `HARDENED_BUILD.md`. Good.
 
 ### E4 · The two `kb-user`/`kb-hardened` packages are each a **9‑line
-`src/main.rs` + a one‑line `#[command(name="…")]`** — [L]
+`src/main.rs` + a one‑line `#[command(name="…")]`** — [L] **CONFORMS**
 
 Clean. The *real* code is in `kb/main.rs`. That is the A1/D7 split
 already.
 
-### E5 · `vstd = "=0.0.0-2026-09-06-0133"` is an exact pin — [L]
+### E5 · `vstd = "=0.0.0-2026-09-06-0133"` is an exact pin — [L] **CONFORMS**
 `Cargo.toml:53`. Documented as load‑bearing in the verus‑fork
 compatibility. Fine. The *comment* explains the why — good.
 
-### E6 · `rusqlite = "0.32"` + `bundled` — [L]
+### E6 · `rusqlite = "0.32"` + `bundled` — [L] **CONFORMS**
 `Cargo.toml:58`. A *single* SQLite in the tree. Good. The comment
 explains the why.
 
@@ -545,18 +552,43 @@ explains the why.
 
 ## Summary of fixes ranked by impact
 
+All seven items landed (the "RESOLVED" tag on each points to the finding
+above it for the before/after). The `[L]` findings that were not in this
+ranked list — B2, B3, B4, B7, C4, C5, D2, D4, D7, D10 — were closed in the
+same sweep; the E‑section + C6 are positive *observations* (confirmed
+conforming, not defects), not open work.
+
 1. **(A1+C3)** Split `kb/main.rs` by concern *and* build a tiny
    `json::Object/Array` — the single highest‑leverage pair of refactors.
+   **RESOLVED** — verb/JSON/diff/edit code now in `kb/cli/*` (15 files),
+   `JObject` in `kb/cli/json.rs`; `kb/main.rs` 3331→~1240.
 2. **(B1+B5)** Turn the two `panic`/`unwrap_or_default` call sites in
-   frontmatter / editor into `Err((msg, code))`.
+   frontmatter / editor into `Err((msg, code))`. **RESOLVED** — B1
+   `expect`→`Err(NotScalar)`; B5 read-back `.map_err` instead of `[]`.
 3. **(B6)** Promote `etag_of` to one definition in `kb-core`, remove
-   both `kb-db::index::etag_of` and `kb::etag_of`.
+   both `kb-db::index::etag_of` and `kb::etag_of`. **RESOLVED** — one
+   canonical `kb_core::etag::of`; both old sites now thin delegating wrappers.
 4. **(D1+D5+D6)** One inline‑summary + one provenance tag for each
    `SECURITY_REPORT N.M` / `PLAN §X` comment; rename *or* cross‑link the
-   TUI role that shares a name with the DB column.
+   TUI role that shares a name with the DB column. **RESOLVED** — anchor‑index
+   tables added to `SECURITY_REPORT.md` (§3) and `PLAN.md` (Contents);
+   the shared name is cross‑linked in both directions (not renamed).
 5. **(C1)** Make `confirm` return `Kb` (or `(String,i32)`) and kill the
-   five identical "wrap the `false` to a `Kb`" call sites.
-6. **(D8+D9)** Consolidate fixture locations. **Resolved** by moving
+   five identical "wrap the `false` to a `Kb`" call sites. **RESOLVED** —
+   `confirm` now returns `Result<(), (String, i32)>`; the redundant call
+   sites are gone.
+6. **(D8+D9)** Consolidate fixture locations. **RESOLVED** by moving
    `tests/fixtures/` → `kb-core/testdata/` (its owner) and keeping
    `kb/testdata/` as the shared-body diff golden — the one-per-package option.
 7. **(C2)** Add `#![forbid(unsafe_code)]` to the three binary/crate roots.
+   **RESOLVED** — done as a *workspace* lint (`Cargo.toml` `[workspace.lints]`)
+   inherited by all three crates, rather than three separate `#![forbid]`s.
+
+_Closed in the same sweep but originally tagged `[L]` (not in the ranked
+list): B2 (`lines[idx]` bound-guard), B3 (`split_at(1)` in `diff.rs`), B4
+(`non_flag.first()` guard), B7 (`stats` `COUNT` `?`‑prop), C4 (`sql_quote_lower`),
+C5 (`load_corpus` NULL‑title surfaced), D2 (`GATE_COL` const), D4 (`Kb` →
+`kb/cli/error.rs`), D7 (`VARIANT` const), D10 (README "Further reading").
+Confirmed‑conforming positive observations, no action: C6 (error‑shape
+consistency), E2 (`panic=abort`), E3 (`cargo user` alias), E4 (9‑line
+`main.rs` shells), E5 (`vstd` pin), E6 (`rusqlite` bundled)._
