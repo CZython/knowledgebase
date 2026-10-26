@@ -246,8 +246,55 @@ the API is still moving; breaking changes are called out explicitly.
   namespace (the same single-file namespace the body always had — just with a
   file per concern). The `editor` module is `#[cfg(feature = "editor")]`-gated
   end-to-end (declaration, re-export, and inner import), so a `kb-hardened`
-  build still compiles it away with zero unused-import warnings under
-  `clippy -D warnings`. No behavior changed; the 448-test gate is byte-identical.
+   build still compiles it away with zero unused-import warnings under
+   `clippy -D warnings`. No behavior changed; the 448-test gate is byte-identical.
+- **`A2` — the five oversized CLI verbs are split into named helpers.**
+   Each `cmd_*` mixed SQL construction, row binding, and result rendering in
+   one body: `cmd_search` was 235 lines, `cmd_create` 210, `cmd_tag_alias`
+   184, `cmd_links` 173, `cmd_browse` 119. Each is now a thin orchestrator that
+   delegates the self-contained concern to a purpose-named helper, leaving the
+   verb a ~10-line (browse) to ~117-line (create) reader and making each
+   extracted piece independently testable:
+   * `search.rs` — `build_search_sql(parsed, …) -> (sql, params)` owns the
+     WHERE-clause / FTS / NOT / gate logic; `render_search(rows|json)` owns the
+     two output shapes.
+   * `create.rs` — `resolve_target(…)` owns name/extension/title validation +
+     path absolutisation; `index_created(…)` owns the best-effort index step.
+   * `tag.rs` — `do_import(…)` owns the `--import` file/stdin read, line-by-line
+     codec walk, and checked-transaction upsert.
+   * `links.rs` — `resolve_target_path(…)` owns the three target shapes
+     (abs path / display id / partial path); `render_links(…)` owns the
+     shared JSON + human renderers.
+   * `browse.rs` — `fetch_browse_pages(…)` owns the filtered vs. full query;
+     `render_browse(…)` owns the JSON + human layout.
+   Pure refactor: no SQL string, message, or JSON byte changed; all 448 tests
+   and the `gate.sh` 7-stage pass are unchanged.
+- **`A3` — the `run_editor` / `edit_in_place` pair is now one launch body.**
+   The two ~50-line functions shared the same `$VISUAL → $EDITOR → vi`
+   resolution, spawn, and temp-buffer cleanup, differing only in launch-vs-
+   in-place semantics — and had drifted (the launch-hint logic lived only in
+   `edit_in_place`, so a `run_editor` non-zero exit lost it). Both public
+   entrypoints now delegate to a    single `run_editor_in(initial, in_place)` that
+   keeps the *launch-failed* and *non-zero-exit* branches, and the temp-buffer
+   cleanup, in one place. No behavior changed.
+- **Test temp-file leak fixed — three test modules were creating files in
+   `$TMPDIR` and not removing them.** `section_cli::temp_md` returned a bare
+   `PathBuf` whose owner (the test) did not own cleanup → thousands of
+   `kb_cli_<pid>_<name>.md` files accumulated per full-suite run. `kb/tui/mod.rs::
+   seeded_app` returned a bare `PathBuf` for the seeded page, and every test
+   that called `let (_app, page_dir) = seeded_app();` bound the dir but never
+   removed it (1,151 `kb_tui_redesign_*` dirs accumulated). `kb/tui/input.rs::
+   roots_form_types_jk_in_path` created a fixed `xjk-root` dir once per run.
+   Each now owns its scratch via a small RAII guard
+   (`TempFile(PathBuf)` and `struct Seeded { page, dir }` in `kb/tui/mod.rs`)
+   that deletes on `Drop` via `Deref<Target name="PathBuf">` — so every existing
+   call site that used `.to_str()`, `AsRef<Path>`, `Deref`-based `&path`
+   derefs, or `Path::parent()` still compiles unchanged. After a full
+   `cargo test --workspace` run the `kb*` entries left in `$TMPDIR` are the
+   two shared fixed infra dirs (`kb_db_tests/` — one dir shared by all
+   `kb-db` tests, per-test `.db` files inside removed by `Db::drop` — and
+   `kbdb_schema_version_3_15/` — a schema-version marker dir), not a per-
+   call accumulation. No new dependency; the guards are ~20 lines each.
 - **`D10` — the README now enumerates every root-level document, with a
   one-line "what is it for" summary.** Previously a newcomer had to open each
   of `PLAN.md` / `CONTRIBUTING.md` / `HARDENED_BUILD.md` /

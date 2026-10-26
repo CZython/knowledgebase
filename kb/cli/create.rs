@@ -30,6 +30,117 @@ pub(crate) fn cmd_create(dbpath: Option<&Path>, filename: &str, a: &CreateArgs) 
             ));
         }
     }
+    let (kind, target, title) = resolve_target(dir, type_arg, filename)?;
+
+    // ---- the scaffold (PLAN §4: `type:` + `title:`, no H1 required) -------
+    let scaffold = format!(
+        "---\ntype: {kind}\ntitle: {title}\ndescription:\ntags: []\nsearch_required_phrase: []\n---\n\n# {title}\n\n"
+    );
+    let d = diff::unified_diff("", &scaffold, "/dev/null", &target.display().to_string());
+
+    // Human render of the new-file diff: stdout normally, stderr under
+    // `--json` (stdout must carry exactly one JSON document — §13p).
+    if !d.is_empty() {
+        if json {
+            eprint!("{d}");
+        } else {
+            print!("{d}");
+        }
+    }
+
+    if dry_run {
+        if json {
+            let r = CreateReport {
+                target: target.as_path(),
+                kind: kind.clone(),
+                title: title.clone(),
+                id: None,
+                created: false,
+                edited: false,
+                indexed: false,
+                dry_run: true,
+                bytes: scaffold.len(),
+                diff: d.as_str(),
+            };
+            println!("{}", r.to_json());
+        } else {
+            eprintln!("kb: dry-run — {} not created", target.display());
+        }
+        return Ok(EXIT_OK);
+    }
+
+    confirm("create?", yes || json)?;
+
+    // ---- write (atomic: same-dir temp + rename) ---------------------------
+    if let Some(parent) = target.parent() {
+        if !parent.as_os_str().is_empty() {
+            std::fs::create_dir_all(parent)
+                .map_err(|e| (format!("create {}: {e}", parent.display()), EXIT_ERR))?;
+        }
+    }
+    atomic_write(&target, scaffold.as_bytes())
+        .map_err(|e| (format!("write {}: {e}", target.display()), EXIT_ERR))?;
+    if !json {
+        println!("kb: created {} ({} bytes)", target.display(), scaffold.len());
+    }
+
+    // ---- optional in-place edit: the saved bytes are what we index --------
+    // SECURITY_REPORT 3.1: `-e` / `a.edit` are editor-feature surface —
+    // the `edit` field on `CreateArgs` only exists when the feature is on,
+    // so in a hardened build clap rejects `-e` as an unexpected argument
+    // before `cmd_create` sees it. The `edited` binding is a constant
+    // `false` in that mode; the editor fork never happens.
+    #[cfg(feature = "editor")]
+    let edited = if a.edit {
+        edit_in_place(&target)?;
+        true
+    } else {
+        false
+    };
+    #[cfg(not(feature = "editor"))]
+    let edited = false;
+
+    // ---- index (best-effort; disk is authoritative, `kb refresh` repairs) --
+    let IndexOutcome { indexed, id, note } = index_created(dbpath, &target)?;
+
+    if json {
+        let r = CreateReport {
+            target: target.as_path(),
+            kind,
+            title,
+            id: id.as_deref(),
+            created: true,
+            edited,
+            indexed,
+            dry_run: false,
+            bytes: scaffold.len(),
+            diff: d.as_str(),
+        };
+        println!("{}", r.to_json());
+    } else if indexed {
+        if let Some(i) = &id {
+            println!("kb: indexed as {i}");
+        }
+    }
+    if let Some(n) = note {
+        eprintln!("kb: {n}");
+    }
+    Ok(EXIT_OK)
+}
+
+
+/// Resolve a `create` NAME/`--path` pair to `(kind, target, title)` — the
+/// three values the scaffold, the diff, and the JSON `file` key all need
+/// (A2 extraction). Validation is unchanged from the inlined version: name
+/// non-empty / no NUL / no newlines, `.md` extension required (or appended
+/// when absent, matching `kb section`), a non-empty title that isn't just
+/// `.`/`..`, and the path absolutised against the cwd so the `file` string
+/// an agent reads back doesn't depend on where it happened to run.
+fn resolve_target(
+    dir: Option<&Path>,
+    type_arg: &str,
+    filename: &str,
+) -> Result<(String, PathBuf, String), (String, i32)> {
     let kind = match NoteType::parse(type_arg) {
         Some(NoteType::Wiki) => "wiki",
         Some(NoteType::Note) => "note",
@@ -41,7 +152,6 @@ pub(crate) fn cmd_create(dbpath: Option<&Path>, filename: &str, a: &CreateArgs) 
             ))
         }
     };
-
     // ---- target path: [--path DIR] + NAME, `.md` appended when absent ----
     let name = filename.trim();
     if name.is_empty() {
@@ -90,76 +200,26 @@ pub(crate) fn cmd_create(dbpath: Option<&Path>, filename: &str, a: &CreateArgs) 
     if target.exists() {
         return Err((format!("create: {} already exists", target.display()), EXIT_ERR));
     }
+    Ok((kind.into(), target, title))
+}
 
-    // ---- the scaffold (PLAN §4: `type:` + `title:`, no H1 required) -------
-    let scaffold = format!(
-        "---\ntype: {kind}\ntitle: {title}\ndescription:\ntags: []\nsearch_required_phrase: []\n---\n\n# {title}\n\n"
-    );
-    let d = diff::unified_diff("", &scaffold, "/dev/null", &target.display().to_string());
 
-    // Human render of the new-file diff: stdout normally, stderr under
-    // `--json` (stdout must carry exactly one JSON document — §13p).
-    if !d.is_empty() {
-        if json {
-            eprint!("{d}");
-        } else {
-            print!("{d}");
-        }
-    }
+/// Index a freshly-written page (A2 extraction). Disk stays authoritative — a
+/// failure here just skips the row and sets `note`, matching `refresh`'s
+/// `§3/§4` contract that a create never *errors* out of the index path
+/// (it would lose the scaffold). Wraps the three values into a named struct
+/// so the return type reads at a glance and the field names document intent.
+struct IndexOutcome {
+    indexed:bool,
+    id:Option<String>,
+    note:Option<String>,
+}
 
-    if dry_run {
-        if json {
-            let r = CreateReport {
-                target: target.as_path(),
-                kind,
-                title: title.as_str(),
-                id: None,
-                created: false,
-                edited: false,
-                indexed: false,
-                dry_run: true,
-                bytes: scaffold.len(),
-                diff: d.as_str(),
-            };
-            println!("{}", r.to_json());
-        } else {
-            eprintln!("kb: dry-run — {} not created", target.display());
-        }
-        return Ok(EXIT_OK);
-    }
 
-    confirm("create?", yes || json)?;
-
-    // ---- write (atomic: same-dir temp + rename) ---------------------------
-    if let Some(parent) = target.parent() {
-        if !parent.as_os_str().is_empty() {
-            std::fs::create_dir_all(parent)
-                .map_err(|e| (format!("create {}: {e}", parent.display()), EXIT_ERR))?;
-        }
-    }
-    atomic_write(&target, scaffold.as_bytes())
-        .map_err(|e| (format!("write {}: {e}", target.display()), EXIT_ERR))?;
-    if !json {
-        println!("kb: created {} ({} bytes)", target.display(), scaffold.len());
-    }
-
-    // ---- optional in-place edit: the saved bytes are what we index --------
-    // SECURITY_REPORT 3.1: `-e` / `a.edit` are editor-feature surface —
-    // the `edit` field on `CreateArgs` only exists when the feature is on,
-    // so in a hardened build clap rejects `-e` as an unexpected argument
-    // before `cmd_create` sees it. The `edited` binding is a constant
-    // `false` in that mode; the editor fork never happens.
-    #[cfg(feature = "editor")]
-    let edited = if a.edit {
-        edit_in_place(&target)?;
-        true
-    } else {
-        false
-    };
-    #[cfg(not(feature = "editor"))]
-    let edited = false;
-
-    // ---- index (best-effort; disk is authoritative, `kb refresh` repairs) --
+fn index_created(
+    dbpath: Option<&Path>,
+    target: &Path,
+) -> Result<IndexOutcome, (String, i32)> {
     let db = open_db(dbpath)?;
     let roots = roots_with_seq(&db)?;
     let mut indexed = false;
@@ -170,7 +230,7 @@ pub(crate) fn cmd_create(dbpath: Option<&Path>, filename: &str, a: &CreateArgs) 
             "no roots registered — skipped indexing (run `kb add <dir>` first)".to_string(),
         );
     } else {
-        let abs = std::fs::canonicalize(&target)
+        let abs = std::fs::canonicalize(target)
             .map_err(|e| (format!("resolve {}: {e}", target.display()), EXIT_ERR))?;
         let abs_s = abs.to_string_lossy().to_string();
         match kb_db::walk_snapshot::winning_root(&roots, &abs_s) {
@@ -194,40 +254,19 @@ pub(crate) fn cmd_create(dbpath: Option<&Path>, filename: &str, a: &CreateArgs) 
             },
         }
     }
-
-    if json {
-        let r = CreateReport {
-            target: target.as_path(),
-            kind,
-            title: title.as_str(),
-            id: id.as_deref(),
-            created: true,
-            edited,
-            indexed,
-            dry_run: false,
-            bytes: scaffold.len(),
-            diff: d.as_str(),
-        };
-        println!("{}", r.to_json());
-    } else if indexed {
-        if let Some(i) = &id {
-            println!("kb: indexed as {i}");
-        }
-    }
-    if let Some(n) = note {
-        eprintln!("kb: {n}");
-    }
-    Ok(EXIT_OK)
+    Ok(IndexOutcome { indexed, id, note })
 }
 
 
 /// The `create` result envelope — one JSON object on stdout (§13p), keys
 /// stable across the dry-run / write paths so an agent can branch on
-/// `indexed` / `dry_run` without parsing prose.
+/// `indexed` / `dry_run` without parsing prose. `kind`/`title` are owned —
+/// `resolve_target` hands them over by value, so the report (which outlives
+/// the caller's stack frames) is the owner rather than a borrow.
 pub(crate) struct CreateReport<'a> {
     pub(crate) target:&'a Path,
-    pub(crate) kind:&'a str,
-    pub(crate) title:&'a str,
+    pub(crate) kind:String,
+    pub(crate) title:String,
     pub(crate) id:Option<&'a str>,
     pub(crate) created:bool,
     pub(crate) edited:bool,
@@ -242,8 +281,8 @@ impl CreateReport<'_> {
     pub(crate) fn to_json(&self) -> String {
         let mut o = JObject::new();
         o.s("file", &self.target.display().to_string());
-        o.s("type", self.kind);
-        o.s("title", self.title);
+        o.s("type", &self.kind);
+        o.s("title", &self.title);
         let id_opt: Option<String> = self.id.map(|s| s.to_string());
         o.opt("id", &id_opt);
         o.b("created", self.created);

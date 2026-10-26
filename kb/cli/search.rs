@@ -28,6 +28,175 @@ pub(crate) struct SearchRow {
 }
 
 
+/// Build the full `SEARCH` SQL string + its positional params from the parsed
+/// query. Split out of `cmd_search` (A2): the 230-line verb mixed three
+/// concerns (SQL construction, row binding, result rendering); `build_search_sql`
+/// owns just the first. Pure over its inputs — no `Db`, no I/O — so it is cheap
+/// to exercise directly and `cmd_search` stays a thin orchestrator.
+///
+/// `params_vec` is filled in the exact order the `?N` placeholders appear in the
+/// returned SQL (`params_vec.len()` is the live counter at each `push`), so
+/// `params_from_iter(params_vec)` binds them in one call.
+fn build_search_sql(
+    parsed: &search_grammar::ParsedQuery,
+    gate_text: &str,
+    tag_match_sets: &[Vec<String>],
+    has_match: bool,
+    has_not: bool,
+    limit: usize,
+) -> (String, Vec<String>) {
+    let mut params_vec: Vec<String> = Vec::new(); // all params are TEXT for v1
+    let mut wheres: Vec<String> = Vec::new();
+
+    let fts_render = parsed.render_fts();
+    // A NOT-only query (no AND, no OR) can't be expressed as a single FTS5
+    // MATCH string (leading NOT is rejected). SECURITY_REPORT 3.5: this was
+    // previously a *silent no-op* — the query returned the whole corpus up to
+    // `LIMIT` with a reassuring note. We keep the FTS join active and add one
+    // `NOT (pages_fts MATCH <term>)` clause per NOT term instead, the same
+    // exclusion FTS5's own NOT gives when a positive term is present.
+    let not_only = !has_match && has_not;
+    let fts_active = has_match && !fts_render.is_empty() || not_only;
+    if has_match && !fts_render.is_empty() {
+        params_vec.push(fts_render);
+        wheres.push(format!("pages_fts MATCH ?{}", params_vec.len()));
+    }
+    if not_only {
+        for t in &parsed.not_terms {
+            // FTS5 `MATCH` must appear as a top-level WHERE predicate of a
+            // SELECT that directly queries the FTS5 table — `NOT (pages_fts
+            // MATCH ?)` in an outer WHERE on a non-FTS5 main table is rejected
+            // ("unable to use function MATCH in the requested context"). The
+            // subquery satisfies the requirement: its FROM is the FTS5 table.
+            params_vec.push(search_term_text(t));
+            wheres.push(format!(
+                "NOT EXISTS (SELECT 1 FROM pages_fts WHERE rowid = pages.rowid \
+                  AND pages_fts MATCH ?{})",
+                params_vec.len()
+            ));
+        }
+    }
+
+    for f in &parsed.filters {
+        if !f.is_tag() {
+            params_vec.push(f.value.clone());
+            wheres.push(format!(
+                "lower(pages.{}) = lower(?{})",
+                f.key, params_vec.len()
+            ));
+        }
+    }
+
+    for match_set in tag_match_sets.iter() {
+        // SECURITY_REPORT 3.4: the left side of the comparison is
+        // `lower(pt.tag)`, so the IN-list must be lowercased too. `canonicalize`
+        // returns the *stored* strings in their original casing (that is how
+        // case/alias folding is decided), but a stored mixed-case tag like
+        // `Czech` would then fail `lower('Czech') IN ('Czech',…)` → `'czech'
+        // IN ('Czech',…)` → no match. Folding the IN-list to lowercase makes
+        // both sides of the comparison the same case-fold.
+        let in_list: Vec<String> = match_set
+            .iter()
+            .map(|t| sql_quote_lower(t))
+            .collect();
+        wheres.push(format!(
+            "EXISTS (SELECT 1 FROM page_tags pt WHERE pt.abs_path = pages.abs_path\nAND lower(pt.tag) IN ({}))",
+            in_list.join(",")
+        ));
+    }
+
+    if gate_text.is_empty() {
+        wheres.push(
+            "NOT EXISTS (SELECT 1 FROM page_gates g WHERE g.abs_path = pages.abs_path)".into(),
+        );
+    } else {
+        params_vec.push(gate_text.to_string());
+        wheres.push(format!(
+            "(NOT EXISTS (SELECT 1 FROM page_gates g WHERE g.abs_path = pages.abs_path)\n\
+             OR EXISTS (SELECT 1 FROM page_gates g WHERE g.abs_path = pages.abs_path\n\
+             AND lower(?{}) LIKE '%' || lower(g.term) || '%'))",
+            params_vec.len()
+        ));
+    }
+
+    let mut sql = String::new();
+    if fts_active {
+        let search_fts_sql = format!(
+            "SELECT pages.abs_path, pages.id, pages.type,\n\
+              pages.title, pages.description, pages.root, pages.rel_path,\n\
+              pages.{gate}, bm25(pages_fts) AS score\n",
+            gate = GATE_COL
+        );
+        sql.push_str(&search_fts_sql);
+        sql.push_str(
+            "FROM pages\n\
+              JOIN pages_fts ON pages.rowid = pages_fts.rowid\n"
+        );
+    } else {
+        let search_nofts_sql = format!(
+            "SELECT pages.abs_path, pages.id, pages.type,\n\
+              pages.title, pages.description, pages.root, pages.rel_path,\n\
+              pages.{gate}, NULL AS score\n",
+            gate = GATE_COL
+        );
+        sql.push_str(&search_nofts_sql);
+        sql.push_str("FROM pages\n");
+    }
+    sql.push_str("WHERE ");
+    sql.push_str(&wheres.join("\nAND "));
+    if fts_active {
+        sql.push_str("\nORDER BY score ASC");
+    } else {
+        sql.push_str("\nORDER BY pages.title COLLATE NOCASE");
+    }
+    sql.push_str(&format!("\nLIMIT {limit}"));
+
+    (sql, params_vec)
+}
+
+
+/// Render a fetched `SearchRow` batch to `stdout` in the requested format
+/// (A2: extracted from `cmd_search`). No `Db` here — the rows are already
+/// materialised, so this is a pure formatting step that the TUI could in
+/// principle re-use against its own row source.
+fn render_search(rows: &[SearchRow], json: bool, query: &str) {
+    if json {
+        let items: Vec<String> = rows.iter().map(|r| {
+            let score = match r.score {
+                Some(s) => format!("{s:.6}"),
+                None => "null".to_string(),
+            };
+            let mut o = JObject::new();
+            o.s("id", &r.id);
+            o.s("type", &r.pt);
+            o.opt("title", &r.title);
+            o.opt("description", &r.description);
+            o.s("abs_path", &r.abs_path);
+            o.s("rel_path", &r.rel_path);
+            o.raw("score", score);
+            o.render_compact()
+        }).collect();
+        println!("{}", top_array(&items));
+    } else {
+        if rows.is_empty() {
+            println!("0 results for {query:?} (the query was too strict, or the page is gated)");
+        } else {
+            for (i, r) in rows.iter().enumerate() {
+                let title = r.title.as_deref().unwrap_or("");
+                let desc = r.description.as_deref().unwrap_or("");
+                let tail = if desc.is_empty() {
+                    r.rel_path.clone()
+                } else {
+                    format!("{desc}  ({})", r.rel_path)
+                };
+                println!("{:>3}  {:<24} {}  {}", i + 1, r.id, title, tail);
+            }
+            println!("── {} result(s)", rows.len());
+        }
+    }
+}
+
+
 pub(crate) fn cmd_search(dbpath: Option<&Path>, query: &str, json: bool, limit: usize) -> Kb {
     let parsed = search_grammar::parse(query);
     let has_and = !parsed.and_terms.is_empty();
@@ -91,111 +260,8 @@ pub(crate) fn cmd_search(dbpath: Option<&Path>, query: &str, json: bool, limit: 
         }
     }
 
-    let mut params_vec: Vec<String> = Vec::new(); // all params are TEXT for v1
-    let mut wheres: Vec<String> = Vec::new();
-
-    let fts_render = parsed.render_fts();
-    // A NOT-only query (no AND, no OR) can't be expressed as a single FTS5
-    // MATCH string (leading NOT is rejected). SECURITY_REPORT 3.5: this was
-    // previously a *silent no-op* — the query returned the whole corpus up to
-    // `LIMIT` with a reassuring note. We keep the FTS join active and add one
-    // `NOT (pages_fts MATCH <term>)` clause per NOT term instead, the same
-    // exclusion FTS5's own NOT gives when a positive term is present.
-    let not_only = !has_match && has_not;
-    let fts_active = has_match && !fts_render.is_empty() || not_only;
-    if has_match && !fts_render.is_empty() {
-        params_vec.push(fts_render);
-        wheres.push(format!("pages_fts MATCH ?{}", params_vec.len()));
-    }
-    if not_only {
-        for t in &parsed.not_terms {
-            // FTS5 `MATCH` must appear as a top-level WHERE predicate of a
-            // SELECT that directly queries the FTS5 table — `NOT (pages_fts
-            // MATCH ?)` in an outer WHERE on a non-FTS5 main table is rejected
-            // ("unable to use function MATCH in the requested context"). The
-            // subquery satisfies the requirement: its FROM is the FTS5 table.
-            params_vec.push(search_term_text(t));
-            wheres.push(format!(
-                "NOT EXISTS (SELECT 1 FROM pages_fts WHERE rowid = pages.rowid \
-                 AND pages_fts MATCH ?{})",
-                params_vec.len()
-            ));
-        }
-    }
-
-    for f in &parsed.filters {
-        if !f.is_tag() {
-            params_vec.push(f.value.clone());
-            wheres.push(format!(
-                "lower(pages.{}) = lower(?{})",
-                f.key, params_vec.len()
-            ));
-        }
-    }
-
-    for match_set in tag_match_sets.iter() {
-        // SECURITY_REPORT 3.4: the left side of the comparison is
-        // `lower(pt.tag)`, so the IN-list must be lowercased too. `canonicalize`
-        // returns the *stored* strings in their original casing (that is how
-        // case/alias folding is decided), but a stored mixed-case tag like
-        // `Czech` would then fail `lower('Czech') IN ('Czech',…)` → `'czech'
-        // IN ('Czech',…)` → no match. Folding the IN-list to lowercase makes
-        // both sides of the comparison the same case-fold.
-        let in_list: Vec<String> = match_set
-            .iter()
-            .map(|t| sql_quote_lower(t))
-            .collect();
-        wheres.push(format!(
-            "EXISTS (SELECT 1 FROM page_tags pt WHERE pt.abs_path = pages.abs_path\nAND lower(pt.tag) IN ({}))",
-            in_list.join(",")
-        ));
-    }
-
-    if gate_text.is_empty() {
-        wheres.push(
-            "NOT EXISTS (SELECT 1 FROM page_gates g WHERE g.abs_path = pages.abs_path)".into(),
-        );
-    } else {
-        params_vec.push(gate_text.clone());
-        wheres.push(format!(
-            "(NOT EXISTS (SELECT 1 FROM page_gates g WHERE g.abs_path = pages.abs_path)\n\
-             OR EXISTS (SELECT 1 FROM page_gates g WHERE g.abs_path = pages.abs_path\n\
-             AND lower(?{}) LIKE '%' || lower(g.term) || '%'))",
-            params_vec.len()
-        ));
-    }
-
-    let mut sql = String::new();
-    if fts_active {
-        let search_fts_sql = format!(
-            "SELECT pages.abs_path, pages.id, pages.type,\n\
-              pages.title, pages.description, pages.root, pages.rel_path,\n\
-              pages.{gate}, bm25(pages_fts) AS score\n",
-            gate = GATE_COL
-        );
-        sql.push_str(&search_fts_sql);
-        sql.push_str(
-            "FROM pages\n\
-              JOIN pages_fts ON pages.rowid = pages_fts.rowid\n"
-        );
-    } else {
-        let search_nofts_sql = format!(
-            "SELECT pages.abs_path, pages.id, pages.type,\n\
-              pages.title, pages.description, pages.root, pages.rel_path,\n\
-              pages.{gate}, NULL AS score\n",
-            gate = GATE_COL
-        );
-        sql.push_str(&search_nofts_sql);
-        sql.push_str("FROM pages\n");
-    }
-    sql.push_str("WHERE ");
-    sql.push_str(&wheres.join("\nAND "));
-    if fts_active {
-        sql.push_str("\nORDER BY score ASC");
-    } else {
-        sql.push_str("\nORDER BY pages.title COLLATE NOCASE");
-    }
-    sql.push_str(&format!("\nLIMIT {limit}"));
+    let (sql, params_vec) =
+        build_search_sql(&parsed, &gate_text, &tag_match_sets, has_match, has_not, limit);
 
     let db_ref = &db;
     let mut stmt = db_ref.conn.prepare(&sql).map_err(|e| {
@@ -227,40 +293,7 @@ pub(crate) fn cmd_search(dbpath: Option<&Path>, query: &str, json: bool, limit: 
         .collect::<Result<_, _>>()
         .map_err(|e| (format!("search rows: {e}"), EXIT_ERR))?;
 
-    if json {
-        let items: Vec<String> = rows.iter().map(|r| {
-            let score = match r.score {
-                Some(s) => format!("{s:.6}"),
-                None => "null".to_string(),
-            };
-            let mut o = JObject::new();
-            o.s("id", &r.id);
-            o.s("type", &r.pt);
-            o.opt("title", &r.title);
-            o.opt("description", &r.description);
-            o.s("abs_path", &r.abs_path);
-            o.s("rel_path", &r.rel_path);
-            o.raw("score", score);
-            o.render_compact()
-        }).collect();
-        println!("{}", top_array(&items));
-    } else {
-        if rows.is_empty() {
-            println!("0 results for {query:?} (the query was too strict, or the page is gated)");
-        } else {
-            for (i, r) in rows.iter().enumerate() {
-                let title = r.title.as_deref().unwrap_or("");
-                let desc = r.description.as_deref().unwrap_or("");
-                let tail = if desc.is_empty() {
-                    r.rel_path.clone()
-                } else {
-                    format!("{desc}  ({})", r.rel_path)
-                };
-                println!("{:>3}  {:<24} {}  {}", i + 1, r.id, title, tail);
-            }
-            println!("── {} result(s)", rows.len());
-        }
-    }
+    render_search(&rows, json, query);
     Ok(EXIT_OK)
 }
 

@@ -716,5 +716,6 @@ mod tests {
             _ => String::new(),
         };
         assert_eq!(text, path, "every char of the path, including 'j' and 'k', must be typed");
+        let _ = std::fs::remove_dir_all(&path);
     }
 }

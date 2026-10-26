@@ -15,13 +15,36 @@ fn kb() -> Command {
     )
 }
 
-/// Write `text` to a fresh temp file in the test's scratch dir and return its
-/// path. Every test uses its own file, so runs are independent.
-fn temp_md(name: &str, text: &str) -> PathBuf {
+/// RAII guard: a temp file that deletes itself on drop. `temp_md` used to
+/// hand back a bare `PathBuf` the caller never cleaned up — every test run
+/// leaked one file into `$TMPDIR` (thousands accumulated). `Deref` to
+/// `PathBuf` means every call site (`f.to_str()`, `read_to_string(&f)`, …)
+/// is unchanged.
+struct TempFile(PathBuf);
+impl std::ops::Deref for TempFile {
+    type Target = PathBuf;
+    fn deref(&self) -> &PathBuf {
+        &self.0
+    }
+}
+impl AsRef<std::path::Path> for TempFile {
+    fn as_ref(&self) -> &std::path::Path {
+        self.0.as_path()
+    }
+}
+impl Drop for TempFile {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.0);
+    }
+}
+
+/// Write `text` to a fresh temp file in the test's scratch dir and return a
+/// guard over it. Every test uses its own file, so runs are independent.
+fn temp_md(name: &str, text: &str) -> TempFile {
     let mut p = std::env::temp_dir();
     p.push(format!("kb_cli_{}_{}.md", std::process::id(), name));
     std::fs::write(&p, text).unwrap();
-    p
+    TempFile(p)
 }
 
 fn base_md() -> String {

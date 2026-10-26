@@ -181,80 +181,7 @@ pub(crate) fn cmd_tag_alias(dbpath: Option<&Path>, o: &TagAliasOpts, json: bool)
     }
 
     if import {
-        let text = match file {
-            Some(p) => std::fs::read_to_string(p)
-                .map_err(|e| (format!("read {}: {e}", p.display()), EXIT_ERR))?,
-            None => {
-                // stdin (so `kb tag-alias --import < backup.tsv` works).
-                let mut buf = String::new();
-                use std::io::Read;
-                std::io::stdin()
-                    .read_to_string(&mut buf)
-                    .map_err(|e| (format!("read stdin: {e}"), EXIT_ERR))?;
-                buf
-            }
-        };
-        // Report the *skips* (malformed / non-data lines) before loading, so
-        // a partially-typed backup is never silently truncated. This walks
-        // the same `parse_line` the pure core uses, so the codec is the single
-        // source of truth for what counts as a data line.
-        let mut loaded = 0usize;
-        let mut skipped = 0usize;
-        let mut rows: Vec<(String, String)> = Vec::new();
-        for line in text.lines() {
-            match kbalias::parse_line(line) {
-                Some((a, c)) => {
-                    if let Some(slot) = rows.iter_mut().find(|(x, _)| x == a) {
-                        slot.1 = c.to_string();
-                    } else {
-                        rows.push((a.to_string(), c.to_string()));
-                        loaded += 1;
-                    }
-                }
-                None => {
-                    if !kbalias::line_is_ignorable(line) {
-                        skipped += 1;
-                    }
-                }
-            }
-        }
-        // SECURITY_REPORT 3.8: raw `BEGIN` / `COMMIT` via `execute_batch`
-        // leaves the transaction *open* if any step in between returns `Err`
-        // (e.g. `prepare` or mid-batch `upsert.execute`). `rusqlite` then
-        // keeps that open transaction on the reused `Connection`, so any
-        // subsequent command (or a process death in the gap) sees / loses the
-        // still-uncommitted batch. `unchecked_transaction()` is a checked
-        // guard whose `Drop` issues `ROLLBACK` on error paths.
-        let tx = db
-            .conn
-            .unchecked_transaction()
-            .map_err(|e| (format!("begin import: {e}"), EXIT_ERR))?;
-        {
-            let mut upsert = tx
-                .prepare(
-                    "INSERT INTO tag_aliases(alias, canonical) VALUES (?1, ?2)\n\
-                      ON CONFLICT(alias) DO UPDATE SET canonical = excluded.canonical",
-                )
-                .map_err(|e| (format!("prepare import: {e}"), EXIT_ERR))?;
-            for (a, c) in &rows {
-                upsert
-                    .execute(rusqlite::params![a, c])
-                    .map_err(|e| (format!("upsert import: {e}"), EXIT_ERR))?;
-            }
-        }
-        tx.commit()
-            .map_err(|e| (format!("commit import: {e}"), EXIT_ERR))?;
-        if json {
-            let mut o = JObject::new();
-            o.i("loaded", loaded as i64);
-            o.i("skipped", skipped as i64);
-            println!("{}", o.render());
-        } else {
-            println!(
-                "imported {loaded} alias row(s) (last-wins on duplicate aliases); {skipped} line(s) skipped (blank/comment/malformed)",
-            );
-        }
-        return Ok(EXIT_OK);
+        return do_import(&db, file, json);
     }
 
     if list {
@@ -327,6 +254,83 @@ pub(crate) fn cmd_tag_alias(dbpath: Option<&Path>, o: &TagAliasOpts, json: bool)
         );
     } else {
         println!("alias: {alias:?} → {canonical:?}");
+    }
+    Ok(EXIT_OK)
+}
+
+
+/// `--import` path for `kb tag-alias` (A2 extraction from `cmd_tag_alias`).
+/// Self-contained: reads a backup (file or stdin), walks it line-by-line
+/// through the same `kbalias::parse_line` / `line_is_ignorable` codec the
+/// pure core uses (so the codec stays the single source of truth for what
+/// counts as a data line), and upserts under a *checked* transaction — raw
+/// `BEGIN` / `COMMIT` via `execute_batch` left the transaction open if any
+/// step in between returned `Err` (SECURITY_REPORT 3.8); `checked_transaction`
+/// issues `ROLLBACK` on `Err` unwind.
+fn do_import(db: &Db, file: Option<&Path>, json: bool) -> Kb {
+    let text = match file {
+        Some(p) => std::fs::read_to_string(p)
+            .map_err(|e| (format!("read {}: {e}", p.display()), EXIT_ERR))?,
+        None => {
+            // stdin (so `kb tag-alias --import < backup.tsv` works).
+            let mut buf = String::new();
+            use std::io::Read;
+            std::io::stdin()
+                .read_to_string(&mut buf)
+                .map_err(|e| (format!("read stdin: {e}"), EXIT_ERR))?;
+            buf
+        }
+    };
+    // Report the *skips* (malformed / non-data lines) before loading, so a
+    // partially-typed backup is never silently truncated.
+    let mut loaded = 0usize;
+    let mut skipped = 0usize;
+    let mut rows: Vec<(String, String)> = Vec::new();
+    for line in text.lines() {
+        match kbalias::parse_line(line) {
+            Some((a, c)) => {
+                if let Some(slot) = rows.iter_mut().find(|(x, _)| x == a) {
+                    slot.1 = c.to_string();
+                } else {
+                    rows.push((a.to_string(), c.to_string()));
+                    loaded += 1;
+                }
+            }
+            None => {
+                if !kbalias::line_is_ignorable(line) {
+                    skipped += 1;
+                }
+            }
+        }
+    }
+    let tx = db
+        .conn
+        .unchecked_transaction()
+        .map_err(|e| (format!("begin import: {e}"), EXIT_ERR))?;
+    {
+        let mut upsert = tx
+            .prepare(
+                "INSERT INTO tag_aliases(alias, canonical) VALUES (?1, ?2)\n\
+                  ON CONFLICT(alias) DO UPDATE SET canonical = excluded.canonical",
+            )
+            .map_err(|e| (format!("prepare import: {e}"), EXIT_ERR))?;
+        for (a, c) in &rows {
+            upsert
+                .execute(rusqlite::params![a, c])
+                .map_err(|e| (format!("upsert import: {e}"), EXIT_ERR))?;
+        }
+    }
+    tx.commit()
+        .map_err(|e| (format!("commit import: {e}"), EXIT_ERR))?;
+    if json {
+        let mut o = JObject::new();
+        o.i("loaded", loaded as i64);
+        o.i("skipped", skipped as i64);
+        println!("{}", o.render());
+    } else {
+        println!(
+            "imported {loaded} alias row(s) (last-wins on duplicate aliases); {skipped} line(s) skipped (blank/comment/malformed)",
+        );
     }
     Ok(EXIT_OK)
 }

@@ -3312,7 +3312,35 @@ mod tests {
     /// fixture in `close_edit_...` but returns the temp dir so the caller can
     /// clean it up. Seeding `page_tags` is what gives the `Tags` field a
     /// non-empty *corpus* (the suggestions come from the DB, not the file).
-    fn seeded_app() -> (App, std::path::PathBuf) {
+    /// RAII guard over the seeded page *and* its parent temp dir. Drop removes
+    /// the whole dir (which holds only `page.md`). `Deref` to the page
+    /// `PathBuf` keeps the existing `let (app, page) = seeded_app();` shape —
+    /// `page.to_str()` / `read_to_string(&page)` all resolve to the file.
+    /// `seeded_app` used to hand back a bare `PathBuf` the caller bound to
+    /// `_dir`/`page` and dropped without cleanup — every call leaked its dir,
+    /// and thousands of `kb_tui_redesign_*` dirs accumulated in `$TMPDIR`.
+    struct Seeded {
+        page: std::path::PathBuf,
+        dir: std::path::PathBuf,
+    }
+    impl std::ops::Deref for Seeded {
+        type Target = std::path::PathBuf;
+        fn deref(&self) -> &std::path::PathBuf {
+            &self.page
+        }
+    }
+    impl AsRef<std::path::Path> for Seeded {
+        fn as_ref(&self) -> &std::path::Path {
+            self.page.as_path()
+        }
+    }
+    impl Drop for Seeded {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.dir);
+        }
+    }
+
+    fn seeded_app() -> (App, Seeded) {
         let db = Db::open_in_memory_test().unwrap();
         db.migrate().unwrap();
         // Every call gets its *own* unique on-disk page, so parallel test
@@ -3351,7 +3379,10 @@ mod tests {
                 rusqlite::params![abs],
             )
             .unwrap();
-        (App::new(db).unwrap(), path)
+        (
+            App::new(db).unwrap(),
+            Seeded { page: path, dir },
+        )
     }
 
     /// `open_edit` now starts in the **Picker** stage: the field list is

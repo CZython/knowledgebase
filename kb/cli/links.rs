@@ -1,33 +1,42 @@
 use crate::*;
 
-pub(crate) fn cmd_links(dbpath: Option<&Path>, target: &str, json: bool) -> Kb {
-    let db = open_db(dbpath)?;
-
-    // Resolve the target to an abs_path. It could be:
-    // - an absolute path (/home/u/notes/foo.md)
-    // - a relative-ish path (resolved against the page's root)
-    // - a display id (wiki:slug, label:slug, note:slug)
-    let abs_path: Option<String> = if target.starts_with('/') {
-        Some(target.to_string())
-    } else if target.contains(':') {
-        // display id
+/// Look up the page we are about to inspect from `kb links <TARGET>`.
+/// Three input shapes are accepted (A2 extraction from `cmd_links`):
+///
+///   * an absolute path — used verbatim
+///   * a display id (`wiki:slug`, `label:slug`, `note:slug`) — looked up
+///     through `pages.id`
+///   * a relative / partial path — matched by exact or by `LIKE '%target'`
+///     (trailing-fragment lookup, mirroring the old `OR abs_path LIKE` clause)
+fn resolve_target_path(
+    db: &Db,
+    target: &str,
+) -> Result<Option<String>, (String, i32)> {
+    if target.starts_with('/') {
+        return Ok(Some(target.to_string()));
+    }
+    if target.contains(':') {
         let mut stmt = db.conn
             .prepare("SELECT abs_path FROM pages WHERE id = ?1")
             .map_err(|e| (format!("prepare id lookup: {e}"), EXIT_ERR))?;
-        stmt.query_row(rusqlite::params![target], |r| r.get::<_, String>(0))
+        return stmt
+            .query_row(rusqlite::params![target], |r| r.get::<_, String>(0))
             .optional()
-            .map_err(|e| (format!("id lookup: {e}"), EXIT_ERR))?
-    } else {
-        // treat as path — try matching against abs_path (exact or relative)
-        let mut stmt = db.conn
-            .prepare("SELECT abs_path FROM pages WHERE abs_path = ?1 OR abs_path LIKE '%' || ?1")
-            .map_err(|e| (format!("prepare path lookup: {e}"), EXIT_ERR))?;
-        stmt.query_row(rusqlite::params![target], |r| r.get::<_, String>(0))
-            .optional()
-            .map_err(|e| (format!("path lookup: {e}"), EXIT_ERR))?
-    };
+            .map_err(|e| (format!("id lookup: {e}"), EXIT_ERR));
+    }
+    let mut stmt = db.conn
+        .prepare("SELECT abs_path FROM pages WHERE abs_path = ?1 OR abs_path LIKE '%' || ?1")
+        .map_err(|e| (format!("prepare path lookup: {e}"), EXIT_ERR))?;
+    stmt.query_row(rusqlite::params![target], |r| r.get::<_, String>(0))
+        .optional()
+        .map_err(|e| (format!("path lookup: {e}"), EXIT_ERR))
+}
 
-    let Some(abs_path) = abs_path else {
+
+pub(crate) fn cmd_links(dbpath: Option<&Path>, target: &str, json: bool) -> Kb {
+    let db = open_db(dbpath)?;
+
+    let Some(abs_path) = resolve_target_path(&db, target)? else {
         return Err((format!("no page found for {target:?}"), EXIT_ERR));
     };
 
@@ -103,7 +112,25 @@ pub(crate) fn cmd_links(dbpath: Option<&Path>, target: &str, json: bool) -> Kb {
     back.sort();
     back.dedup();
 
-    // ---- JSON ---------------------------------------------------------
+    // ---- JSON + human renderers share the same resolution (A2 extraction) --
+    render_links(&abs_path, &forward, &back, &abs_index, json);
+    Ok(EXIT_OK)
+}
+
+
+/// Render a resolved page's forward + backlink set in the requested format.
+/// JSON (stdout exactly-one-document) and the human layout both flow off the
+/// same `forward` / `back` / `abs_index` inputs, so adding a new field to
+/// either path is a one-line change here. (A2 extraction from `cmd_links` —
+/// the two `if json { … } else { … }` blocks used to be ~70 lines inline,
+/// making the verb read as three concerns when it is really one.)
+fn render_links(
+    abs_path: &str,
+    forward: &[(String, String, Option<String>)],
+    back: &[String],
+    abs_index: &std::collections::HashMap<String, &resolver::Page>,
+    json: bool,
+) {
     if json {
         let fwd_items: Vec<String> = forward.iter().map(|(to_path, style, resolved)| {
             format!(
@@ -128,50 +155,44 @@ pub(crate) fn cmd_links(dbpath: Option<&Path>, target: &str, json: bool) -> Kb {
         }).collect();
         println!(
             "{{\n  \"page\": {},\n  \"forward\": [{}],\n  \"backlinks\": [{}]\n}}",
-            jstr(&abs_path),
+            jstr(abs_path),
             fwd_items.join(","),
             back_items.join(","),
         );
-        return Ok(EXIT_OK);
-    }
-
-    // ---- human ---------------------------------------------------------
-    println!("page: {abs_path}");
-
-    if forward.is_empty() {
-        println!("\nforward links: none");
     } else {
-        println!("\nforward links ({}):", forward.len());
-        for (to_path, style, resolved) in &forward {
-            let annotated = match resolved {
-                Some(r) => {
-                    let display = abs_index
-                        .get(r)
-                        .map(|p| format!("{}:{}", p.typ, p.slug))
-                        .unwrap_or(r.clone());
-                    format!("  → {display}")
-                }
-                None => "  (unresolved)".to_string(),
-            };
-            println!("  [ {style} ]  {to_path}{annotated}");
+        println!("page: {abs_path}");
+        if forward.is_empty() {
+            println!("\nforward links: none");
+        } else {
+            println!("\nforward links ({}):", forward.len());
+            for (to_path, style, resolved) in forward.iter() {
+                let annotated = match resolved {
+                    Some(r) => {
+                        let display = abs_index
+                            .get(r)
+                            .map(|p| format!("{}:{}", p.typ, p.slug))
+                            .unwrap_or(r.clone());
+                        format!("  → {display}")
+                    }
+                    None => "  (unresolved)".to_string(),
+                };
+                println!("  [ {style} ]  {to_path}{annotated}");
+            }
         }
-    }
-
-    if back.is_empty() {
-        println!("\nbacklinks: none");
-    } else {
-        println!("\nbacklinks ({}):", back.len());
-        let _ = &abs_index; // (kept for symmetry — the corpus is what we used)
-        for from_path in &back {
-            if let Some(p) = abs_index.get(from_path) {
-                println!("  {from_path}  ({}:{})", p.typ, p.slug);
-            } else {
-                println!("  {from_path}");
+        if back.is_empty() {
+            println!("\nbacklinks: none");
+        } else {
+            println!("\nbacklinks ({}):", back.len());
+            let _ = abs_index; // (kept for symmetry — the corpus is what we used)
+            for from_path in back.iter() {
+                if let Some(p) = abs_index.get(from_path) {
+                    println!("  {from_path}  ({}:{})", p.typ, p.slug);
+                } else {
+                    println!("  {from_path}");
+                }
             }
         }
     }
-
-    Ok(EXIT_OK)
 }
 
 // ---- resolve ----
