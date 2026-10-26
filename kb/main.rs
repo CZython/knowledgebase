@@ -880,7 +880,7 @@ pub(crate) fn shell_quote(s: &str) -> String {
 /// back to a `~` / `%VAR%` placeholder a human can read. One owner, so the
 /// `cron` verb, `info`, and `Db::default_db_path()` all agree on *which file*
 /// the tool would open by default, and the answer is right for the OS the
-/// binary was built for (W3 — previously the fallback string was hard-coded
+/// binary was built for (W8 — previously the fallback string was hard-coded
 /// to a POSIX path and would have been a lie on Windows).
 pub(crate) fn default_db_display() -> String {
     if let Some(d) = dirs::data_local_dir() {
