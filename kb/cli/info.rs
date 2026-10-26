@@ -116,12 +116,14 @@ pub(crate) fn cmd_stats(dbpath: Option<&Path>, json: bool) -> Kb {
     let mut root_stats: Vec<(String, Option<Vec<String>>, i32, i64)> = Vec::new();
     if json {
         for (root, extra_exts, include_hidden) in &roots {
+            // B7: `COUNT(*)` can't be NULL or error in practice, but a DB error
+            // is a real failure — surface it rather than reporting `0 page(s)`.
             let count: i64 = db.conn
                 .query_row(
                     "SELECT COUNT(*) FROM pages WHERE root = ?1",
                     params![root],
                     |r| r.get(0),
-                ).unwrap_or(0);
+                ).map_err(|e| (format!("stats count pages for root '{root}': {e}"), EXIT_ERR))?;
             let exts = extra_exts.as_ref().and_then(|e| {
                 if e.is_empty() { None }
                 else { Some(e.split('\n').filter(|s| !s.is_empty()).map(|s| s.to_string()).collect()) }
@@ -131,12 +133,13 @@ pub(crate) fn cmd_stats(dbpath: Option<&Path>, json: bool) -> Kb {
     } else {
         println!("== per-root page counts ==");
         for (root, extra_exts, include_hidden) in &roots {
+            // B7 (as above): surface a DB error rather than `0 page(s)`.
             let count: i64 = db.conn
                 .query_row(
                     "SELECT COUNT(*) FROM pages WHERE root = ?1",
                     params![root],
                     |r| r.get(0),
-                ).unwrap_or(0);
+                ).map_err(|e| (format!("stats count pages for root '{root}': {e}"), EXIT_ERR))?;
             let mut opts = Vec::new();
             if let Some(exts) = extra_exts {
                 if !exts.is_empty() {
@@ -148,18 +151,20 @@ pub(crate) fn cmd_stats(dbpath: Option<&Path>, json: bool) -> Kb {
             println!("{root}{opt_str}  →  {count} page(s)");
         }
     }
+    // B7: `COUNT(*)` belt-and-suspenders is gone — a failure here is a real DB
+    // error and should surface, not be reported as a `0` total with exit 0.
     let total: i64 = db.conn
         .query_row("SELECT COUNT(*) FROM pages", [], |r| r.get(0))
-        .unwrap_or(0);
+        .map_err(|e| (format!("stats count pages: {e}"), EXIT_ERR))?;
     let tag_count: i64 = db.conn
         .query_row("SELECT COUNT(DISTINCT tag) FROM page_tags", [], |r| r.get(0))
-        .unwrap_or(0);
+        .map_err(|e| (format!("stats count tags: {e}"), EXIT_ERR))?;
     let link_count: i64 = db.conn
         .query_row("SELECT COUNT(*) FROM links", [], |r| r.get(0))
-        .unwrap_or(0);
+        .map_err(|e| (format!("stats count links: {e}"), EXIT_ERR))?;
     let alias_count: i64 = db.conn
         .query_row("SELECT COUNT(*) FROM tag_aliases", [], |r| r.get(0))
-        .unwrap_or(0);
+        .map_err(|e| (format!("stats count tag_aliases: {e}"), EXIT_ERR))?;
     // db file size (derive from `default_db_display()` — one shared,
     // OS-correct source of the default path; consistent with `open_default`,
     // the `cron` verb, and `Db::default_db_path()`).

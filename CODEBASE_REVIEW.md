@@ -217,12 +217,22 @@ optimistic‑concurrency `--if-unchanged` check would stop matching. There was
 also a third copy in `kb-core/src/lib.rs` — see `grep -rn 'cbf2_9ce4'
 kb-core kb kb-db` for all three._
 
-### B7 · `unwrap_or(0)` on the `COUNT(*)` query — [L]
+### B7 · `unwrap_or(0)` on the `COUNT(*)` query — [L] **RESOLVED**
 
-`kb/main.rs:2293, 2299` (`fwd_count`/`back_count`). `COUNT(*)` never errors and
-never returns NULL, so `unwrap_or(0)` is belt‑and‑suspenders; it hides a real
-bug if the query ever *does* fail (the agent gets `0 out / 0 in` with exit 0
-instead of an error). Use `?`‑propagate.
+**Resolved.** The original `fwd_count`/`back_count` sites
+(`kb/main.rs:2293, 2299`) already became `?`‑propagating in the A1 split
+(`kb/cli/info.rs:41-54` — `cmd_info`). The `cmd_stats` verb — the *same*
+belt‑and‑suspenders pattern, on the per‑root page count and the four
+total counts — is now `?`‑propagating too, with a distinct context per
+query so a `stats` failure names the offending table / root. The two
+*legitimate* `unwrap_or(0)` calls (the db file's byte size and the
+`COALESCE(MAX)` timestamp that is genuinely `NULL` when no pages exist)
+are left as optional.
+
+_The original: `kb/main.rs:2293, 2299` (`fwd_count`/`back_count`).
+`COUNT(*)` never errors and never returns NULL, so `unwrap_or(0)` is
+belt‑and‑suspenders; it hides a real bug if the query ever *does* fail (the
+agent gets `0 out / 0 in` with exit 0 instead of an error). Use `?`‑propagate._
 
 ---
 
@@ -288,23 +298,31 @@ places with two different variable names (`t.to_lowercase().replace` and the
 same). A small `sql_quote_lower(s: &str) -> String` kills the duplication and
 the "did we escape?" question on re‑read.
 
-### C5 · **`load_corpus` silently drops `title`→`""` when NULL** — [L]
+### C5 · **`load_corpus` silently drops `title`→`""` when NULL** — [L] **RESOLVED**
 
-`kb/main.rs:2163`:
+**Resolved** at the read boundary. `load_corpus` (`kb/main.rs:810`) now
+surfaces a `pages.title` of `NULL` as a typed error *naming the offending
+page* rather than coercing it to `""`. The `resolver::Page` struct keeps its
+`slug: String` non‑empty contract — the two alternative fixes proposed in the
+original (an `Option<String>` slug in the *core*, or a stage‑2 filter) would
+have touched Verus‑proven `kb-core` code for a case the indexer already
+forbids: `kb-db/src/index.rs:188` (`resolve_slug … .ok_or(MissingSlug)?`)
+*skips* a page at index time when `title → H1 → filestem` all come up
+blank, so a row reaching `pages` with `title NULL` is a schema/contract
+violation that the shell should report, not paper over.
+
+_Original: `kb/main.rs:2163` —_
 
 ```rust
 slug: slug.unwrap_or_default(),
 ```
 
-A `pages.title` row of `NULL` (which is *allowed* — `pages.title TEXT` no
-`NOT NULL`) becomes an *empty* slug in the resolver. Two pages with `title:
-NULL` and the same filename then both resolve to slug `""` (which is what
-`identity::resolve_slug` falls back to if title is `Some` but blank —
-`identity.rs:206-224` shows the blank handling, but the *fallback on the
-core side* is only when `fm.title` is `None`). Net: the resolver's stage‑2 /
-stage‑4 exact match is weaker than intended when a stored title is NULL.
-Use a real `Option<String>` slug in `resolver::Page`, or `filter`‑out
-`slug.is_empty()` during the stage‑2 pass *before* treating it as a match.
+_A `pages.title` row of `NULL` (allowed in the DDL: `pages.title TEXT` no
+`NOT NULL`) became an empty slug in the resolver. Two pages with `title: NULL`
+and the same filename both resolved to slug `""` — the resolver's stage‑2 /
+stage‑4 exact match was weaker than intended. Use a real `Option<String>` slug
+in `resolver::Page`, or `filter`‑out `slug.is_empty()` during the stage‑2 pass
+*before* treating it as a match._
 
 ### C6 · **Error message shape `"{what}: {e}"` is consistent — good.** — [OK]
 
@@ -367,14 +385,23 @@ etc. The "which verb does X?" question is answered by the file name.
 (The finding's proposed `kb/cli/verbs/*.rs` nesting was flattened during the
 split to one level, which is equivalent for this purpose.)
 
-### D4 · The `Kb` type alias is the *one* error abstraction but is only named in one place — [M]
+### D4 · The `Kb` type alias is the *one* error abstraction but is only named in one place — [M] **RESOLVED**
 
-`kb/main.rs:61` defines `type Kb = Result<i32, (String, i32)>;` and **no other
-file** mentions it. Every verb handler's return type is `Kb` *by name* (so
-`grep -rn '-> Kb'` is a complete index of fallible verbs — **great**), but a
-new contributor adding a fn in a *new* file (post A1) has no `use` to write
-because the alias is file‑local. Promote it to `kb/cli/error.rs` (or
-`kb_core` if the core is to own it) so the name travels with the code.
+**Resolved.** `Kb` now lives in `kb/cli/error.rs` (the CLI's error‑model
+module) as `pub(crate) type Kb = Result<i32, (String, i32)>`, re‑exported via
+`kb/cli/mod.rs` (`pub(crate) use error::*;`) into the crate through the
+existing `use crate::cli::*;`. New verb files find it alongside everything
+else the CLI shares (`JObject`, exit codes) — not one specific file deeper in
+`kb/main.rs`, which now carries a short comment pointing readers to the
+canonical location. We deliberately did **not** move it to `kb‑core`: the
+left side of the `Result` (a process exit code) is a CLI concern, not a
+pure‑Rust one (`kb-core` is Verus‑proven and keeps `std::process` out of it).
+
+_Original: `kb/main.rs:61` defined the alias and no other file named it.
+`grep -rn '-> Kb'` is a complete index of fallible verbs (great!), but a new
+contributor adding a fn in a new file (post A1) had no `use` to write because
+the alias was file‑local. Promote it to `kb/cli/error.rs` (or `kb_core` if the
+core is to own it) so the name travels with the code._
 
 ### D5 · `SECURITY_REPORT.md` references (`SECURITY_REPORT 3.1`, `3.3`, `3.4`, `3.5`, `3.6`, `3.7`, `3.16`, `3.17`) — [M] **RESOLVED**
 

@@ -69,10 +69,9 @@ pub(crate) const EXIT_ETAG: i32 = 3;
 /// instead of re-evaluating the feature by hand.
 pub const VARIANT: &str = if cfg!(feature = "editor") { "user" } else { "hardened" };
 
-/// A success code, or `(message, exit-code)` for a typed failure. `?` over any
-/// `Result<_, (String, i32)>` therefore unwinds the whole command with the
-/// right exit code, so fallible steps compose cleanly.
-pub(crate) type Kb = Result<i32, (String, i32)>;
+// D4: the `Kb` alias is now declared in `kb/cli/error.rs` (the CLI's error
+// model module) and re-exported into the crate via `use crate::cli::*;` above,
+// so a new verb file can find it without knowing it used to be in main.rs.
 
 /// The shared CLI body is compiled into two packages (`kb-user`,
 /// `kb-hardened`), each producing a separate binary (`kb`, `kb-hardened`).
@@ -808,6 +807,16 @@ pub(crate) fn jbool(b: bool) -> String {
 /// more — so a future schema addition that the resolver should ignore is
 /// already filtered out here (and a column the resolver *needs* being absent
 /// is an obvious prepare error, not a silent wrong-resolution).
+///
+/// C5: `pages.title` is `TEXT` (nullable in the DDL), but the indexer
+/// guarantees every row that reaches `pages` has a non-NULL title — a page
+/// whose `title → H1 → filename` chain can't produce a slug is *skipped* at
+/// index time (`IndexError::MissingSlug`, see `kb-db/src/index.rs:188` and
+/// `skipped_missing_slug` on the refresh summary). So a NULL title observed
+/// at read-boundary is a schema/contract violation, not a valid state; we
+/// surface it as an error (naming the offending page) rather than silently
+/// coercing it to `""` and letting the §4 resolver's stage-2 bare-slug match
+/// treat `""` as a real slug.
 pub(crate) fn load_corpus(db: &Db) -> Result<Vec<resolver::Page>, (String, i32)> {
     let mut stmt = db.conn
         .prepare("SELECT abs_path, title, type, rel_path FROM pages")
@@ -824,15 +833,26 @@ pub(crate) fn load_corpus(db: &Db) -> Result<Vec<resolver::Page>, (String, i32)>
         .map_err(|e| (format!("corpus query: {e}"), EXIT_ERR))?
         .collect::<Result<Vec<_>, _>>()
         .map_err(|e| (format!("corpus rows: {e}"), EXIT_ERR))?;
-    Ok(rows
-        .into_iter()
-        .map(|(abs_path, slug, typ, rel_path)| resolver::Page {
+    let mut pages = Vec::with_capacity(rows.len());
+    for (abs_path, slug, typ, rel_path) in rows {
+        let slug = slug.ok_or_else(|| {
+            (
+                format!(
+                    "corpus page '{}' has a NULL title (schema violation — the \
+                     indexer skips slug-less pages before they reach `pages`)",
+                    abs_path
+                ),
+                EXIT_ERR,
+            )
+        })?;
+        pages.push(resolver::Page {
             abs_path,
-            slug: slug.unwrap_or_default(),
+            slug,
             typ,
             rel_path,
-        })
-        .collect())
+        });
+    }
+    Ok(pages)
 }
 
 /// Resolve a single raw link target to the `abs_path` of the page it points

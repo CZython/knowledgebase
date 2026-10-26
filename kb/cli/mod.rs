@@ -6,6 +6,8 @@ pub(crate) mod cmd_add;
 pub(crate) mod create;
 #[cfg(feature = "editor")]
 pub(crate) mod editor;
+// D4: the `Kb` alias (the CLI's error model) lives here, not in kb/main.rs.
+pub(crate) mod error;
 pub(crate) mod info;
 pub(crate) mod json;
 pub(crate) mod links;
@@ -22,6 +24,7 @@ pub(crate) use cmd_add::*;
 pub(crate) use create::*;
 #[cfg(feature = "editor")]
 pub(crate) use editor::*;
+pub(crate) use error::*;
 pub(crate) use info::*;
 pub(crate) use json::*;
 pub(crate) use links::*;
