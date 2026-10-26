@@ -58,6 +58,14 @@ the API is still moving; breaking changes are called out explicitly.
 - **`dist/build-windows.ps1`** — PowerShell build+stage+verify with an
   `-Install` switch (copy to `%LOCALAPPDATA%\knowledgebase\`, create the dir,
   `setx` the user PATH); `-Target` / `-Out` flags for control.
+- **`dist/build-windows.sh` (Linux, updated)** — now *gates* the cross
+  prerequisites before failing deep in the build (points at the exact
+  `apt-get install -y gcc-mingw-w64-x86-64 binutils-mingw-w64-x86-64` and
+  `rustup target add x86_64-pc-windows-gnu` lines when a tool is missing), and
+  now also **stages** the `.exe` to `dist/` (with a `.sha256`) and
+  **smoke-runs** `kb --version` under `wine` (or a plain PE check when wine is
+  absent). Verified end-to-end here: cross-built against mingw GCC 13-win32
+  and ran `kb --version` → `kb 0.1.0` under wine-9.0.
 
 ### Changed
 - **`default_db_display()` (new, shared body)** now owns the *display* form
@@ -67,9 +75,10 @@ the API is still moving; breaking changes are called out explicitly.
   on a Windows build the `cron` / `info` / help output now shows the correct
   `%LOCALAPPDATA%` location instead of a `~/.local/share/...` the user would
   not find. `Db::default_db_path()` (the actual *open* path) was already
-  cross-platform via `dirs` and is untouched; these were the *display-only*
-  fallbacks. (`✓` for success, `!` for
-  error; none for info).** In the *colorblind* palette, or in any user TOML
+   cross-platform via `dirs` and is untouched; these were the *display-only*
+   fallbacks.
+- **The status bar now carries a severity glyph (`✓` for success, `!` for
+   error; none for info).** In the *colorblind* palette, or in any user TOML
   where the user has collapsed `error` and `success` onto the same color, the
   glyph is the only thing that still tells a write-success apart from a
   validation-failure. Same "symbols carry the meaning" principle as the
