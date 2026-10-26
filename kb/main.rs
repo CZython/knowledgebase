@@ -92,7 +92,26 @@ pub const VARIANT: &str = if cfg!(feature = "editor") { "user" } else { "hardene
         env!("CARGO_PKG_VERSION")
     },
     about = "A single-binary Markdown knowledge base over embedded SQLite + FTS5 —\nindex a tree of notes, search them, and edit them by section.",
-    long_about = "kb is a single-binary Markdown knowledge base backed by an embedded\nSQLite + FTS5 index. Register roots of note files, search them (with\n`type:`/`tag:` filters, OR/NOT, phrases, and tag-alias expansion), and\ncorrectly-shaped edits that take a whole new section's bytes in place of\na diff, or apply external `diff -u` / `git diff` patches. All of the\nedit / resolve / alias / index logic is in a Verus-verified pure-Rust\ncrate; the DB shell is an assumed boundary. The full build ships a TUI\nplus an in-editor flow; the hardened build is headless for agents.",
+    // F3: the about/long_about text was identical in both builds, so a
+    // hardened agent reading `kb-hardened --help` saw a promise ("ships a TUI
+    // plus an in-editor flow") the build does not keep. Now variant-aware, the
+    // same way `name`/`version` above are — `VARIANT` is the single place the
+    // "which build is this?" decision lives, so the help text can never drift
+    // from the feature flags.
+    long_about = if VARIANT == "hardened" {
+        concat!(
+            "kb is a single-binary Markdown knowledge base backed by an embedded\n",
+            "SQLite + FTS5 index. Register roots of note files, search them (with\n",
+            "`type:`/`tag:` filters, OR/NOT, phrases, and tag-alias expansion), and\n",
+            "correctly-shaped edits that take a whole new section's bytes in place of\n",
+            "a diff, or apply external `diff -u` / `git diff` patches. All of the\n",
+            "edit / resolve / alias / index logic is in a Verus-verified pure-Rust\n",
+            "crate; the DB shell is an assumed boundary. This is the hardened\n",
+            "build: headless for agents — no TUI, no in-editor flow."
+        )
+    } else {
+        "kb is a single-binary Markdown knowledge base backed by an embedded\nSQLite + FTS5 index. Register roots of note files, search them (with\n`type:`/`tag:` filters, OR/NOT, phrases, and tag-alias expansion), and\ncorrectly-shaped edits that take a whole new section's bytes in place of\na diff, or apply external `diff -u` / `git diff` patches. All of the\nedit / resolve / alias / index logic is in a Verus-verified pure-Rust\ncrate; the DB shell is an assumed boundary. This is the full build: it\nships a TUI plus an in-editor flow; the hardened variant is headless for\nagents."
+    },
 )]
 pub(crate) struct Cli {
     /// Path to the SQLite DB (default: the per-user data dir —
