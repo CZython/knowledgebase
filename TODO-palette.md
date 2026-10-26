@@ -172,19 +172,28 @@ Tui {
 
 `Cmd::Tui` is already `#[cfg(feature = "tui")]`. The new `palette` module and its deps must be the same — `palette.rs` should live under `kb/tui/` (which is `#[cfg(feature = "tui")]`) and add `serde`/`toml` to **kb-user only**, feature-gated. The hardened build never links them.
 
+## Status — all phases complete
+
+Implemented and committed in `d9d87bd` (palette engine + gate/heading/list
+styling) and `e44cae5` (colorful default, mono dropped). Gate is 7/7; the
+behavioral checks (`--list-palettes`, a bad palette → clean error) are
+verified. Deviation from the plan below: **`mono` was dropped** (it was the
+optional "bonus") — the shipped built-ins are `default` + `colorblind`, both
+as `kb/tui/palettes/{default,colorblind}.toml`.
+
 ## Phases (each a commit, each gated by `gate.sh`)
 
-- [ ] **P1. Introduce `palette.rs` with the three built-ins (embedded TOMLs + parse).** No render change yet. Only compiles if `tui` is on. `cargo test -p kb-user` green.
-- [ ] **P2. Wire the `--palette` / `--list-palettes` flag** into `kb/main.rs` and thread it to `App::new`. `Palette::default()` (no flag) is the behavior; `run_tui` returns a clean error if the flag is set but the path/name is invalid.
-- [ ] **P3. Refactor `render.rs` to read `app.palette.X`.** No change from `--palette default` (visual diff = 0). This is the big mechanical refactor — the point is to prove the palette covers **every** style in the file.
-- [ ] **P4. Add the shipped `colorblind` + `mono` palettes.** Prove visually with `shotwin` that `--list-palettes` works, `--palette colorblind` changes the colors but keeps the same layout/symbols.
-- [ ] **P5. `kb tui --list-palettes` UX** — print a terse table: name, one-line description, a preview of the key roles (label/active/error/selection) as ANSI-escaped so the user can actually *see* them in the terminal.
-- [ ] **P6. (follow-on, audit finding B)** Browse row as `Vec<Span>` using `palette.label/default/dim/hint/gated/open`.
-- [ ] **P7. (follow-on, audit finding C)** Read view: markdown H1–H6 styling using `palette.label/default`.
-- [ ] **P8. (follow-on, audit finding D)** Edit picker: `◆`/`◇` empty markers using `palette.gated/open`.
-- [ ] **P9. (follow-on, audit finding E)** Alias/Roots `highlight_style` = `palette.selection` (was "none"), plus `→` in `palette.label`.
-- [ ] **P10. (follow-on, audit finding F)** `apply_filter` also matches tags + `search_required_phrase`.
-- [ ] **P11. CHANGELOG entry under `[Unreleased]`: Added `--palette`; Added built-in `colorblind` + `mono`; Renamed: internal styles now read from `Palette`.**
+- [x] **P1. Introduce `palette.rs` with the built-ins (embedded TOMLs + parse).** `kb/tui/palette.rs`; `default_palette()` / `colorblind()` / `from_toml()`.
+- [x] **P2. Wire the `--palette` / `--list-palettes` flag** into `kb/main.rs` (`Cmd::Tui`) and thread to `App` via `with_palette`. A bad name/path is a clean `palette file "...": No such file or directory` error (verified).
+- [x] **P3. Refactor `render.rs` to read `app.palette.X`.** 15 palette reads; zero remaining raw `Color::` sites in `render.rs`.
+- [x] **P4. Ship the `colorblind` palette.** `--list-palettes` verified in the terminal; `--palette colorblind` recolors with the same layout/symbols. (`mono` evaluated and dropped in `e44cae5`.)
+- [x] **P5. `kb tui --list-palettes` UX** — table with name, an ANSI swatch per key role (label/active/error/selection), and a description.
+- [x] **P6. (follow-on, audit finding B)** Browse row as `Span::`-built rows using `palette.label/gated/open/...` (`kb/tui/render.rs`).
+- [x] **P7. (follow-on, audit finding C)** Read view: ATX headings (`#`–`######`) render in the `p.label` role.
+- [x] **P8. (follow-on, audit finding D)** `◆`/`◇` gate markers using `palette.gated/open`.
+- [x] **P9. (follow-on, audit finding E)** `selection` highlight on lists via `sw(p.selection)` (`kb/tui/mod.rs:2411`).
+- [x] **P10. (follow-on, audit finding F)** `apply_filter` matches tags + `search_required_phrase` (`kb/tui/mod.rs:558`, test at `:2752`).
+- [x] **P11. CHANGELOG entry under `[Unreleased]`:** `--palette` + built-in `colorblind`; internal styles now read from `Palette`.
 
 ## Verification gate (every phase)
 
