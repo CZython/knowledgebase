@@ -194,7 +194,8 @@ pub fn build_page(
     // Gate phrases: `frontmatter::search_required_phrase` carries verbatim
     // (quotes retained); the `page_gates` column requires the *unquoted* form
     // (PLAN §8 comment + §4 gate matching).
-    let gate_terms: Vec<String> = kb_core_search_required_phrase_unquoted(&fm.search_required_phrase);
+    let gate_terms: Vec<String> =
+        kb_core_search_required_phrase_unquoted(&fm.search_required_phrase);
     let search_required_phrase_verbatim: Option<String> = {
         if fm.search_required_phrase.is_empty() {
             None

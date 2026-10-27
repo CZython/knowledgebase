@@ -441,7 +441,10 @@ fn if_unchanged_mismatch_with_json_emits_failure_envelope() {
         cur_etag.as_str(),
         "--yes",
     ]);
-    assert_eq!(code, 0, "first mutation with the matching etag must pass (stderr: {err})");
+    assert_eq!(
+        code, 0,
+        "first mutation with the matching etag must pass (stderr: {err})"
+    );
     // Now run the same op again with the *pre*-mutation etag → guard trips.
     let (code, out, err) = run(&[
         "section",
@@ -457,22 +460,54 @@ fn if_unchanged_mismatch_with_json_emits_failure_envelope() {
         "--yes",
         "--json",
     ]);
-    assert_eq!(code, 3, "stale etag → exit 3 even under --json (stderr: {err})");
+    assert_eq!(
+        code, 3,
+        "stale etag → exit 3 even under --json (stderr: {err})"
+    );
     // stdout must be a clean JSON object — not empty, not prose.
-    assert!(!out.trim().is_empty(), "under --json the stdout envelope must be non-empty: {out:?}");
-    assert!(out.trim_start().starts_with('{'), "under --json stdout is one JSON object: {out:?}");
-    assert!(out.contains("\"ok\": false"), "envelope signals failure: {out:?}");
-    assert!(out.contains("\"applied\": false"), "nothing was written: {out:?}");
-    assert!(out.contains("\"code\": 3"), "code 3 in the envelope: {out:?}");
-    assert!(out.contains("\"op\": \"etag_check\""), "envelope names the op: {out:?}");
-    assert!(out.contains("\"scope\": \"Alpha\""), "scope is the section ref: {out:?}");
-    assert!(out.contains("\"etag_expected\": \"") && out.contains(&format!("\"{cur_etag}\"")),
-        "both etag fields present: {out:?}");
+    assert!(
+        !out.trim().is_empty(),
+        "under --json the stdout envelope must be non-empty: {out:?}"
+    );
+    assert!(
+        out.trim_start().starts_with('{'),
+        "under --json stdout is one JSON object: {out:?}"
+    );
+    assert!(
+        out.contains("\"ok\": false"),
+        "envelope signals failure: {out:?}"
+    );
+    assert!(
+        out.contains("\"applied\": false"),
+        "nothing was written: {out:?}"
+    );
+    assert!(
+        out.contains("\"code\": 3"),
+        "code 3 in the envelope: {out:?}"
+    );
+    assert!(
+        out.contains("\"op\": \"etag_check\""),
+        "envelope names the op: {out:?}"
+    );
+    assert!(
+        out.contains("\"scope\": \"Alpha\""),
+        "scope is the section ref: {out:?}"
+    );
+    assert!(
+        out.contains("\"etag_expected\": \"") && out.contains(&format!("\"{cur_etag}\"")),
+        "both etag fields present: {out:?}"
+    );
     // The file must be byte-for-byte unchanged (the guard blocked the write).
     let after = std::fs::read_to_string(&f).unwrap();
-    assert!(after.contains("mutated"), "the mutation was applied by pass (b); the stale etag op must not overwrite it: {after:?}");
+    assert!(
+        after.contains("mutated"),
+        "the mutation was applied by pass (b); the stale etag op must not overwrite it: {after:?}"
+    );
     // stderr still carries the human message (backwards compat for terminals).
-    assert!(err.contains("etag mismatch"), "human message on stderr: {err:?}");
+    assert!(
+        err.contains("etag mismatch"),
+        "human message on stderr: {err:?}"
+    );
 }
 
 #[test]

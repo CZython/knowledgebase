@@ -27,7 +27,8 @@ struct Setup {
 
 impl Setup {
     fn new(tag: &str) -> Self {
-        let base = std::env::temp_dir().join(format!("kbdsp_{pid}_{tag}", pid = std::process::id()));
+        let base =
+            std::env::temp_dir().join(format!("kbdsp_{pid}_{tag}", pid = std::process::id()));
         let root = base.join("root");
         let _ = fs::remove_dir_all(&root);
         fs::create_dir_all(&root).unwrap();
@@ -45,11 +46,7 @@ impl Drop for Setup {
     }
 }
 
-fn run(
-    cmd: &mut Command,
-    db: &std::path::Path,
-    args: &[&str],
-) -> (i32, String, String) {
+fn run(cmd: &mut Command, db: &std::path::Path, args: &[&str]) -> (i32, String, String) {
     let db_str = db.to_string_lossy().into_owned();
     cmd.arg(format!("--db={db_str}"));
     for a in args {
@@ -176,10 +173,7 @@ fn hardened_create_e_flag_is_rejected() {
         err.contains("unexpected argument"),
         "clap should name the offending flag: {err}"
     );
-    assert!(
-        !s.root.join("noe.md").exists(),
-        "rejected before any write"
-    );
+    assert!(!s.root.join("noe.md").exists(), "rejected before any write");
 }
 
 /// In the **hardened** build the `SectionOp::Edit` variant is

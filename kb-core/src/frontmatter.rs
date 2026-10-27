@@ -823,8 +823,12 @@ fn list_rewrite_new(data: &[u8], key: &str, value: &str) -> Vec<u8> {
 }
 
 /// Upgrade a scalar field to an inline 2-element list: `key: scal, val`.
-fn list_rewrite_upgrade(data: &[u8], key: &str, scalar: &str, added: &str)
-    -> Result<Vec<u8>, FmError> {
+fn list_rewrite_upgrade(
+    data: &[u8],
+    key: &str,
+    scalar: &str,
+    added: &str,
+) -> Result<Vec<u8>, FmError> {
     // SECURITY_REPORT 3.7 — same `from_utf8_lossy` fix.
     let s = String::from_utf8_lossy(data);
     let mut lines: Vec<String> = s.split_inclusive('\n').map(|l| l.to_string()).collect();
@@ -1086,8 +1090,13 @@ mod tests {
     /// unquoted* phrase case-insensitively; `token` alone does not.
     #[test]
     fn gate_token_bucket_phrase() {
-        let p = page("type: note\nsearch_required_phrase:\n  - \"token bucket\"\n", "x");
-        let entry = p.search_required_phrase[0].trim_matches('"').to_ascii_lowercase();
+        let p = page(
+            "type: note\nsearch_required_phrase:\n  - \"token bucket\"\n",
+            "x",
+        );
+        let entry = p.search_required_phrase[0]
+            .trim_matches('"')
+            .to_ascii_lowercase();
         assert_eq!(entry, "token bucket");
         assert!(query_unlocks("gateway token bucket", &entry));
         assert!(query_unlocks("gateway TOKEN BUCKET", &entry));

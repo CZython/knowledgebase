@@ -135,7 +135,10 @@ fn create_writes_the_full_field_scaffold() {
     );
     assert!(body.contains("description:\n"), "empty description slot");
     assert!(body.contains("tags: []\n"), "empty tag list");
-    assert!(body.contains("search_required_phrase: []\n"), "empty gate list");
+    assert!(
+        body.contains("search_required_phrase: []\n"),
+        "empty gate list"
+    );
     assert!(
         body.contains("\n---\n\n# my-note\n\n"),
         "H1 after the frame"

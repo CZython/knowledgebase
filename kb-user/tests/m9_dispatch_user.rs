@@ -33,7 +33,8 @@ struct Setup {
 
 impl Setup {
     fn new(tag: &str) -> Self {
-        let base = std::env::temp_dir().join(format!("kbdspu_{pid}_{tag}", pid = std::process::id()));
+        let base =
+            std::env::temp_dir().join(format!("kbdspu_{pid}_{tag}", pid = std::process::id()));
         let root = base.join("root");
         let _ = fs::remove_dir_all(&root);
         fs::create_dir_all(&root).unwrap();
@@ -93,7 +94,10 @@ fn user_bare_md_routes_to_info() {
     let mut c = user_bin();
     let (code, out, err) = run(&mut c, &s.db, &[path_str.as_str()]);
 
-    assert_eq!(code, 0, "user build bare .md should route to info (rc 0); err: {err}");
+    assert_eq!(
+        code, 0,
+        "user build bare .md should route to info (rc 0); err: {err}"
+    );
     assert!(
         out.contains("title:") || out.contains("type:"),
         "user build bare .md should print info metadata; got: {out}\nerr: {err}"

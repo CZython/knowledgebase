@@ -623,7 +623,12 @@ fn search_empty_tag_filter_emits_canonical_empty_array() {
     // way. (The text path is already exact-pinned in browse_tag_json.)
     let s = Setup::new("emptytagfilter");
     let root = s.root.to_string_lossy().into_owned();
-    write_page(&s, "a.md", "type: note\ntitle: A\ntags:\n  - foo\n", "body\n");
+    write_page(
+        &s,
+        "a.md",
+        "type: note\ntitle: A\ntags:\n  - foo\n",
+        "body\n",
+    );
     let (code, _, _) = run(&s, &["add", &root]);
     assert_eq!(code, 0);
 
