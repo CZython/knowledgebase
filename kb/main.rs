@@ -607,15 +607,25 @@ pub(crate) fn main() {
             v
         };
         let p = Path::new(s);
-        if p.extension().map(|e| e == "md").unwrap_or(false) && p.exists() {
-            let cli = Cli::parse_from(make("info", s));
-            let code = run(&cli);
-            std::process::exit(code);
+        // PENTEST_HARDENED F4 (option b). The `.md`→`info` shortcut is an
+        // *interactive* convenience and — via the CWD-relative `p.exists()`
+        // probe — the only state-dependent branch in this whole entry point.
+        // For the hardened/agent build we drop it so a bare token *always*
+        // routes to `search`: the agent surface is deterministic (agents that
+        // want file details can say `kb info <file>` explicitly). The user
+        // build keeps the shortcut: `kb notes/foo.md` opens that file. We
+        // branch on `VARIANT`, the same "am I the agent build?" switch the
+        // `name`/`version`/`long_about` above already use.
+        let info_like = VARIANT == "user"
+            && p.extension().map(|e| e == "md").unwrap_or(false)
+            && p.exists();
+        let cli = if info_like {
+            Cli::parse_from(make("info", s))
         } else {
-            let cli = Cli::parse_from(make("search", s));
-            let code = run(&cli);
-            std::process::exit(code);
-        }
+            Cli::parse_from(make("search", s))
+        };
+        let code = run(&cli);
+        std::process::exit(code);
         }
     }
     let cli = Cli::parse();
