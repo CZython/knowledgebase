@@ -537,8 +537,9 @@ kb replace <file> --find X --new Y [--scope REF] [--count N] <flags>
 ## 13. M0 open items to settle (non-blocking for the design)
 
 > **M0 results (2026-09-29, all green):** the build + two read-only probe suites
-> both passed — see §13a below. Items 1, 2 and 4 are now **resolved on this
-> machine**; the rest remain design decisions for M1+.
+> both passed — see §13a below. All seven items are now **settled** — 1, 2 and 4
+> resolved on this machine; 3, 5 and 6 confirmed against the shipped code; 7 closed
+> by the M7c alias export/import implementation.
 
 1. ~~**`cc`/C-compiler present**~~ — **resolved:** rusqlite `bundled` compiled
    SQLite **3.46.0** from source; `cargo build --workspace` succeeds (no C-link
@@ -546,21 +547,29 @@ kb replace <file> --find X --new Y [--scope REF] [--count N] <flags>
 2. ~~**FTS5 `snippet()` arg order / collapse**~~ — **resolved:** the 6-argument
    form + the two gotchas (markup only under `MATCH`; no `-1` "best column")
    are pinned in `kb-db/tests/fts5.rs`. See §8 Search and §13a.
-3. **Collisions / overlapping roots** — the `type:<slug>` display id is **not** unique; the same
-   display id across two files is legal and keys off `abs_path` (§4). Every hit shows `abs_path`;
-   `kb resolve` returns a candidate list instead of hard-erroring. Nested/overlapping roots
-   dedupe to the same `abs_path` (§3 Roots). Confirm this is the desired UX.
+3. **Collisions / overlapping roots** — **confirmed in code:** the `type:<slug>` display id is
+    **not** unique; `pages` is keyed on `abs_path` (`kb-db/src/migrate.rs:61` PK, `:63` non-unique
+    `idx_pages_id`), so the same display id across two files is legal. `kb resolve` returns a
+    candidate list on a bare-slug collision instead of hard-erroring
+    (`kb-core/src/resolve.rs:59-69` `Candidates`, rendered at `kb/cli/links.rs:251-265`), and
+    nested/overlapping roots dedupe to the same `abs_path` (innermost root wins —
+    `kb-db/src/walk_snapshot.rs:134-171`). Settled — this is the shipped UX.
 4. **Multi-client concurrency** — **confirmed working:** `PRAGMA journal_mode=WAL`
    is set on open (`Db::open`); a held read transaction does not block a
    concurrent writer and a fresh read afterward sees the new row
    (`kb-db/tests/fts5.rs :: wal_allows_write_during_read_transaction`).
    Single-writer/WAL is the chosen model.
-5. **Bare-string dispatch edge cases** — a string starting with `-` is a flag, not a search term;
-   a single token that *is* an existing path uses `info`, everything else uses `search`.
-6. **Walk options UX** — `extra_exts` and `include_hidden` are per-root (stored in `roots`, §8),
-   and `kb drop-root` *drops* them with the root. Confirm this "flags follow roots" model (vs. a
-   global config file) is desired. Symlink rule is global+permanent (not per-root) — confirm.
-  7. **Where `tag_aliases` live on disk.** Per the locked model, aliases are a **DB-level
+5. **Bare-string dispatch edge cases** — **confirmed in code** (with one refinement): a
+    single non-flag positional that is an existing **`*.md` file** (not any path) routes to `info`;
+    everything else routes to `search`; a leading `-` token is preserved as a flag rather than
+    treated as a search term (`kb/main.rs:567-570` filter, `:599-603` re-append, `:609-618`
+    `.md`-and-`.exists()` gate, `:621` lone-flag fall-through to clap). Settled.
+6. **Walk options UX** — **confirmed in code:** `extra_exts` and `include_hidden` are per-root
+    (stored in `roots`, `kb-db/src/migrate.rs:37-43`) and `drop-root` removes the whole row — the
+    root *and its walk options* (`kb-db/src/lib.rs:189-192`), i.e. the "flags follow roots" model.
+    The symlink rule is global + permanent: symlinks are never followed nor indexed, a non-overridable
+    walker constant (`kb-core/src/fs_snapshot.rs:32-37`), applied to every root. Settled.
+7. **Where `tag_aliases` live on disk.** Per the locked model, aliases are a **DB-level
     tag-string→tag-string map** (they do *not* live in note frontmatter). But that means the DB is the
     *only* store. If the DB is wiped, alias knowledge is lost. **Decision: Option B —** the user can run
     `kb tag-alias --export` to dump the alias map to a durable file (or stdout, for
