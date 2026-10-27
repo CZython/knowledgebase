@@ -90,15 +90,29 @@ the API is still moving; breaking changes are called out explicitly.
   (`kb notes/foo.md` still opens that file's `info`) — the branch is gated
   on the existing `VARIANT` constant, the same "am I the agent build?"
   switch that already drives `--version` / `--help`. Pinned by
-  `kb-hardened/tests/m9_dispatch.rs` (drives both real binaries and asserts
-  the `hardened → search` / `user → info` divergence).
+   `kb-hardened/tests/m9_dispatch.rs` (drives both real binaries and asserts
+   the `hardened → search` / `user → info` divergence, plus that
+   `kb-hardened section edit …` is rejected by clap — an invariant that was
+   previously pinned only under `kb-user/tests/m9_agent_surface.rs::
+   section_edit_removed` with `#[cfg(not(feature = "editor"))]`, so the
+   gate's `cargo test --workspace` silently skipped it).
 - **Two related pre-parse footguns in the *same* entry point are fixed in both
   builds** (pentest F4): the non-flag filter no longer drops tokens containing
   `=`, so `kb E=mc2` is a legitimate single search term (not an "unrecognized
   subcommand"), and the unchecked `non_flag[0]` index is now
-  `non_flag.first().expect("len()==1 guarantees non-empty")` — an explicit
-  invariant instead of an `Index` out-of-bounds at an index we know is
-  reachable.
+   `non_flag.first().expect("len()==1 guarantees non-empty")` — an explicit
+   invariant instead of an `Index` out-of-bounds at an index we know is
+   reachable.
+- **`cmd_resolve` (`kb/cli/links.rs`) no longer uses bare `.unwrap()` on
+  the `idx.get(abs)` lookups.** Every `abs_path` in the `resolve()` outcome
+  is (by construction in `kb-core::resolve`) some `p.abs_path.as_str()`
+  from the input `pages`, which is exactly the key `idx` is indexed on;
+  the three `.unwrap()`s are now `.expect("resolve() returned an abs_path
+  not present in the input pages")` with a short comment referencing
+  `kb-core/spec/resolve_spec.rs`. No behavior change — the panic was
+  already unreachable — but a future regression in `kb-core::resolve` will
+  now name the broken invariant instead of surfacing as "called `Option::
+  unwrap()` on a `None` value".
 - **`default_db_display()` (new, shared body)** now owns the *display* form
   of the default DB path for every human-facing call site; the two call sites
   that previously hard-coded a POSIX string now branch on `cfg!(windows)`

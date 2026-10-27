@@ -221,7 +221,15 @@ pub(crate) fn cmd_resolve(dbpath: Option<&Path>, query: &str, json: bool) -> Kb 
     };
     if json {
         let items: Vec<String> = resolved.iter().map(|abs| {
-            let p = idx.get(abs.as_str()).unwrap();
+            // kb-core::resolve builds the outcome by filtering the input
+            // `pages` vector; every `abs_path` it returns is (by
+            // construction) some `p.abs_path.as_str()` from `pages`,
+            // which is exactly the key `idx` is indexed on. If this
+            // ever fires, the invariant that "outcome ⊆ input pages"
+            // no longer holds in kb-core::resolve — see the spec at
+            // kb-core/spec/resolve_spec.rs.
+            let p = idx.get(abs.as_str())
+                .expect("resolve() returned an abs_path not present in the input pages");
             let mut o = JObject::new();
             o.s("id", &format!("{}:{}", p.typ, p.slug));
             o.s("type", &p.typ);
@@ -243,7 +251,12 @@ pub(crate) fn cmd_resolve(dbpath: Option<&Path>, query: &str, json: bool) -> Kb 
     if resolved.len() == 1 {
         // a clean unique hit — render the page + a "resolved to" marker so the
         // user can see the resolution terminated.
-        let p = idx.get(resolved[0].as_str()).unwrap();
+        // Invariant: kb-core::resolve filters the input `pages` vector; every
+        // `abs_path` it returns is some `p.abs_path.as_str()` from `pages`,
+        // which is exactly the key `idx` is indexed on (see
+        // kb-core/spec/resolve_spec.rs). Panic = that invariant broke.
+        let p = idx.get(resolved[0].as_str())
+            .expect("resolve() returned an abs_path not present in the input pages");
         println!(
             "1  {:<24} {:<6} {}  {}   [resolved to abs_path]",
             format!("{}:{}", p.typ, p.slug), p.typ, p.slug, p.abs_path
@@ -251,7 +264,10 @@ pub(crate) fn cmd_resolve(dbpath: Option<&Path>, query: &str, json: bool) -> Kb 
     } else {
         // a collision — the §4 contract: a candidate list, never a hard error.
         for (i, abs) in resolved.iter().enumerate() {
-            let p = idx.get(abs.as_str()).unwrap();
+            // Same invariant as the `Unique` arm above — every `abs_path` in
+            // the candidate list is a `p.abs_path.as_str()` from `pages`.
+            let p = idx.get(abs.as_str())
+                .expect("resolve() returned an abs_path not present in the input pages");
             println!(
                 "{:>3}  {:<24} {:<6} {}  {}   [candidate]",
                 i + 1, format!("{}:{}", p.typ, p.slug), p.typ, p.slug, p.abs_path

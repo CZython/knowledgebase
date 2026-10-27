@@ -185,3 +185,45 @@ fn both_bare_non_md_routes_to_search() {
         "search results should include the page; got: {out}"
     );
 }
+
+/// In the **hardened** build the `SectionOp::Edit` variant is
+/// `#[cfg(feature = "editor")]`-gated out, so `kb-hardened section edit …`
+/// must be rejected by clap as an unrecognized subcommand (the "editor
+/// flow" is not part of the agent surface). The same invariant was
+/// previously pinned by `kb-user/tests/m9_agent_surface.rs::section_edit_removed`,
+/// but that test was `#[cfg(not(feature = "editor"))]` and therefore
+/// silently excluded from the gate's `cargo test --workspace` (kb-user
+/// defaults `editor` on). Pinning it here, where `editor` is off by
+/// default, means the invariant is exercised on every gate run.
+#[test]
+fn hardened_section_edit_is_rejected() {
+    let s = Setup::new("sec_edit");
+    write_page(&s.root, "doc.md", "# Sec\n\nx\n");
+
+    let file = s.root.join("doc.md");
+    let file_str = file.to_str().unwrap().to_string();
+    let (code, _, err) = {
+        let mut c = hardened_bin();
+        run(
+            &mut c,
+            &s.db,
+            &[
+                "section",
+                "--file",
+                file_str.as_str(),
+                "edit",
+                "Sec",
+                "--yes",
+            ],
+        )
+    };
+    assert_ne!(
+        code, 0,
+        "`section edit` is not compiled into the hardened build; clap should reject it (rc 2 typically). stderr: {err}"
+    );
+    // Clap rejects the unknown subcommand by naming it.
+    assert!(
+        err.contains("edit") || err.contains("unrecognized") || err.contains("error"),
+        "clap should mention 'edit' or 'unrecognized' in the rejection stderr; got: {err}"
+    );
+}

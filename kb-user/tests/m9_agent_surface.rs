@@ -582,33 +582,12 @@ fn replace_op_json_roundtrip() {
     assert_eq!(content, "Z W W", "replace (no count) must replace the rest");
 }
 
-#[test]
-#[cfg(not(feature = "editor"))]
-fn section_edit_removed() {
-    // SECURITY_REPORT 3.1 — the `editor` feature is OFF for this test build,
-    // so the `edit` subcommand (which spawned $VISUAL/$EDITOR) does not
-    // exist. Clap must reject it as an unknown bare verb.
-    let s = Setup::new("editgone");
-    let file = s.root.join("doc.md");
-    fs::create_dir_all(&s.root).unwrap();
-    fs::write(&file, "# Sec\n\nx\n").unwrap();
-    let (code, _, err) = run(
-        &s,
-        &[
-            "section",
-            "--file",
-            file.to_str().unwrap(),
-            "edit",
-            "Sec",
-            "--yes",
-        ],
-    );
-    assert_ne!(
-        code, 0,
-        "`section edit` is not compiled in; clap should reject it"
-    );
-    let _ = err; // clap names the unrecognised subcommand on stderr
-}
+// NOTE — `section_edit_removed` was removed from this file: it was
+// `#[cfg(not(feature = "editor"))]` and therefore silently excluded from
+// the gate's `cargo test --workspace` (kb-user defaults `editor` on).
+// The invariant is now pinned in `kb-hardened/tests/m9_dispatch.rs::
+// hardened_section_edit_is_rejected`, where `editor` is off by default
+// and the test therefore runs on every gate invocation.
 
 // =============== the search-namespace --json (already had it) ===============
 
