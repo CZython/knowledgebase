@@ -74,6 +74,34 @@ the API is still moving; breaking changes are called out explicitly.
   absent). Verified end-to-end here: cross-built against mingw GCC 13-win32
   and ran `kb --version` → `kb 0.1.0` under wine-9.0.
 
+### Fixed
+- **`kb refresh` / `kb full-rebuild` no longer fail with
+  `table pages has no column named search_required_phrase` on a DB created
+  by a pre-rename version of `kb`.** The schema migration was
+  `CREATE TABLE IF NOT EXISTS` — correct for a *fresh* database, wrong for a
+  database that already had a `pages` table: `IF NOT EXISTS` is a no-op on an
+  existing table's *columns*, so `migrate()` created the surrounding FTS5
+  triggers, FTS5 indexes, and other tables but never reconciled the `pages`
+  column set. A live DB whose `pages` still carried the pre-`d38340e` column
+  `search_terms` would open, then fail on the very first upsert with the error
+  above (the column `search_required_phrase` did not exist). `migrate()` now
+  reconciles a pre-existing `pages` table:
+   * any column in `PAGES_COLUMN_RENAMES` (currently just
+     `search_terms` → `search_required_phrase`) is `ALTER TABLE …
+     RENAME COLUMN`'d in place — **data preserved**, SQLite ≥ 3.25 rewrites
+     trigger bodies that name it so the FTS5 sync stays in lockstep;
+   * any column in `PAGES_COLUMNS` still absent after the renames is
+     `ALTER TABLE … ADD COLUMN … TEXT` (nullable, matching the DDL's
+     optional-column convention — a pre-existing row simply reads `NULL`).
+
+  Verified end-to-end against a copy of a real user DB (3 registered roots,
+  0 rows, old `search_terms` column): after `migrate`, `kb refresh` and
+  `kb full-rebuild` both complete, the row count goes 0 → 3, and the failing
+  note's `search_required_phrase` field is repopulated from its
+  frontmatter. Three regression tests in `kb-db::migrate::tests`: one for the
+  rename path with data preservation, one for the additive path, and one
+  asserting a fresh DB is a no-op.
+
 ### Changed
 - **`kb-hardened` (the agent build) no longer special-cases a bare `.md` file
   to `info`** — a bare positional token always routes to `search`.
