@@ -36,32 +36,57 @@ its dependency tree (see `HARDENED_BUILD.md`), and clap rejects `tui` /
 
 ```sh
 git clone <url> && cd knowledgebase
+
+# the full build (TUI + in-editor flow + every verb) → `kb`
 cargo install --path kb-user
 # → installs `~/.cargo/bin/kb`
 kb --version
+
+# the headless agent build (same verbs, TUI + editor compiled out) → `kb-hardened`
+cargo install --path kb-hardened
+# → installs `~/.cargo/bin/kb-hardened`
+kb-hardened --version
 ```
 
+Both share one binary body (`kb/main.rs`) and one default DB
+(`~/.local/share/knowledgebase/kb.db`) — so you can build a note with
+`kb` and search it with `kb-hardened` (or in CI) with no extra setup.
+
 Or, from the repo root, just run `cargo build` and grab
-`target/debug/kb` (for a release binary, `cargo build --release`).
+`target/debug/kb` and `target/debug/kb-hardened` (for release binaries,
+`cargo build --release`).
 
 ### Prebuilt binaries (Releases)
 
-Every tagged release (`v*`) publishes a native artifact per platform, built
-*natively* by CI so the bundled SQLite is compiled against each OS's libc:
+Every tagged release (`v*`) publishes a native artifact per platform —
+**both the full `kb` and the headless `kb-hardened`** — built *natively* by
+CI so the bundled SQLite is compiled against each OS's libc:
 
-| Platform      | Artifact                        | Notes                                        |
-|---------------|---------------------------------|----------------------------------------------|
-| Linux (all)   | `kb-x86_64-linux-musl`    | **static**, runs on any distro / container — no FUSE, no libs |
-| Windows       | `kb-x86_64-pc-windows.exe`| native, no runtime deps                       |
-| macOS (ARM)   | `kb-aarch64-apple-darwin` | Apple Silicon                                 |
-| macOS (Intel) | `kb-x86_64-apple-darwin`  | pre-Apple-Silicon                             |
+| Platform      | Artifact                          | Notes                                        |
+|---------------|-----------------------------------|----------------------------------------------|
+| Linux (all)   | `kb-x86_64-linux-musl`        | **static**, runs on any distro / container — no FUSE, no libs |
+| Linux (all)   | `kb-hardened-x86_64-linux-musl`| same static build; TUI + editor compiled out  |
+| Windows       | `kb-x86_64-pc-windows.exe`    | native, no runtime deps                       |
+| Windows       | `kb-hardened-x86_64-pc-windows.exe` | native, headless                       |
+| macOS (ARM)   | `kb-aarch64-apple-darwin`     | Apple Silicon                                 |
+| macOS (ARM)   | `kb-hardened-aarch64-apple-darwin` | headless                          |
+| macOS (Intel) | `kb-x86_64-apple-darwin`      | pre-Apple-Silicon                             |
+| macOS (Intel) | `kb-hardened-x86_64-apple-darwin`| headless                                  |
 
 Download from the [Releases](../../releases) tab and put it on your
-`$PATH`. The Linux one is a single self-contained ELF:
+`$PATH`. The Linux `kb` one is a single self-contained ELF:
 
 ```sh
 chmod +x kb-x86_64-linux-musl
 ./kb-x86_64-linux-musl search "rust async"
+```
+
+The `kb-hardened-*` artifact is the same engine with no TUI/editor surface —
+use it in agents and CI:
+
+```sh
+./kb-hardened-x86_64-linux-musl search "rust async"
+./kb-hardened-x86_64-linux-musl tui   # → error: unrecognized subcommand (exit 2)
 ```
 
 To build a platform artifact yourself, run the matching script (each

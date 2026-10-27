@@ -1,5 +1,6 @@
 @ECHO OFF
-REM build-windows.bat — release build of `kb` (package `kb-user`) for Windows.
+REM build-windows.bat — release build of `kb` (package `kb-user`) and
+REM `kb-hardened` (package `kb-hardened`) for Windows.
 REM
 REM Run from cmd.exe (no Git Bash needed). Two branches:
 REM   * If the MSVC toolchain is present (the GHA windows-latest default, and
@@ -12,7 +13,7 @@ REM On a stock Windows machine the easiest path is the MSVC one:
 REM     rustup target add x86_64-pc-windows-msvc
 REM     .\dist\build-windows.bat
 REM
-REM Output: dist\kb-x86_64-pc-windows.exe   (+ .sha256)
+REM Output: dist\kb-x86_64-pc-windows.exe and dist\kb-hardened-x86_64-pc-windows.exe (each + .sha256)
 REM
 REM For a build *and* an install (copy to %LOCALAPPDATA%\knowledgebase\ and
 REM create the default DB dir), use the PowerShell script instead:
@@ -21,8 +22,6 @@ REM     powershell -ExecutionPolicy Bypass -File .\dist\build-windows.ps1 -Insta
 setlocal EnableExtensions EnableDelayedExpansion
 set "ROOT=%~dp0.."
 pushd "%ROOT%" || goto :err
-
-set "BIN=kb"
 
 REM ---- pick a target --------------------------------------------------------
 REM Prefer the MSVC target if its rust std is installed (matches the GHA
@@ -42,26 +41,40 @@ if not defined TARGET (
   goto :err
 )
 
-ECHO ==&gt; cargo build --release --target %TARGET% -p %BIN%-user
+ECHO ==&gt; cargo build --release --target %TARGET% -p kb-user
 cargo build --release --target "%TARGET%" -p kb-user || goto :err
+ECHO ==&gt; cargo build --release --target %TARGET% -p kb-hardened
+cargo build --release --target "%TARGET%" -p kb-hardened || goto :err
 
-REM ---- stage ----------------------------------------------------------------
 set "OUT=%ROOT%\dist"
 if not exist "%OUT%" mkdir "%OUT%"
-set "DEST=%OUT%\kb-x86_64-pc-windows.exe"
-copy /Y "target\%TARGET%\release\%BIN%.exe" "%DEST%" || goto :err
 
-REM ---- checksum (if sha256sum is on PATH — git-bash provides it) -------------
+REM ---- stage + checksum + verify: kb -----------------------------------------
+if not exist "target\%TARGET%\release\kb.exe" (
+  ECHO build-windows.bat: kb.exe not found in target\%TARGET%\release\ 1>&2
+  goto :err
+)
+copy /Y "target\%TARGET%\release\kb.exe" "%OUT%\kb-x86_64-pc-windows.exe" || goto :err
 where sha256sum >nul 2>nul && (
   pushd "%OUT%" && sha256sum kb-x86_64-pc-windows.exe > kb-x86_64-pc-windows.exe.sha256 && popd
 )
+"%OUT%\kb-x86_64-pc-windows.exe" --version || goto :err
+ECHO ==&gt; staged %OUT%\kb-x86_64-pc-windows.exe
 
-REM ---- verify ----------------------------------------------------------------
-ECHO ==&gt; verify:
-"%DEST%" --version || goto :err
+REM ---- stage + checksum + verify: kb-hardened --------------------------------
+if not exist "target\%TARGET%\release\kb-hardened.exe" (
+  ECHO build-windows.bat: kb-hardened.exe not found in target\%TARGET%\release\ 1>&2
+  goto :err
+)
+copy /Y "target\%TARGET%\release\kb-hardened.exe" "%OUT%\kb-hardened-x86_64-pc-windows.exe" || goto :err
+where sha256sum >nul 2>nul && (
+  pushd "%OUT%" && sha256sum kb-hardened-x86_64-pc-windows.exe > kb-hardened-x86_64-pc-windows.exe.sha256 && popd
+)
+"%OUT%\kb-hardened-x86_64-pc-windows.exe" --version || goto :err
+ECHO ==&gt; staged %OUT%\kb-hardened-x86_64-pc-windows.exe
 
 ECHO.
-ECHO ==&gt; done. Artifact in: %OUT%
+ECHO ==&gt; done. Artifacts in: %OUT%
 popd
 exit /b 0
 
