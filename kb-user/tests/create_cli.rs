@@ -402,19 +402,10 @@ fn create_edit_with_json_is_rejected() {
     );
 }
 
-#[test]
-#[cfg(not(feature = "editor"))]
-fn create_e_flag_is_rejected_in_hardened_build() {
-    // SECURITY_REPORT 3.1: in a hardened build the `editor` feature is off,
-    // so the `-e` flag was never registered. clap must reject it as an
-    // unexpected argument *before* any file is created (exit 2, not a
-    // create failure). Note: clap exits 2 on a usage error.
-    let s = Setup::new("noed");
-    let (code, _, err) = run(&s, &["create", "noe", "-e", "--yes"]);
-    assert_eq!(code, 2, "clap usage error is exit 2: {err}");
-    assert!(
-        err.contains("unexpected argument"),
-        "names the offending flag: {err}"
-    );
-    assert!(!s.root.join("noe.md").exists(), "rejected before any write");
-}
+// NOTE — `create_e_flag_is_rejected_in_hardened_build` was removed from this
+// file: it was `#[cfg(not(feature = "editor"))]` and therefore silently
+// excluded from the gate's `cargo test --workspace` (kb-user defaults
+// `editor` on). The invariant is now pinned in
+// `kb-hardened/tests/m9_dispatch.rs::hardened_create_e_flag_is_rejected`,
+// where `editor` is off by default and the test therefore runs on every
+// gate invocation.

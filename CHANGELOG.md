@@ -91,11 +91,15 @@ the API is still moving; breaking changes are called out explicitly.
   on the existing `VARIANT` constant, the same "am I the agent build?"
   switch that already drives `--version` / `--help`. Pinned by
    `kb-hardened/tests/m9_dispatch.rs` (drives both real binaries and asserts
-   the `hardened → search` / `user → info` divergence, plus that
-   `kb-hardened section edit …` is rejected by clap — an invariant that was
-   previously pinned only under `kb-user/tests/m9_agent_surface.rs::
-   section_edit_removed` with `#[cfg(not(feature = "editor"))]`, so the
-   gate's `cargo test --workspace` silently skipped it).
+   the `hardened → search` / `user → info` divergence, plus two SECURITY_
+   REPORT 3.1 invariants that were previously pinned only in `kb-user/
+   tests/` under `#[cfg(not(feature = "editor"))]` and therefore *silently
+   skipped* by the gate's `cargo test --workspace` (kb-user defaults
+   `editor` on): `kb-hardened section edit …` is rejected by clap as an
+   unrecognized subcommand (`hardened_section_edit_is_rejected`), and
+   `kb-hardened create … -e` is rejected by clap as an unexpected argument
+   with exit 2 (`hardened_create_e_flag_is_rejected`). Both now run on
+   every gate invocation).
 - **Two related pre-parse footguns in the *same* entry point are fixed in both
   builds** (pentest F4): the non-flag filter no longer drops tokens containing
   `=`, so `kb E=mc2` is a legitimate single search term (not an "unrecognized

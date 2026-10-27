@@ -186,6 +186,37 @@ fn both_bare_non_md_routes_to_search() {
     );
 }
 
+/// In the **hardened** build the `editor` feature is off, so the
+/// `create -e` flag (which spawns `$VISUAL`/`$EDITOR`) is never
+/// registered. clap must reject `-e` as an *unexpected argument*
+/// (exit 2, before any file is written). The invariant was previously
+/// pinned by `kb-user/tests/create_cli.rs::create_e_flag_is_rejected_in_
+/// hardened_build`, but that test was `#[cfg(not(feature = "editor"))]`
+/// and therefore silently excluded from the gate's `cargo test
+/// --workspace` (kb-user defaults `editor` on). Pinning it here, where
+/// `editor` is off by default, means the invariant is exercised on
+/// every gate run.
+#[test]
+fn hardened_create_e_flag_is_rejected() {
+    let s = Setup::new("create_e_rej");
+    let (code, _, err) = {
+        let mut c = hardened_bin();
+        run(&mut c, &s.db, &["create", "noe", "-e", "--yes"])
+    };
+    assert_eq!(
+        code, 2,
+        "clap usage error is exit 2 — not a create failure: {err}"
+    );
+    assert!(
+        err.contains("unexpected argument"),
+        "clap should name the offending flag: {err}"
+    );
+    assert!(
+        !s.root.join("noe.md").exists(),
+        "rejected before any write"
+    );
+}
+
 /// In the **hardened** build the `SectionOp::Edit` variant is
 /// `#[cfg(feature = "editor")]`-gated out, so `kb-hardened section edit …`
 /// must be rejected by clap as an unrecognized subcommand (the "editor
