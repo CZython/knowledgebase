@@ -90,16 +90,34 @@ the API is still moving; breaking changes are called out explicitly.
   (`kb notes/foo.md` still opens that file's `info`) — the branch is gated
   on the existing `VARIANT` constant, the same "am I the agent build?"
   switch that already drives `--version` / `--help`. Pinned by
-   `kb-hardened/tests/m9_dispatch.rs` (drives both real binaries and asserts
-   the `hardened → search` / `user → info` divergence, plus two SECURITY_
-   REPORT 3.1 invariants that were previously pinned only in `kb-user/
-   tests/` under `#[cfg(not(feature = "editor"))]` and therefore *silently
-   skipped* by the gate's `cargo test --workspace` (kb-user defaults
-   `editor` on): `kb-hardened section edit …` is rejected by clap as an
-   unrecognized subcommand (`hardened_section_edit_is_rejected`), and
-   `kb-hardened create … -e` is rejected by clap as an unexpected argument
-   with exit 2 (`hardened_create_e_flag_is_rejected`). Both now run on
-   every gate invocation).
+   `kb-hardened/tests/m9_dispatch.rs` (`hardened_bare_md_routes_to_search_
+   not_info` + `both_bare_non_md_routes_to_search`) and
+   `kb-user/tests/m9_dispatch_user.rs` (`user_bare_md_routes_to_info`).
+   The latter used to live in `kb-hardened/tests/m9_dispatch.rs` behind an
+   `if user_bin().is_none() { return; }` guard — but `kb-hardened` does not
+   depend on `kb-user`, so `CARGO_BIN_EXE_kb` was unset on every run and
+   the test *silently early-returned*, counting as "passing" while
+   asserting zero. Moving it into `kb-user/tests/` (where the env var is
+   always set) makes the user-side half of the divergence actually
+   exercised on every gate invocation.
+ - **Two further SECURITY_REPORT 3.1 invariants that were *silently
+   skipped* by the gate are now exercised on every run.** Both were
+   `#[cfg(not(feature = "editor"))]` tests in `kb-user/tests/`, but
+   `kb-user` defaults `editor` ON, so the gate's `cargo test --workspace`
+   never compiled them:
+     - `kb-hardened section edit …` is rejected by clap as an
+       unrecognized subcommand — now pinned by
+       `kb-hardened/tests/m9_dispatch.rs::hardened_section_edit_is_rejected`
+       (was `kb-user/tests/m9_agent_surface.rs::section_edit_removed`).
+     - `kb-hardened create … -e` is rejected by clap as an unexpected
+       argument with exit 2 — now pinned by
+       `kb-hardened/tests/m9_dispatch.rs::hardened_create_e_flag_is_rejected`
+       (was `kb-user/tests/create_cli.rs::
+       create_e_flag_is_rejected_in_hardened_build`).
+   `kb-hardened` compiles the identical `#[cfg(feature = "editor")]`
+   gates as `kb-user --no-default-features`, so running these in
+   `kb-hardened/tests/` exercises the exact code paths the originals
+   intended.
 - **Two related pre-parse footguns in the *same* entry point are fixed in both
   builds** (pentest F4): the non-flag filter no longer drops tokens containing
   `=`, so `kb E=mc2` is a legitimate single search term (not an "unrecognized

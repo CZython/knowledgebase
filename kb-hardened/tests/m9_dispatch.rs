@@ -20,12 +20,6 @@ fn hardened_bin() -> Command {
     )
 }
 
-fn user_bin() -> Option<Command> {
-    std::env::var("CARGO_BIN_EXE_kb")
-        .ok()
-        .map(Command::new)
-}
-
 struct Setup {
     root: PathBuf,
     db: PathBuf,
@@ -121,44 +115,15 @@ fn hardened_bare_md_routes_to_search_not_info() {
     );
 }
 
-/// In the **user** build, a bare token that is an existing `.md` file
-/// still routes to `info` (the interactive convenience).
-#[test]
-fn user_bare_md_routes_to_info() {
-    // `CARGO_BIN_EXE_kb` is only set when the `kb-user` package is part of
-    // this build graph (i.e. `cargo test --workspace` or `-p kb-user`).
-    // Under `-p kb-hardened` the env var is unset — skip gracefully.
-    if user_bin().is_none() {
-        eprintln!("CARGO_BIN_EXE_kb unset — skipping (run under --workspace)");
-        return;
-    }
-    let s = Setup::new("usr_md");
-    write_page(&s.root, "note.md", "some body text\n");
-
-    // Index so info can find the page (construct a fresh Command; the
-    // previous one was consumed by the `match` above).
-    let mut add = user_bin().expect("user_bin available in scope");
-    let _ = add
-        .arg(format!("--db={}", s.db.display()))
-        .arg("add")
-        .arg(s.root.to_str().unwrap())
-        .status();
-
-    let file = s.root.join("note.md");
-    let path_str = file.to_str().unwrap().to_string();
-    let mut c = user_bin().expect("user_bin available in scope");
-    let (code, out, err) = run(&mut c, &s.db, &[path_str.as_str()]);
-
-    assert_eq!(code, 0, "user build bare .md should route to info (rc 0); err: {err}");
-    assert!(
-        out.contains("title:") || out.contains("type:"),
-        "user build bare .md should print info metadata; got: {out}\nerr: {err}"
-    );
-    assert!(
-        !out.contains("0 results"),
-        "user build bare .md should NOT be treated as a search; got: {out}"
-    );
-}
+// NOTE — `user_bare_md_routes_to_info` was removed from this file: it was
+// gated on `CARGO_BIN_EXE_kb`, which is only set when the `kb-user`
+// package is part of the test build graph. `kb-hardened` does NOT depend
+// on `kb-user`, so under `cargo test -p kb-hardened` (and even
+// `--workspace`) the env var is unset and the test **silently early-
+// returned**, counting as "passing" while asserting zero. The invariant
+// is now pinned in `kb-user/tests/m9_dispatch_user.rs`, where
+// `CARGO_BIN_EXE_kb` is always available and the test therefore runs on
+// every gate invocation.
 
 /// In **both** builds, a bare non-`.md` token (e.g. a search term) routes
 /// to `search`.
