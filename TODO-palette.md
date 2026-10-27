@@ -248,7 +248,7 @@ as `kb/tui/palettes/{default,colorblind}.toml`.
 
 ## Open questions (resolve during P2)
 
-1. **Flag shape**: `--palette <name|path>` (disambiguate by whether the string matches a built-in name) vs. `--palette-name <name>` + `--palette-file <path>`. I lean toward the first (fewer flags, self-describing), but I'll confirm before P2 lands.
-2. **TOML vs. JSON**: TOML is more human-editable and matches the "ship a file the user can edit" story. `kb-core` doesn't need TOML (it's the pure/verified crate). I'll add `toml = "0.8"` to `kb-user` only, feature-gated by `tui`. Confirm acceptable.
-3. **Precedence** (future, not this pass): env var `KB_PALETTE`, then `--palette`, then default. This pass: flag + default only.
-4. **`--list-palettes` output format**: I lean ANSI-colored (so the user can *see* the palette, not just read its name). Confirm.
+1. **RESOLVED** — **Flag shape**: shipped as `--palette <name|path>`, disambiguated by whether the string matches a built-in name (`kb/main.rs:450-457`; resolution in `kb/tui/mod.rs:2354+`).
+2. **RESOLVED** — **TOML vs. JSON**: shipped as TOML; `toml` + `serde` are optional deps on `kb-user` only, feature-gated by `tui` (`kb-user/Cargo.toml:33,59-64`).
+3. *(parked)* **Precedence**: env var `KB_PALETTE` was never shipped — current precedence is `--palette <name|path>` then the embedded default (no env-var layer yet; a future enhancement).
+4. **RESOLVED** — **`--list-palettes` output format**: shipped ANSI-colored — `print_palettes()` renders 4 live color swatches (`label`/`active`/`error`/`selection`) in the user's own terminal (`kb/tui/mod.rs:2376-2419`).

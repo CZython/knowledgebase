@@ -23,7 +23,7 @@ The rest of the binary is in-process `std::fs` + `rusqlite` (all prepared statem
 | LOW (perf) | 2   | 3.16, 3.17 |
 | **Total** | **17** | |
 
-**3.1 (RCE) is fixed by design decision (drop `edit`). 3.3 (GC) is the highest-priority *code* fix.**
+**All 17 findings are RESOLVED.** 3.1 (RCE) was fixed by design decision (compile-time `edit` gating). 3.3 (GC) was the highest-priority *code* fix — it is now in place (`refresh.rs:224-229`, `gc_skipped`). Every other finding has a RESOLVED status tag in its header, and each fix carries a `SECURITY_REPORT 3.X` cross-ref in source plus a regression test.
 
 ---
 
@@ -60,9 +60,9 @@ Each finding lists **Where** (file:line), the **impact**, the **trigger**, and a
 | [3.16](#316-low-perf--quadratic--onm-scans-in-kb-core) | LOW (perf) | Quadratic / O(n·m) scans in `kb-core` |
 | [3.17](#317-low-perf--per-iteration-sql-prep-in-kb-cli) | LOW (perf) | Per-iteration SQL prep in `kb` CLI |
 
-### 3.1  HIGH — RCE via `$VISUAL`/`$EDITOR` (`kb section edit`) · **reproduced (§7.1/§7.9)**
+### 3.1  HIGH — RCE via `$VISUAL`/`$EDITOR` (`kb section edit`) · **RESOLVED** · **reproduced (§7.1/§7.9)**
 
-**Status: to be eliminated at compile time (agreed).**
+**Status: RESOLVED** — the entire editor surface is gated behind `#[cfg(feature = "editor")]`; `kb-hardened` defaults it off, so no `run_editor`/`Command::new` reachable in the hardened build.
 
 Where: `kb/src/main.rs:2600-2624` — `run_editor()` + `pick_editor()`, reached only from `cmd_section` → `SectionOp::Edit` (`main.rs:2342-2366`).
 
@@ -89,9 +89,9 @@ Why it matters pre-release: `kb` is meant to be invoked by other tools (the TUI,
 
 ---
 
-### 3.2  MED — Predictable editor temp file, no `O_EXCL` · **eliminated by 3.1's `edit` removal**
+### 3.2  MED — Predictable editor temp file, no `O_EXCL` · **RESOLVED** · **eliminated by 3.1's `edit` removal**
 
-**Status: eliminated at compile time together with 3.1 (it only exists to serve the editor flow).**
+**Status: RESOLVED** — the entire editor surface is gated behind `#[cfg(feature = "editor")]`; `kb-hardened` defaults it off, so no `run_editor`/`Command::new` reachable in the hardened build.
 
 Where: `kb/src/main.rs:2601-2614`.
 ```rust
@@ -107,7 +107,7 @@ Combined with 3.1 (the editor runs with the user's identity and receives this ex
 **Fix:** build the buffer in a `kb`-created `0700` dir (or `<tmp>/kb-edit-<pid>-<rand>`), create it with `File::create_new` (O_EXCL) at mode `0600`, and `unlink` in a `Drop` so a crash between write and read doesn't leave stale bytes. Pass `--` before the filename to the editor as defense-in-depth.
 
 ---
-### 3.3  HIGH — `kb refresh` GCs pages after a transient walk error · **reproduced (§7.6)**
+### 3.3  HIGH — `kb refresh` GCs pages after a transient walk error · **RESOLVED** · **reproduced (§7.6)**
 
 Where: `kb-db/src/refresh.rs:93-105` (`candidate_files`) feeding `gc_orphaned_pages` (`refresh.rs:207-234`).
 
@@ -131,7 +131,7 @@ Those roots' files are therefore **absent from `candidates`**. The GC step keys 
 
 ---
 
-### 3.4  MED — Tag filter is case-sensitive despite case-insensitive docs · **reproduced (§7.2)**
+### 3.4  MED — Tag filter is case-sensitive despite case-insensitive docs · **RESOLVED** · **reproduced (§7.2)**
 
 Where: `kb/src/main.rs:842-851` (the `IN` clause) × `kb-core/src/tags.rs:107-120` (`canonicalize` returns stored case) × `kb-core/src/tags.rs:81-82` (the doc example is exactly the case that then fails).
 
@@ -152,7 +152,7 @@ Note this is a **correctness** bug, not injection: the value comes from our own 
 
 ---
 
-### 3.5  MED — NOT-only search is a silent no-op · **reproduced (§7.3)**
+### 3.5  MED — NOT-only search is a silent no-op · **RESOLVED** · **reproduced (§7.3)**
 
 Where: `kb/src/main.rs:870-872`.
 ```rust
@@ -168,7 +168,7 @@ When the query has **only** NOT terms (e.g. `kb search -gpt`), `has_match` is fa
 
 ---
 
-### 3.6  MED — `type:slug` colon ref short-circuits the resolver · **reproduced (§7.4)**
+### 3.6  MED — `type:slug` colon ref short-circuits the resolver · **RESOLVED** · **reproduced (§7.4)**
 
 Where: `kb-core/src/resolve.rs:156-165`, helper `split_type_slug` at `resolve.rs:106-111`.
 ```rust
@@ -192,7 +192,7 @@ if let Some((typ, slug)) = split_type_slug(query) {
 
 ---
 
-### 3.7  MED — Non-UTF-8 byte makes a whole file's frontmatter un-editable · **reproduced (§7.5)**
+### 3.7  MED — Non-UTF-8 byte makes a whole file's frontmatter un-editable · **RESOLVED** · **reproduced (§7.5)**
 
 Where: `kb-core/src/frontmatter.rs:487` (`lines_of`), repeated at :795, :811, :825.
 ```rust
@@ -208,7 +208,7 @@ The doc comment above `lines_of` (`:475-482`) explicitly promises `from_utf8_los
 
 ---
 
-### 3.8  MED — `tag-alias --import` leaves a transaction open on error · **code-confirmed (§7.8)**
+### 3.8  MED — `tag-alias --import` leaves a transaction open on error · **RESOLVED** · **code-confirmed (§7.8)**
 
 Where: `kb/src/main.rs:1427-1443`.
 ```rust
@@ -231,7 +231,7 @@ tx.commit()?;
 
 ---
 
-### 3.9  MED — `full_rebuild` swallows per-page errors and exits 0 · **reproduced (§7.7)**
+### 3.9  MED — `full_rebuild` swallows per-page errors and exits 0 · **RESOLVED** · **reproduced (§7.7)**
 
 Where: `kb-db/src/refresh.rs:275-279` (per the integration path), surfacing as `cmd_refresh` / `cmd_full_rebuild` in the CLI.
 
@@ -243,7 +243,7 @@ Where: `kb-db/src/refresh.rs:275-279` (per the integration path), surfacing as `
 
 ---
 
-### 3.10 LOW — `extract_language` matches `languages:` and `language_x:`
+### 3.10 LOW — `extract_language` matches `languages:` and `language_x:` · **RESOLVED**
 
 Where: `kb-db/src/index.rs:123-148`.
 ```rust
@@ -257,7 +257,7 @@ The prefix is matched with no key-boundary check, so `languages: en, fr` (or `la
 
 ---
 
-### 3.11 LOW — CRLF line endings dropped on one frontmatter rewrite path
+### 3.11 LOW — CRLF line endings dropped on one frontmatter rewrite path · **RESOLVED**
 
 Where: `kb-core/src/frontmatter.rs:818, 836, 889, 942` (the `let nl = if line.ends_with('\n') { "\n" } else { "" }` family).
 
@@ -267,7 +267,7 @@ The rewrite helpers rebuild the edited line as `format!("{leading}{key} {value}{
 
 ---
 
-### 3.12 LOW — `splice` capacity can underflow in release build
+### 3.12 LOW — `splice` capacity can underflow in release build · **RESOLVED**
 
 Where: `kb-core/src/section.rs:518-520`.
 ```rust
@@ -281,7 +281,7 @@ The range invariant is guarded only by `debug_assert!`. In a **release** build a
 
 ---
 
-### 3.13 LOW — Insert-Child under a level-6 heading lands at the same level
+### 3.13 LOW — Insert-Child under a level-6 heading lands at the same level · **RESOLVED**
 
 Where: `kb-core/src/section.rs:345, 349`.
 ```rust
@@ -295,7 +295,7 @@ On a level-6 target, the child level is `7 → min(6) → 6` — so the "child" 
 
 ---
 
-### 3.14 LOW — `Db::open(":memory:")` documented but errors
+### 3.14 LOW — `Db::open(":memory:")` documented but errors · **RESOLVED**
 
 Where: `kb-db/src/lib.rs:40-46`.
 ```rust
@@ -310,7 +310,7 @@ On an in-memory DB, `PRAGMA journal_mode=WAL` returns `"memory"` (not `"WAL"`), 
 
 ---
 
-### 3.15 LOW — `schema_version()` on an unmigrated DB returns `Err`, not `None`
+### 3.15 LOW — `schema_version()` on an unmigrated DB returns `Err`, not `None` · **RESOLVED**
 
 Where: `kb-db/src/lib.rs:169`. The doc says it returns `None` if the DB is unmigrated, but an unmigrated DB has no `meta` table, so `query_row` fails with `SqliteFailure` (not `QueryReturnedNoRows`) and `.optional()?` propagates `Err`.
 
@@ -318,7 +318,7 @@ Where: `kb-db/src/lib.rs:169`. The doc says it returns `None` if the DB is unmig
 
 ---
 
-### 3.16 LOW (perf) — Quadratic / O(n·m) scans in `kb-core`
+### 3.16 LOW (perf) — Quadratic / O(n·m) scans in `kb-core` · **RESOLVED**
 
 All CLI-reachable; fine at small corpus, painful at 10k+ pages/files.
 - `kb-core/src/tags.rs:56,117` — `normalize`/`canonicalize` dedupe with `seen.iter().any(…)` (O(n²)); `canonical_of` re-scans the alias table per stored tag (O(T·A)).
@@ -331,7 +331,7 @@ All CLI-reachable; fine at small corpus, painful at 10k+ pages/files.
 
 ---
 
-### 3.17 LOW (perf) — Per-iteration SQL prep in `kb` CLI
+### 3.17 LOW (perf) — Per-iteration SQL prep in `kb` CLI · **RESOLVED**
 
 - `kb/src/main.rs:786-820` — for **each** `tag:` filter the code re-`prepare()`s and fully collects `tag_aliases` **and** `DISTINCT tag FROM page_tags`. N tag filters → N full table scans of the same data. **Fix:** hoist both loads before the filter loop.
 - `kb/src/main.rs:1600-1626` — `cmd_links` backlink loop calls `db.conn.prepare("SELECT to_path FROM links WHERE from_path = ?1")` **inside** `for (from_abs,_) in corpus_pages.iter()`. O(N) `prepare()` + N `query_map()` over a table that should be one prepared statement. 10k corpus → 10k prepares. **Fix:** load all forward edges into a `BTreeMap<String, Vec<String>>` once; iterate in memory.
