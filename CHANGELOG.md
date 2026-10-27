@@ -75,6 +75,30 @@ the API is still moving; breaking changes are called out explicitly.
   and ran `kb --version` → `kb 0.1.0` under wine-9.0.
 
 ### Changed
+- **`kb-hardened` (the agent build) no longer special-cases a bare `.md` file
+  to `info`** — a bare positional token always routes to `search`.
+  Previously the pre-parse entry point in `main.rs` probed
+  `Path::new(<token>).exists()` *relative to the process CWD* and, for an
+  existing `.md` file, rewrote the call to `kb info <file>`; otherwise it
+  used `kb search <token>`. That made the dispatch state-dependent (two
+  agents in different working directories running the same token got
+  different verbs) — the one behavioral branch in the hardened surface that
+  depended on ambient filesystem state (pentest F4, recommendation (b)).
+  The hardened build now drops that shortcut: agents that want file details
+  say `kb info <file>` explicitly, and `kb-hardened <anything>` is always a
+  search. The *interactive* `kb-user` build keeps the convenience
+  (`kb notes/foo.md` still opens that file's `info`) — the branch is gated
+  on the existing `VARIANT` constant, the same "am I the agent build?"
+  switch that already drives `--version` / `--help`. Pinned by
+  `kb-hardened/tests/m9_dispatch.rs` (drives both real binaries and asserts
+  the `hardened → search` / `user → info` divergence).
+- **Two related pre-parse footguns in the *same* entry point are fixed in both
+  builds** (pentest F4): the non-flag filter no longer drops tokens containing
+  `=`, so `kb E=mc2` is a legitimate single search term (not an "unrecognized
+  subcommand"), and the unchecked `non_flag[0]` index is now
+  `non_flag.first().expect("len()==1 guarantees non-empty")` — an explicit
+  invariant instead of an `Index` out-of-bounds at an index we know is
+  reachable.
 - **`default_db_display()` (new, shared body)** now owns the *display* form
   of the default DB path for every human-facing call site; the two call sites
   that previously hard-coded a POSIX string now branch on `cfg!(windows)`
