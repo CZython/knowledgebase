@@ -21,6 +21,17 @@
 //!  status bar (colored by severity)
 //! ```
 //!
+//! Search (M8.4 — the real `search_grammar` FTS5 engine, not a substring
+//! filter; `s` from Browse):
+//! ```text
+//!  kb tui — search · 3 result(s) · 2 tag hint(s)  (↑↓ move · Tab inject tag · Enter open · Esc back)
+//! ┌ results (live) ──────────────────┬─ tag hints ────┐
+//! │ > note:T   Transformer  wiki/a.md │ llm → ai       │
+//! │   note:A   Attention   wiki/a.md  │ llm            │
+//! └──────────────────────────────────┴────────────────┘
+//!  status bar (colored by severity)
+//! ```
+//!
 //! Filter input (the header shows the live filter + "editing"):
 //! ```text
 //!  kb tui — browse · filter "abc" (editing: / commit, Esc clear)

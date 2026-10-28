@@ -16,22 +16,31 @@
 //!   line-by-line; `PgUp`/`PgDn` jump a viewport; `G`/`g` / `Home`/`End`
 //!   jump top/bottom; `Esc`/`q`/`C-c` pop back to Browse (the *selection*
 //!   is preserved, so `Esc` then `j` continues where the user left off).
+//! * **Search** (M8.4) — armed by `s` in Browse. `j`/`k` and any other
+//!   printable char *type into the query buffer* (they never navigate here,
+//!   so no context ambiguity); `↑`/`↓`/`Home`/`End` move the result + tag
+//!   suggestion selections in lockstep; `Tab` injects the highlighted tag
+//!   (alias-first, `alias → canonical`) onto the trailing `tag:` token;
+//!   `Enter` opens the selected result in **Read**; `Esc` back to Browse,
+//!   `q`/`C-c` quit the TUI.
 //!
 //! The binding tables:
 //!
-//! | key                        | Browse                    | Filter input            | Read                        |
-//! |----------------------------|---------------------------|-------------------------|-----------------------------|
-//! | `↑`/`↓` arrows              | move selection            | move selection (live)   | scroll body ∓ 1 line        |
-//! | `Home`/`PgUp`, `End`/`PgDn`| jump to top/bottom        | jump top/bottom (live)  | jump a viewport             |
-//! | `j` / `k`                   | move selection            | append to filter        | scroll body ∓ 1 line        |
-//! | `g` / `G`                  | *(no-op)*                 | *(no-op)*               | jump to top / bottom        |
-//! | `Enter`                    | open the selected page    | adopt (open selected)   | *(no-op)*                   |
-//! | `/`                        | arm the filter input      | commit (disarm)         | *(no-op)*                   |
-//! | printable char             | move selection (`j`/`k`)  | append to filter        | *(no-op)*                   |
-//! | `Backspace`                | *(no-op)*                 | pop a char              | *(no-op)*                   |
-//! | `a`                        | open the alias manager    | *(no-op)*               | open the alias manager      |
-//! | `r`                        | open the roots manager    | *(no-op)*               | open the roots manager      |
-//! | `Esc` / `q` / `C-c`        | quit / clear filter      | clear filter / quit    | pop to Browse / quit        |
+//! | key                        | Browse                    | Filter input            | Read                        | Search                    |
+//! |----------------------------|---------------------------|-------------------------|-----------------------------|---------------------------|
+//! | `↑`/`↓` arrows              | move selection            | move selection (live)   | scroll body ∓ 1 line        | move result + tag sel     |
+//! | `Home`/`PgUp`, `End`/`PgDn`| jump to top/bottom        | jump top/bottom (live)  | jump a viewport             | jump result + tag sel     |
+//! | `j` / `k`                   | move selection            | append to filter        | scroll body ∓ 1 line        | *(typed into the query)*  |
+//! | `g` / `G`                  | *(no-op)*                 | *(no-op)*               | jump to top / bottom        | *(typed into the query)*  |
+//! | `Enter`                    | open the selected page    | adopt (open selected)   | *(no-op)*                   | open the selected result  |
+//! | `/`                        | arm the filter input      | commit (disarm)         | *(no-op)*                   | *(typed into the query)*  |
+//! | printable char             | move selection (`j`/`k`)  | append to filter        | *(no-op)*                   | *(typed into the query)*  |
+//! | `Backspace`                | *(no-op)*                 | pop a char              | *(no-op)*                   | pop a char from the query |
+//! | `Tab`                      | *(no-op)*                 | *(no-op)*               | *(no-op)*                   | inject highlighted tag    |
+//! | `a`                        | open the alias manager    | *(no-op)*               | open the alias manager      | *(typed into the query)*  |
+//! | `r`                        | open the roots manager    | *(no-op)*               | open the roots manager      | *(typed into the query)*  |
+//! | `s`                        | open the Search mode      | *(no-op)*               | *(no-op)*                   | *(typed into the query)*  |
+//! | `Esc` / `q` / `C-c`        | quit / clear filter      | clear filter / quit    | pop to Browse / quit        | back to Browse / quit     |
 //!
 //! Not-yet-wired keys in a context set a **status** note (rather than being
 //! silent) so the user always knows whether a key was seen.

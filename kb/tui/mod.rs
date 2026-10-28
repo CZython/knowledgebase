@@ -44,6 +44,12 @@
 //!   path — `add_root` + a full `refresh`), drop (`drop_root` + a full
 //!   `refresh`). The add/drop paths reuse the *same* `Db` methods as
 //!   `cmd_add` / `cmd_drop_root` in `main.rs`.
+//! - **Search** (M8.4) — full `search_grammar` power search armed by `s` in
+//!   Browse: type a query, results stream from `search_rows` (the *same*
+//!   `search_grammar::parse` + `build_search_sql` + `pages_fts` engine the
+//!   CLI `kb search` verb runs), and a trailing `tag:` token gets inline
+//!   suggestions (alias-first, shown `alias → canonical`) that `Tab` injects.
+//!   `Enter` opens the selected result in **Read**; `Esc` back to Browse.
 //!
 //! ## Boring-shell conventions
 //!
