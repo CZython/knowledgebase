@@ -21,12 +21,13 @@
 //!
 //! | key                        | Browse                    | Filter input            | Read                        |
 //! |----------------------------|---------------------------|-------------------------|-----------------------------|
-//! | `↑`/`k`, `↓`/`j`          | move selection            | *(no-op)*               | scroll body ∓ 1 line        |
-//! | `Home`/`PgUp`, `End`/`PgDn`| jump to top/bottom        | *(no-op)*               | jump a viewport             |
+//! | `↑`/`↓` arrows              | move selection            | move selection (live)   | scroll body ∓ 1 line        |
+//! | `Home`/`PgUp`, `End`/`PgDn`| jump to top/bottom        | jump top/bottom (live)  | jump a viewport             |
+//! | `j` / `k`                   | move selection            | append to filter        | scroll body ∓ 1 line        |
 //! | `g` / `G`                  | *(no-op)*                 | *(no-op)*               | jump to top / bottom        |
-//! | `Enter`                    | open the selected page    | commit the filter       | *(no-op)*                   |
-//! | `/`                        | arm the filter input      | commit (same key)       | *(no-op)*                   |
-//! | printable char             | *(reserved for M8.3)*     | append to filter        | *(no-op)*                   |
+//! | `Enter`                    | open the selected page    | adopt (open selected)   | *(no-op)*                   |
+//! | `/`                        | arm the filter input      | commit (disarm)         | *(no-op)*                   |
+//! | printable char             | move selection (`j`/`k`)  | append to filter        | *(no-op)*                   |
 //! | `Backspace`                | *(no-op)*                 | pop a char              | *(no-op)*                   |
 //! | `a`                        | open the alias manager    | *(no-op)*               | open the alias manager      |
 //! | `r`                        | open the roots manager    | *(no-op)*               | open the roots manager      |
@@ -447,9 +448,47 @@ fn read_position_note(app: &App) -> String {
 /// The filter input context: each printable char *appends* to
 /// `filter_text` and re-runs `apply_filter` (so the list re-filters as the
 /// user types — the live-preview UX `/` is usually given). Backspace pops.
-/// `/` commits (disarms). `Esc` clears. `q` quits. Nothing else is bound.
+/// `/` commits (disarms). `Esc` clears. `q` quits. Selection navigation
+/// (`↑/↓`/`Home`/`End`) and `Enter`-to-open work *live*, so a row can be
+/// picked while the filter is armed — the zsh `type → arrows-select →
+/// Enter-adopts` idiom. Arrow/Home/End are unambiguous here (they are never
+/// literal filter text), so they are safe to steal from the `printable char`
+/// arm.
 fn handle_filter_input(app: &mut App, ev: KeyEvent) -> bool {
     match ev.code {
+        // Move the selection *live* against the current filter result. The
+        // filter stays armed (so the user can keep refining after selecting);
+        // only `Enter` adopts (disarms + opens).
+        KeyCode::Up | KeyCode::Home | KeyCode::PageUp => {
+            let before = app.selected;
+            app.move_selection(-1);
+            if app.selected != before {
+                app.apply_filter();
+                app.set_info(filter_edit_note(app));
+            }
+            false
+        }
+        KeyCode::Down | KeyCode::End | KeyCode::PageDown => {
+            let before = app.selected;
+            app.move_selection(1);
+            if app.selected != before {
+                app.apply_filter();
+                app.set_info(filter_edit_note(app));
+            }
+            false
+        }
+        KeyCode::Enter => {
+            // Adopt: commit (disarm) then open the currently-selected row —
+            // the whole "select while filtering" promise in one keystroke.
+            app.filter_active = false;
+            app.apply_filter();
+            if let Err((msg, _)) = app.open_read() {
+                app.set_error(msg);
+            } else {
+                app.set_info("open page — scroll with ↑↓/jk, PgUp/PgDn, g/G · Esc back");
+            }
+            false
+        }
         KeyCode::Char('/') => {
             // Commit: disarm the input; the filter *stays applied* — the
             // user can refine it by pressing `/` again from Browse.
@@ -692,6 +731,76 @@ mod tests {
             _ => usize::MAX,
         };
         assert_eq!(after, (before + 1).min(1), "'j' navigates the list when the list is focused");
+    }
+
+    /// While the filter is armed, arrow keys move the selection *live*
+    /// (not typed into the filter), whereas `j`/`k` and other printables are
+    /// *typed* into the filter. Regression: arrows used to be swallowed as
+    /// `(no-op)` and the user could type but not select.
+    #[test]
+    fn filter_armed_arrows_navigate_and_jk_are_typed() {
+        let db = crate::tui::Db::open_in_memory_test().unwrap();
+        db.migrate().unwrap();
+        // Two pages, both matching the filter "alpha" — so the filter
+        // narrows to exactly these two and both are selectable. (Seed *before*
+        // `App::new`, which takes ownership of `db`.)
+        for name in ["alpha1", "alpha2"] {
+            let abs = format!("/root/{name}.md");
+            let id = format!("note:{name}");
+            db.conn
+                .execute(
+                    "INSERT INTO pages (abs_path, id, type, title, root, rel_path, search_required_phrase,
+                                        mtime_ns, content_hash)
+                     VALUES (?1, ?2, 'note', ?3, '/root', ?4, NULL, 0, 'x')",
+                    rusqlite::params![abs, id, name, format!("{name}.md")],
+                )
+                .unwrap();
+        }
+        let mut app = App::new(db).unwrap();
+        app.apply_filter();
+        assert_eq!(app.view.len(), 2, "two alpha* pages seeded");
+
+        // Arm the filter, type a narrowing prefix.
+        assert!(!handle_event(&mut app, key('/')));
+        assert!(app.filter_active, "filter armed");
+        for c in "alpha".chars() {
+            assert!(!handle_event(&mut app, key(c)));
+        }
+        assert_eq!(app.filter_text, "alpha", "printable chars typed into the filter");
+        assert_eq!(app.view.len(), 2, "both alpha pages still match");
+
+        // `j` must be *typed* (not a nav step) — appends to the filter and
+        // narrows the (empty) result set.
+        assert!(!handle_event(&mut app, key('j')));
+        assert_eq!(app.filter_text, "alphaj", "j is typed into the filter, not consumed for nav");
+        assert_eq!(app.view.len(), 0, "'alphaj' matches none");
+        app.filter_text.pop(); // "alpha"
+
+        // Arrows are navigation (unambiguous), so they move the selection
+        // and do NOT append to the filter.
+        app.apply_filter();
+        let start = app.selected;
+        assert!(!handle_event(&mut app, key_code_down()));
+        assert_eq!(app.selected, start.wrapping_add(1).min(1), "Down moves selection");
+        assert_eq!(app.filter_text, "alpha", "arrow did not append to the filter");
+        assert!(!handle_event(&mut app, key_code_up()));
+        assert_eq!(app.selected, 0, "Up moves selection back to row 0");
+        assert_eq!(app.filter_text, "alpha", "arrow did not append to the filter");
+
+        // Enter adopts: disarms the filter and opens the selected page.
+        assert!(!handle_event(&mut app, KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)));
+        assert!(!app.filter_active, "Enter adopts (disarms the filter)");
+        assert!(
+            matches!(&app.mode, crate::tui::Mode::Read(_)),
+            "Enter opens the selected page for reading"
+        );
+    }
+
+    fn key_code_down() -> KeyEvent {
+        KeyEvent::new(KeyCode::Down, KeyModifiers::NONE)
+    }
+    fn key_code_up() -> KeyEvent {
+        KeyEvent::new(KeyCode::Up, KeyModifiers::NONE)
     }
 
     /// The roots add form is a *path* input — `j`/`k` are common in paths
