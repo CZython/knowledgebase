@@ -140,6 +140,45 @@ fn drop_root_deregisters() {
     );
 }
 
+/// Q3: a root whose folder has since been *deleted* from disk. `canonicalize`
+/// of the argument then fails, so `drop-root` must fall back to matching the
+/// literal (registered) path and still deregister it — otherwise a removed dir
+/// would leave an unremovable orphan root behind.
+#[test]
+fn drop_root_after_folder_deleted() {
+    let s = Setup::new("droproot_missing");
+    write_page(&s, "a.md", "type: note\ntitle: A\n", "hi\n");
+    add(&s);
+    let root = s.root.to_string_lossy().into_owned();
+
+    // Confirm it was registered, then wipe the folder from disk.
+    let (code, out, err) = run_bare(&s, &["roots"]);
+    assert_eq!(code, 0, "roots stderr: {err}");
+    assert!(out.contains(&root), "registered: {out}");
+    fs::remove_dir_all(&s.root).unwrap();
+    assert!(
+        !s.root.exists(),
+        "root folder deleted before drop"
+    );
+
+    // Drop by the registered path even though the dir no longer exists: the
+    // canonicalize-failure fallback matches the literal key and deregisters.
+    let (code, out, err) = run(&s, &["drop-root", root.as_str()]);
+    assert_eq!(code, 0, "drop-root of a deleted folder must not hard-fail; stderr: {err}");
+    assert!(
+        out.contains("dropped root"),
+        "literal-match fallback should report the drop: {out}"
+    );
+
+    // And it is now gone from the roots list.
+    let (code, out, err) = run_bare(&s, &["roots"]);
+    assert_eq!(code, 0, "stderr: {err}");
+    assert!(
+        !out.contains(&root),
+        "root should be unregistered after drop: {out}"
+    );
+}
+
 // ---------------------------------------------------------------------------
 // refresh / full-rebuild
 // ---------------------------------------------------------------------------

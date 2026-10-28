@@ -61,26 +61,44 @@ pub(crate) fn cmd_roots(dbpath: Option<&Path>, json: bool) -> Kb {
 
 
 pub(crate) fn cmd_drop_root(dbpath: Option<&Path>, path: &Path, json: bool) -> Kb {
-    let canonical = std::fs::canonicalize(path)
-        .map_err(|e| (format!("{path:?}: {e}"), EXIT_ERR))?;
     let db = open_db(dbpath)?;
-    let n = db.drop_root(&canonical.to_string_lossy())
+    // `add` stored the *canonical* path, so canonicalizing the argument gives
+    // the same form on drop. But the directory may already be *gone* (moved or
+    // deleted) — `canonicalize` fails then, and the root would be undroppable.
+    // Fall back to matching the literal argument against the registered roots
+    // so the user can still unregister a root whose folder no longer exists
+    // (dropping it is exactly what you'd want to do if you removed the dir).
+    let target: String = match std::fs::canonicalize(path) {
+        Ok(c) => c.to_string_lossy().to_string(),
+        Err(_e) => {
+            let key = path.to_string_lossy().trim_end_matches('/').to_lowercase();
+            let roots = db.list_roots().map_err(|e| (format!("list roots: {e}"), EXIT_ERR))?;
+            roots
+                .into_iter()
+                .find(|r| r.to_lowercase() == key)
+                .ok_or((
+                    format!("{path:?}: no longer exists on disk and no registered root matches it"),
+                    EXIT_ERR,
+                ))?
+        }
+    };
+    let n = db.drop_root(&target)
         .map_err(|e| (format!("drop_root: {e}"), EXIT_ERR))?;
     if json {
         let summary = kb_refresh::refresh(&db)
             .map_err(|e| (format!("refresh: {e}"), EXIT_ERR))?;
         println!(
             "{{\n  \"dropped\": {},\n  \"dropped_rows\": {},\n  \"refresh\": {}\n}}",
-            jstr(&canonical.to_string_lossy()),
+            jstr(&target),
             n,
             refresh_summary_json(false, &summary),
         );
         return Ok(EXIT_OK);
     }
     if n == 0 {
-        println!("no root matched {} — nothing dropped", canonical.display());
+        println!("no root matched {target} — nothing dropped");
     } else {
-        println!("dropped root: {}", canonical.display());
+        println!("dropped root: {target}");
     }
     refresh_all(&db, false, false)
 }
