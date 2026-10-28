@@ -343,26 +343,41 @@ fn reindex_single_page_preserves_root_and_rel_path() {
         .to_string_lossy()
         .to_string();
     let (root, rel) = (
-        strings(&s.db, &format!("SELECT root FROM pages WHERE abs_path = '{abs_path}'"))
-            .pop()
-            .expect("page row present"),
-        strings(&s.db, &format!("SELECT rel_path FROM pages WHERE abs_path = '{abs_path}'"))
-            .pop()
-            .expect("rel_path present"),
+        strings(
+            &s.db,
+            &format!("SELECT root FROM pages WHERE abs_path = '{abs_path}'"),
+        )
+        .pop()
+        .expect("page row present"),
+        strings(
+            &s.db,
+            &format!("SELECT rel_path FROM pages WHERE abs_path = '{abs_path}'"),
+        )
+        .pop()
+        .expect("rel_path present"),
     );
-    assert!(!root.is_empty() && !rel.is_empty(), "precondition: row has root/rel");
+    assert!(
+        !root.is_empty() && !rel.is_empty(),
+        "precondition: row has root/rel"
+    );
 
     // The TUI commit path: build_page with empty placeholders, then upsert.
     let rec = index::build_page(&fs::canonicalize(&abs).unwrap(), "", "", false).unwrap();
     index::upsert_page(&s.db, &rec).unwrap();
 
     let (root2, rel2) = (
-        strings(&s.db, &format!("SELECT root FROM pages WHERE abs_path = '{abs_path}'"))
-            .pop()
-            .expect("page row present"),
-        strings(&s.db, &format!("SELECT rel_path FROM pages WHERE abs_path = '{abs_path}'"))
-            .pop()
-            .expect("rel_path present"),
+        strings(
+            &s.db,
+            &format!("SELECT root FROM pages WHERE abs_path = '{abs_path}'"),
+        )
+        .pop()
+        .expect("page row present"),
+        strings(
+            &s.db,
+            &format!("SELECT rel_path FROM pages WHERE abs_path = '{abs_path}'"),
+        )
+        .pop()
+        .expect("rel_path present"),
     );
     assert_eq!(root2, root, "root must be preserved, not clobbered to ''");
     assert_eq!(rel2, rel, "rel_path must be preserved, not clobbered to ''");

@@ -156,15 +156,15 @@ fn drop_root_after_folder_deleted() {
     assert_eq!(code, 0, "roots stderr: {err}");
     assert!(out.contains(&root), "registered: {out}");
     fs::remove_dir_all(&s.root).unwrap();
-    assert!(
-        !s.root.exists(),
-        "root folder deleted before drop"
-    );
+    assert!(!s.root.exists(), "root folder deleted before drop");
 
     // Drop by the registered path even though the dir no longer exists: the
     // canonicalize-failure fallback matches the literal key and deregisters.
     let (code, out, err) = run(&s, &["drop-root", root.as_str()]);
-    assert_eq!(code, 0, "drop-root of a deleted folder must not hard-fail; stderr: {err}");
+    assert_eq!(
+        code, 0,
+        "drop-root of a deleted folder must not hard-fail; stderr: {err}"
+    );
     assert!(
         out.contains("dropped root"),
         "literal-match fallback should report the drop: {out}"
