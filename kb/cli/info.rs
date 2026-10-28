@@ -172,14 +172,19 @@ pub(crate) fn cmd_stats(dbpath: Option<&Path>, json: bool) -> Kb {
         .map(|p| p.to_string_lossy().to_string())
         .unwrap_or_else(default_db_display);
     let size: u64 = std::fs::metadata(&db_path).map(|m| m.len()).unwrap_or(0);
+    // `updated_at`/`created_at` are TEXT storing epoch-seconds strings
+    // (see `now_iso8601()` in kb-db). Read the TEXT, then parse to `i64` —
+    // a malformed/empty value degrades to `null`, not a hard error, which
+    // matches the lenient `.ok().flatten()` intent here.
     let last = db.conn
         .query_row(
             "SELECT COALESCE(MAX(updated_at), MAX(created_at)) FROM pages",
             [],
-            |r| r.get::<_, Option<i64>>(0),
+            |r| r.get::<_, Option<String>>(0),
         )
         .ok()
-        .flatten();
+        .flatten()
+        .and_then(|s| s.trim().parse::<i64>().ok());
 
     if json {
         let mut root_items: Vec<String> = Vec::new();
@@ -193,8 +198,10 @@ pub(crate) fn cmd_stats(dbpath: Option<&Path>, json: bool) -> Kb {
             ro.i("pages", *count);
             root_items.push(ro.render());
         }
+        // `last` is epoch-*seconds* (`now_iso8601()` stores `as_secs()`), so
+        // emit the integer seconds verbatim — no unit conversion.
         let last_val = match last {
-            Some(ns) => (ns as f64 / 1e9).to_string(),
+            Some(sec) => sec.to_string(),
             None => "null".to_string(),
         };
         let mut totals = JObject::new();
@@ -220,8 +227,8 @@ pub(crate) fn cmd_stats(dbpath: Option<&Path>, json: bool) -> Kb {
     println!("links:        {link_count}");
     println!("tag-aliases:  {alias_count}");
     println!("db file size: {size} bytes ({db_path})");
-    if let Some(ns) = last {
-        println!("last touch:   {:.1}s since unix epoch", ns as f64 / 1e9);
+    if let Some(sec) = last {
+        println!("last touch:   {sec} s since unix epoch");
     } else {
         println!("last touch:   (never)");
     }
