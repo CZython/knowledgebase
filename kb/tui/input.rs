@@ -63,6 +63,7 @@ pub fn handle_event(app: &mut App, ev: KeyEvent) -> bool {
         crate::tui::Mode::Edit(_) => handle_edit(app, ev),
         crate::tui::Mode::Alias(_) => handle_alias(app, ev),
         crate::tui::Mode::Roots(_) => handle_roots(app, ev),
+        crate::tui::Mode::Search(_) => handle_search(app, ev),
     }
 }
 
@@ -151,6 +152,14 @@ fn handle_browse(app: &mut App, ev: KeyEvent) -> bool {
                 app.set_error(msg);
             } else {
                 app.set_info("roots — Tab list/form · Enter add · x drop · Esc back");
+            }
+            false
+        }
+        // `s` opens the Search mode (M8.4): full FTS5 power search with
+        // inline tag completion.
+        KeyCode::Char('s') => {
+            if let Err((msg, _)) = app.open_search() {
+                app.set_error(msg);
             }
             false
         }
@@ -672,7 +681,93 @@ fn handle_roots(app: &mut App, ev: KeyEvent) -> bool {
     }
 }
 
-/// A live status while editing the filter: "filter 'abc' → 4 page(s)
+/// The **Search** mode's key-binding table (M8.4):
+///
+/// | key           | effect                                              |
+/// |---------------|-----------------------------------------------------|
+/// | `q` / `C-c`   | quit the TUI                                        |
+/// | `Esc`         | back to Browse (selection preserved)                |
+/// | `↑`/`↓`       | move result selection **+** tag-suggestion selection|
+/// | `j`/`k`       | type into the query buffer                          |
+/// | any printable | type into the query buffer                          |
+/// | `Backspace`   | pop a char from the query buffer                    |
+/// | `Tab`         | inject the highlighted tag suggestion into the query|
+/// | `Enter`       | open the selected search result in Read mode        |
+///
+/// The two panes (results + tag suggestions) are navigated in *lockstep*
+/// — Up/Down bumps both cursors. This is the Figma-command-palette idiom
+/// for "primary list + secondary completion list" and keeps the
+/// navigation rules trivial to state: arrows always move, letters always
+/// type, Tab always injects.
+fn handle_search(app: &mut App, ev: KeyEvent) -> bool {
+    match ev.code {
+        KeyCode::Char('q') => true,
+        KeyCode::Char('c') if ev.modifiers.contains(KeyModifiers::CONTROL) => true,
+        KeyCode::Esc => {
+            app.close_search();
+            false
+        }
+        KeyCode::Up => {
+            app.search_move(-1);
+            app.search_tag_move(-1);
+            false
+        }
+        KeyCode::Down => {
+            app.search_move(1);
+            app.search_tag_move(1);
+            false
+        }
+        KeyCode::Home => {
+            app.search_tag_move(-10_000); // clamp to top of tag list
+            if let crate::tui::Mode::Search(s) = &mut app.mode {
+                if let Some(r) = &mut s.results {
+                    if !r.is_empty() {
+                        s.sel = 0;
+                    }
+                }
+            }
+            false
+        }
+        KeyCode::End => {
+            app.search_tag_move(10_000); // clamp to bottom of tag list
+            if let crate::tui::Mode::Search(s) = &mut app.mode {
+                if let Some(r) = &mut s.results {
+                    if !r.is_empty() {
+                        s.sel = r.len() - 1;
+                    }
+                }
+            }
+            false
+        }
+        KeyCode::Tab => {
+            // If there are tag suggestions, Tab injects the highlighted
+            // one; otherwise Tab is a no-op (no tag context to complete
+            // — the user can still type `tag:` to start one).
+            let has_sugs = matches!(&app.mode, crate::tui::Mode::Search(s) if !s.tag_sugs.is_empty());
+            if has_sugs {
+                app.search_inject_tag();
+            } else {
+                app.set_info("no tag at the end of the query — type `tag:` first");
+            }
+            false
+        }
+        KeyCode::Enter => {
+            if let Err((msg, _)) = app.search_open() {
+                app.set_error(msg);
+            }
+            false
+        }
+        KeyCode::Backspace => {
+            app.search_backspace();
+            false
+        }
+        KeyCode::Char(c) => {
+            app.search_type(c);
+            false
+        }
+        _ => false,
+    }
+}
 /// (type / to commit, Esc to clear)".
 fn filter_edit_note(app: &App) -> String {
     if app.filter_text.is_empty() {
@@ -826,5 +921,104 @@ mod tests {
         };
         assert_eq!(text, path, "every char of the path, including 'j' and 'k', must be typed");
         let _ = std::fs::remove_dir_all(&path);
+    }
+
+    /// The Search mode (M8.4) full loop: `s` arms Search; typing a partial
+    /// tag (`tag:se`) populates the suggestion list; `Down` moves the
+    /// suggestion cursor; `Tab` injects the highlighted tag into the query
+    /// (replacing the `tag:se` partial); `Esc` pops back to Browse.
+    /// Exercises the input dispatch for every state transition in one test
+    /// (the *rendering* of the two panes is `draw_search`'s concern,
+    /// covered by `render`'s own test).
+    #[test]
+    fn search_full_flow_type_tab_inject_esc_back() {
+        let db = crate::tui::Db::open_in_memory_test().unwrap();
+        db.migrate().unwrap();
+        // Seed the tag corpus + an alias (so the suggestion list has
+        // content to navigate).
+        db.conn
+            .execute(
+                "INSERT INTO page_tags(abs_path, tag) VALUES ('/a.md', 'security'),
+                 ('/b.md', 'secret'), ('/c.md', 'llm')",
+                [],
+            )
+            .unwrap();
+        db.conn
+            .execute(
+                "INSERT INTO tag_aliases(alias, canonical) VALUES ('sec', 'security')",
+                [],
+            )
+            .unwrap();
+        let mut app = App::new(db).unwrap();
+
+        // `s` arms Search.
+        assert!(!handle_event(&mut app, key('s')));
+        assert!(matches!(&app.mode, crate::tui::Mode::Search(_)), "s opens Search");
+
+        // Type the partial tag `tag:se`. Each char routes through
+        // `search_type` → `search_commit` → `run_search_bundle`.
+        for c in "tag:se".chars() {
+            assert!(!handle_event(&mut app, key(c)));
+        }
+        match &app.mode {
+            crate::tui::Mode::Search(s) => {
+                assert_eq!(s.query, "tag:se");
+                assert!(!s.tag_sugs.is_empty(), "a partial tag must produce suggestions");
+                assert!(
+                    s.tag_sugs.iter().any(|t| t.canonical == "security"),
+                    "the `sec → security` alias must surface for partial `se`"
+                );
+            }
+            _ => panic!("still in Search mode"),
+        }
+
+        // `Down` moves the suggestion cursor (arrows navigate both panes).
+        // Record the *before* cursor so we can assert it actually advanced.
+        let sel_before = match &app.mode {
+            crate::tui::Mode::Search(s) => s.tag_sel,
+            _ => panic!("still in Search mode"),
+        };
+        let n_sugs = match &app.mode {
+            crate::tui::Mode::Search(s) => s.tag_sugs.len(),
+            _ => panic!("still in Search mode"),
+        };
+        assert!(!handle_event(&mut app, KeyEvent::new(KeyCode::Down, KeyModifiers::NONE)));
+        match &app.mode {
+            crate::tui::Mode::Search(s) => {
+                if n_sugs > 1 {
+                    assert_eq!(s.tag_sel, 1, "Down advanced the suggestion cursor");
+                } else {
+                    assert_eq!(s.tag_sel, sel_before, "single-suggestion list clamps at the end");
+                }
+            }
+            _ => panic!("still in Search mode"),
+        }
+
+        // `Tab` injects the highlighted suggestion into the query.
+        assert!(!handle_event(&mut app, KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE)));
+        match &app.mode {
+            crate::tui::Mode::Search(s) => {
+                // Whatever suggestion was highlighted, the query now ends
+                // with a *complete* `tag:` token + trailing space, and the
+                // suggestion list is empty (no `tag:` partial at the tail).
+                assert!(
+                    s.query.ends_with(' '),
+                    "the injected query should end with a trailing space"
+                );
+                assert!(!s.tag_sugs.iter().any(|t| t.canonical.is_empty()), "suggestions rebuilt");
+                assert!(
+                    s.query.contains("tag:"),
+                    "the query must still contain the `tag:` token"
+                );
+            }
+            _ => panic!("still in Search mode"),
+        }
+
+        // `Esc` pops back to Browse.
+        assert!(!handle_event(&mut app, KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE)));
+        assert!(
+            matches!(&app.mode, crate::tui::Mode::Browse),
+            "Esc pops back to Browse"
+        );
     }
 }

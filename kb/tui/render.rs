@@ -57,6 +57,7 @@ pub fn draw(f: &mut Frame, app: &App) {
         Mode::Edit(es) => draw_edit(f, app, es, area),
         Mode::Alias(ast) => draw_alias(f, app, ast, area),
         Mode::Roots(rs) => draw_roots(f, app, rs, area),
+        Mode::Search(ss) => draw_search(f, app, ss, area),
     }
 }
 
@@ -750,6 +751,112 @@ fn draw_roots(
     f.render_widget(input_widget, panes[1]);
 
     render_status_bar(f, app, chunks[2]);
+}
+
+/// The **Search** mode (M8.4): a command-palette layout over the full
+/// FTS5 engine. Three rows:
+/// ```text
+///  header:  kb tui — search (n result(s), m tag hint(s))
+///  row 1:   query prompt (full width)
+///  row 2:   results (left, ~70%) | tag suggestions (right, ~30%)
+///  status bar
+/// ```
+///
+/// The results pane mirrors Browse's row shape (gate marker · id ·
+/// rel_path) so the two modes read identically; only the ordering
+/// differs (FTS relevance vs alphabetical). The tag-suggest pane lists
+/// `alias → canonical` lines so the user sees *which* tag they are
+/// about to inject.
+fn draw_search(
+    f: &mut Frame,
+    app: &App,
+    ss: &crate::tui::SearchState,
+    area: ratatui::layout::Rect,
+) {
+    use ratatui::widgets::{List as RatList, ListItem, ListState};
+
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(1), // header
+            Constraint::Length(3), // query prompt line (borders eat 2 cells)
+            Constraint::Min(1),    // results | tag suggestions
+            Constraint::Length(1), // status
+        ])
+        .split(area);
+
+    let n_res = ss.results.as_ref().map_or(0, |r| r.len());
+    let header = Paragraph::new(format!(
+        "  kb tui — search · {n_res} result(s) · {} tag hint(s)  (↑↓ move · Tab inject tag · Enter open · Esc back)",
+        ss.tag_sugs.len()
+    ))
+    .style(app.palette.label);
+    f.render_widget(header, chunks[0]);
+
+    // Query prompt: the buffer text after a "❯ " caret. No borders
+    // (a bordered box looks like a list and confuses the eye — this is
+    // a single input line).
+    let prompt = format!("❯ {}", ss.query);
+    let prompt_widget = Paragraph::new(prompt).style(app.palette.default);
+    f.render_widget(prompt_widget, chunks[1]);
+
+    // The horizontal split: results (70) | tag suggestions (30).
+    let panes = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([Constraint::Percentage(70), Constraint::Percentage(30)])
+        .split(chunks[2]);
+
+    let row_width = panes[0].width.saturating_sub(2) as usize;
+    let items: Vec<ListItem> = ss
+        .results
+        .as_ref()
+        .map(|res| {
+            res.iter()
+                .map(|r| ListItem::new(Line::from(browse_row(&app.palette, r, row_width))))
+                .collect()
+        })
+        .unwrap_or_default();
+    let list_title = if ss.results.as_ref().is_some_and(|r| r.is_empty()) {
+        " 0 result — type a query".to_string()
+    } else {
+        format!(" {n_res} result(s) — FTS5")
+    };
+    let widget = RatList::new(items)
+        .highlight_style(app.palette.selection)
+        .block(Block::default().borders(Borders::ALL).title(list_title));
+    let mut list_state = ListState::default();
+    if n_res > 0 {
+        list_state.select(Some(ss.sel));
+    }
+    f.render_stateful_widget(widget, panes[0], &mut list_state);
+
+    // Tag suggestions pane: each row is `  <display>` (the `→ canonical`
+    // hint is part of the display string the App computed — `alias →
+    // canonical` or a bare tag).
+    let sug_width = panes[1].width.saturating_sub(2) as usize;
+    let sug_items: Vec<ListItem> = ss
+        .tag_sugs
+        .iter()
+        .map(|s| ListItem::new(Line::from(Span::styled(
+            truncate(&s.display, sug_width),
+            app.palette.dim,
+        ))))
+        .collect();
+    let sug_title = if ss.tag_sugs.is_empty() {
+        " tag hints — type `tag:` in the query".to_string()
+    } else {
+        format!(" {0} tag hint(s) — Tab injects", ss.tag_sugs.len())
+    };
+    let sug_widget = RatList::new(sug_items)
+        .highlight_style(app.palette.selection)
+        .block(Block::default().borders(Borders::ALL).title(sug_title));
+    let mut sug_state = ListState::default();
+    if !ss.tag_sugs.is_empty() {
+        sug_state.select(Some(ss.tag_sel));
+    }
+    f.render_stateful_widget(sug_widget, panes[1], &mut sug_state);
+
+    render_status_bar(f, app, chunks[3]);
 }
 
 /// The number of body lines to render in the viewport. The pane height is

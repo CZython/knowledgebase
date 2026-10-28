@@ -193,6 +193,47 @@ pub enum Mode {
     Alias(AliasState),
     /// Manage registered roots: list, add, drop. M8.3.
     Roots(RootsState),
+    /// Power search (M8.4): full FTS5 search_grammar + live tag
+    /// suggestions. Armed by `s` from Browse.
+    Search(SearchState),
+}
+
+/// The **Search** mode (M8.4): full `search_grammar` FTS5 + live tag
+/// suggestions. The query buffer supports the same grammar `kb search`
+/// does (`tag:…`, `type:…`, `not …`, `"quoted phrase"`, etc.). Live
+/// results appear in the left pane; tag suggestions (with alias→canonical
+/// display) appear in the right pane while the user is typing a `tag:`
+/// token.
+///
+/// Keybindings: type → append to query · ↑↓/jk → move selection in
+/// results · Tab → inject the highlighted tag suggestion · Enter → open
+/// selected page · Esc → back to Browse.
+#[derive(Debug, Clone)]
+pub struct SearchState {
+    /// The query buffer the user is typing (full search_grammar).
+    pub query: String,
+    /// Live results from `search_rows`, re-computed after every query
+    /// change. `None` = the query was empty (nothing to search).
+    pub results: Option<Vec<PageRow>>,
+    /// The selected index into `results` (0 when no results).
+    pub sel: usize,
+    /// Live tag suggestions for the current `tag:partial` token. Empty
+    /// when the trailing token is not a `tag:` prefix.
+    pub tag_sugs: Vec<TagSuggestion>,
+    /// The highlighted tag suggestion (0 when `tag_sugs` is empty).
+    pub tag_sel: usize,
+}
+
+/// A single row in the tag-suggestions pane: the display label (what the
+/// user sees) and the canonical value to inject into the query.
+#[derive(Debug, Clone)]
+pub struct TagSuggestion {
+    /// What the user sees in the suggestion list (e.g. `security` or
+    /// `sec → security` for aliases).
+    pub display: String,
+    /// The value to inject on Tab (the canonical form, e.g. `security`).
+    /// Multi-word values are quoted at injection time.
+    pub canonical: String,
 }
 
 /// A snapshot of a page's *body* in the Read mode (loaded from the DB on
@@ -1936,6 +1977,153 @@ impl App {
     }
 
 
+    // ===================================================================
+    //  M8.4 — Search mode
+    //  ===================================================================
+
+    /// Enter Search mode (armed by `s` in Browse). Starts with an empty
+    /// query buffer; the user types to build a `search_grammar` query.
+    pub fn open_search(&mut self) -> KbResult<()> {
+        self.mode = Mode::Search(SearchState {
+            query: String::new(),
+            results: None,
+            sel: 0,
+            tag_sugs: Vec::new(),
+            tag_sel: 0,
+        });
+        self.set_info("type a search query (tag: llm · type: wiki · quoted phrase) · ↑↓ results · Tab inject tag · Enter open · Esc back");
+        Ok(())
+    }
+
+    /// Leave Search mode, returning to Browse (selection preserved).
+    pub fn close_search(&mut self) {
+        self.mode = Mode::Browse;
+        let note = self.position_note();
+        self.set_info(note);
+    }
+
+    /// Append a printable char to the search query buffer, then re-run
+    /// the search + tag suggestions.
+    pub fn search_type(&mut self, c: char) {
+        if let Mode::Search(s) = &mut self.mode {
+            s.query.push(c);
+        } else {
+            return;
+        }
+        self.search_commit();
+    }
+
+    /// Backspace: pop one char from the query buffer, then re-run search
+    /// + tag suggestions.
+    pub fn search_backspace(&mut self) {
+        if let Mode::Search(s) = &mut self.mode {
+            s.query.pop();
+        } else {
+            return;
+        }
+        self.search_commit();
+    }
+
+    /// Re-run search + tag suggestions against the *current* query buffer
+    /// and fold the result back into the `Search` state. Called once per
+    /// buffer mutation (after `search_type` / `search_backspace` /
+    /// `search_inject_tag`).
+    fn search_commit(&mut self) {
+        let query = match &self.mode {
+            Mode::Search(s) => s.query.clone(),
+            _ => return,
+        };
+        let (results, tag_sugs) = run_search_bundle(&self.db, &query);
+        if let Mode::Search(s) = &mut self.mode {
+            s.results = Some(results);
+            let n = s.results.as_ref().map_or(0, |r| r.len());
+            s.sel = if n == 0 { 0 } else { s.sel.min(n - 1) };
+            s.tag_sugs = tag_sugs;
+            s.tag_sel = 0usize;
+        }
+    }
+
+    /// Move result selection down by 1 (clamped). No-op when no results.
+    pub fn search_move(&mut self, delta: isize) {
+        if let Mode::Search(s) = &mut self.mode {
+            if let Some(ref mut results) = s.results {
+                if results.is_empty() {
+                    return;
+                }
+                let n = results.len() as isize;
+                s.sel = (s.sel as isize + delta).clamp(0, n - 1) as usize;
+            }
+        }
+    }
+
+    /// Navigate tag suggestions up/down (only when `tag_sugs` is non-empty).
+    pub fn search_tag_move(&mut self, delta: isize) {
+        if let Mode::Search(s) = &mut self.mode {
+            if s.tag_sugs.is_empty() {
+                return;
+            }
+            let n = s.tag_sugs.len() as isize;
+            s.tag_sel = (s.tag_sel as isize + delta).clamp(0, n - 1) as usize;
+        }
+    }
+
+    /// Inject the highlighted tag suggestion into the query by replacing
+    /// the trailing `tag:partial` token with `tag:<canonical>` (quoted if
+    /// the canonical value contains a space or quote), then append a
+    /// trailing space to exit tag-completion mode.
+    pub fn search_inject_tag(&mut self) {
+        if let Mode::Search(s) = &mut self.mode {
+            let sug = match s.tag_sugs.get(s.tag_sel) {
+                Some(sug) => sug.clone(),
+                None => {
+                    self.set_info("no tag suggestion highlighted");
+                    return;
+                }
+            };
+            let new_token = if sug.canonical.contains(' ') || sug.canonical.contains('"') {
+                format!("tag:\"{}\"", sug.canonical)
+            } else {
+                format!("tag:{}", sug.canonical)
+            };
+            let old = s.query.clone();
+            s.query = inject_tag(&old, &new_token);
+        }
+        self.search_commit();
+        // (Display message is set inside `search_commit` via status; the
+        // caller can see the updated query in the header.)
+    }
+
+    /// Open the selected search result in Read mode (same as Browse's
+    /// `Enter`). No-op when there are no results.
+    pub fn search_open(&mut self) -> KbResult<()> {
+        let (abs_path, id) = {
+            let s = match &self.mode {
+                Mode::Search(s) => s,
+                _ => return Ok(()),
+            };
+            match s.results.as_ref().and_then(|r| r.get(s.sel)) {
+                Some(r) => (r.abs_path.clone(), r.id.clone()),
+                None => {
+                    self.set_info("no search result selected");
+                    return Ok(());
+                }
+            }
+        };
+        let (body, outline) = load_body(&self.db, &abs_path)?;
+        let row_idx = self.rows.iter().position(|r| r.abs_path == abs_path).unwrap_or(0);
+        self.mode = Mode::Read(ReadState {
+            row_idx,
+            id,
+            body,
+            outline,
+            scroll_top: 0,
+        });
+        self.set_info("open page — ↑↓ scroll · Esc back");
+        Ok(())
+    }
+
+    // ===================================================================
+
     /// Set the status bar to an info/success/error message. The *only*
     /// thing that writes `app.status` (so the "one writer" invariant is
     /// grep-able): these three methods.
@@ -2009,6 +2197,224 @@ pub fn suggestions_for(corpus: &[String], buffer: &str) -> Vec<String> {
             out.push(tok.clone());
         }
     }
+    out
+}
+
+// ===================================================================
+//  M8.4 — Search mode helpers (pure + DB-bound)
+//  ===================================================================
+
+/// The whole "run the search bundle" step for the TUI: convert the FTS
+/// rows into `PageRow`s (with tags + gates for display) and compute the
+/// live tag suggestions. Pure over its inputs — `db` is the only state.
+fn run_search_bundle(db: &Db, query: &str) -> (Vec<PageRow>, Vec<TagSuggestion>) {
+    let trimmed = query.trim();
+    if trimmed.is_empty() {
+        return (Vec::new(), Vec::new());
+    }
+    let rows = match crate::cli::search::search_rows(db, trimmed, 100) {
+        Ok((rows, _)) => rows,
+        Err(_) => Vec::new(),
+    };
+    let pages = search_rows_to_pages(db, &rows);
+    let tag_sugs = trailing_tag_partial(query)
+        .map(|p| suggest_tags(db, &p))
+        .unwrap_or_default();
+    (pages, tag_sugs)
+}
+
+/// Convert the CLI's `SearchRow`s into TUI `PageRow`s, attaching the
+/// tags + gates lists (the same batched load Browse uses — `page_tags`
+/// and `page_gates`, keyed by `abs_path`). An empty `rows` slice returns
+/// an empty vec (not an error).
+fn search_rows_to_pages(db: &Db, rows: &[crate::cli::search::SearchRow]) -> Vec<PageRow> {
+    if rows.is_empty() {
+        return Vec::new();
+    }
+    // Batched tags + gates load (the same two queries `list_pages` runs).
+    fn batch_load(db: &Db) -> (std::collections::HashMap<String, Vec<String>>, std::collections::HashMap<String, Vec<String>>) {
+        let mut tags_by: std::collections::HashMap<String, Vec<String>> = Default::default();
+        if let Ok(mut st) = db.conn.prepare("SELECT abs_path, tag FROM page_tags ORDER BY tag") {
+            if let Ok(items) = st
+                .query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))
+                .and_then(|rows| rows.collect::<Result<Vec<_>, _>>())
+            {
+                for (ap, tag) in items {
+                    tags_by.entry(ap).or_default().push(tag);
+                }
+            }
+        }
+        let mut gates_by: std::collections::HashMap<String, Vec<String>> = Default::default();
+        if let Ok(mut st) = db.conn.prepare("SELECT abs_path, term FROM page_gates ORDER BY term") {
+            if let Ok(items) = st
+                .query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))
+                .and_then(|rows| rows.collect::<Result<Vec<_>, _>>())
+            {
+                for (ap, term) in items {
+                    gates_by.entry(ap).or_default().push(term);
+                }
+            }
+        }
+        (tags_by, gates_by)
+    }
+    let (tags_by, gates_by) = batch_load(db);
+    rows.iter()
+        .map(|r| PageRow {
+            abs_path: r.abs_path.clone(),
+            id: r.id.clone(),
+            pt: r.pt.clone(),
+            title: r.title.clone().unwrap_or_default(),
+            rel_path: r.rel_path.clone(),
+            root: r.root.clone(),
+            tags: tags_by.get(&r.abs_path).cloned().unwrap_or_default(),
+            gates: gates_by.get(&r.abs_path).cloned().unwrap_or_default(),
+        })
+        .collect()
+}
+
+/// Extract the **partial tag value** being typed at the tail of the
+/// query — the text after the *last* whitespace-separated token's
+/// `tag:` prefix (so `tag:sec` → `sec`, `tag:` → `""`, `llm tag:sec`
+/// → `sec`). Returns `None` when the trailing token is not a `tag:`
+/// token (e.g. a completed tag with a trailing space, or no `tag:` at
+/// all).
+///
+/// The "trailing token" is the span from the last whitespace char to
+/// the end of the buffer (whitespace = anything in `char::is_whitespace`
+/// for the ASCII subset — the buffer is user-typed text, not yet a
+/// parse tree). A *quoted* tag token (`tag:"large language"`) does not
+/// count as a partial (the quote is the boundary).
+fn trailing_tag_partial(query: &str) -> Option<String> {
+    let tail = query.rsplit(char::is_whitespace).next().unwrap_or("");
+    if let Some(rest) = tail.strip_prefix("tag:") {
+        if rest.starts_with('"') {
+            None // a quoted tag is a completed phrase, not a partial
+        } else {
+            Some(rest.to_string())
+        }
+    } else {
+        None
+    }
+}
+
+/// Compute the tag candidates to show in the right pane: every distinct
+/// tag in the corpus (from `page_tags`) that *case-insensitively
+/// contains* the partial, plus every alias→canonical pair whose **alias
+/// or canonical** contains the partial (displayed as `alias →
+/// canonical`). Order: partial matches first (the user's typing wins),
+/// then the full corpus (stable, alphabetical).
+///
+/// `partial` is the text after `tag:` (possibly empty → whole corpus).
+fn suggest_tags(db: &Db, partial: &str) -> Vec<TagSuggestion> {
+    let needle = partial.to_lowercase();
+
+    // All distinct tags in the corpus.
+    let mut tags: Vec<String> = Vec::new();
+    if let Ok(mut st) = db.conn.prepare("SELECT DISTINCT tag FROM page_tags ORDER BY tag") {
+        if let Ok(items) = st.query_map([], |r| r.get::<_, String>(0)).and_then(|rows| rows.collect::<Result<Vec<_>, _>>()) {
+            tags = items;
+        }
+    }
+    // All aliases (alias, canonical) — sorted by alias for stable output.
+    let mut aliases: Vec<(String, String)> = Vec::new();
+    if let Ok(mut st) = db
+        .conn
+        .prepare("SELECT alias, canonical FROM tag_aliases ORDER BY alias")
+    {
+        if let Ok(items) = st
+            .query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))
+            .and_then(|rows| rows.collect::<Result<Vec<_>, _>>())
+        {
+            aliases = items;
+        }
+    }
+
+    // Filter by the partial (case-insensitive substring — the same rule
+    // as the Edit-mode's `suggestions_for`).
+    let tags_f: Vec<&String> = if needle.is_empty() {
+        tags.iter().collect()
+    } else {
+        tags.iter()
+            .filter(|t| t.to_lowercase().contains(&needle))
+            .collect()
+    };
+    let aliases_f: Vec<&(String, String)> = if needle.is_empty() {
+        aliases.iter().collect()
+    } else {
+        aliases
+            .iter()
+            .filter(|(a, c)| a.to_lowercase().contains(&needle) || c.to_lowercase().contains(&needle))
+            .collect()
+    };
+
+    // The suggestion list: partial-matching aliases first (display:
+    // `alias → canonical`), then partial-matching tags (display: the tag
+    // itself). Dedup on the canonical form; keep first occurrence.
+    let mut seen_canon = std::collections::HashSet::new();
+    let mut out: Vec<TagSuggestion> = Vec::new();
+    for (a, c) in aliases_f {
+        let key = c.to_lowercase();
+        if seen_canon.insert(key) {
+            out.push(TagSuggestion {
+                display: format!("{a} → {c}"),
+                canonical: c.clone(),
+            });
+        }
+    }
+    for t in tags_f {
+        let key = t.to_lowercase();
+        if seen_canon.insert(key) {
+            out.push(TagSuggestion {
+                display: t.clone(),
+                canonical: t.clone(),
+            });
+        }
+    }
+    out
+}
+
+/// Replace the trailing **`tag:…` token** (if one is the last
+/// whitespace-separated token) in `query` with `new_token`, or append
+/// `new_token` as a new token when the last token is free-text. The
+/// buffer always ends with exactly one trailing space, and runs of
+/// interior whitespace are normalised to single spaces. Pure over its
+/// inputs (no `App` state).
+///
+/// Cases:
+/// - `("", tag)`                     → `"tag "`
+/// - `("tag:se", tag)`               → `"tag "`         (the tag token is replaced)
+/// - `("llm tag:se", tag)`           → `"llm tag "`
+/// - `("llm", tag)`                  → `"llm tag "`     (free-text token kept)
+/// - `("llm ", tag)`                 → `"llm tag "`     (trailing-normalised)
+fn inject_tag(query: &str, new_token: &str) -> String {
+    // Tokenise on any whitespace, drop empties. This naturally collapses
+    // multiple spaces between tokens (the input buffer is user-typed;
+    // `search_grammar` will re-split the same way, so normalising is safe).
+    let tokens: Vec<&str> = query
+        .split(char::is_whitespace)
+        .filter(|t| !t.is_empty())
+        .collect();
+    if tokens.is_empty() {
+        return format!("{new_token} ");
+    }
+    let last = tokens.last().copied().expect("tokens non-empty");
+    let leading: Vec<&str> = tokens[..tokens.len() - 1].to_vec();
+    let mut out = String::with_capacity(query.len() + new_token.len() + 2);
+    if !leading.is_empty() {
+        out.push_str(&leading.join(" "));
+        out.push(' ');
+    }
+    if last.starts_with("tag:") {
+        // The trailing token IS the tag → replace it with the new tag.
+        out.push_str(new_token);
+    } else {
+        // The trailing token is free-text (e.g. the user typed "llm" and
+        // then hit Tab) → preserve it and append the tag as a new token.
+        out.push_str(last);
+        out.push(' ');
+        out.push_str(new_token);
+    }
+    out.push(' ');
     out
 }
 
@@ -4466,5 +4872,228 @@ mod tests {
         assert!(app.enter_action().is_ok());
         let on_disk = std::fs::read_to_string(&path).unwrap();
         assert!(on_disk.contains("Hello World"), "the title is unchanged on disk (net-zero edit)");
+    }
+
+    // ===================================================================
+    //  M8.4 Search helpers
+    // ===================================================================
+
+    /// `trailing_tag_partial` extracts the substring after the **last**
+    /// whitespace token's `tag:` prefix, or `None` when the trailing token
+    /// is not a `tag:` token. Pure — no `App` state.
+    #[test]
+    fn trailing_tag_partial_extracts_substring_after_tag_prefix() {
+        assert_eq!(trailing_tag_partial("tag:sec"), Some("sec".into()));
+        assert_eq!(trailing_tag_partial("tag:"), Some(String::new()));
+        assert_eq!(trailing_tag_partial("llm tag:sec"), Some("sec".into()));
+        assert_eq!(trailing_tag_partial("tag:sec "), None, "a trailing space means the token is complete — no partial");
+        assert_eq!(trailing_tag_partial("tag:sec llm"), None, "the trailing token is not a tag: token");
+        assert_eq!(trailing_tag_partial("tag:\"large language\""), None, "a quoted tag is a completed phrase, not a partial");
+        assert_eq!(trailing_tag_partial(""), None, "empty buffer has no token");
+        assert_eq!(trailing_tag_partial("  "), None, "whitespace-only buffer has no token");
+    }
+
+    /// `inject_tag` replaces the trailing **`tag:…` token** (if it is the
+    /// last whitespace-separated token) with `new_token`, or appends
+    /// `new_token` as a new token when the last token is free-text. Pure —
+    /// no `App` state.
+    ///
+    /// Note: the "completed tag with trailing space" case (`"tag:sec "`)
+    /// is unreachable in practice — `trailing_tag_partial` returns `None`
+    /// for a buffer ending in a space, so the suggestion list is empty
+    /// and Tab is a no-op before `inject_tag` is ever called. The function
+    /// still handles it correctly if it did arrive (replaces the token),
+    /// so we assert that.
+    #[test]
+    fn inject_tag_replaces_trailing_tag_token() {
+        // Trailing token IS the partial tag → replace it.
+        assert_eq!(inject_tag("tag:se", "tag:security"), "tag:security ");
+        assert_eq!(inject_tag("llm tag:se", "tag:security"), "llm tag:security ");
+        // Empty buffer → the tag is the whole buffer.
+        assert_eq!(inject_tag("", "tag:security"), "tag:security ");
+        // Trailing token is free-text → preserve it, append the tag.
+        assert_eq!(
+            inject_tag("llm", "tag:security"),
+            "llm tag:security ",
+            "free-text trailing token is preserved; the tag is a new token"
+        );
+        assert_eq!(
+            inject_tag("llm ", "tag:security"),
+            "llm tag:security ",
+            "trailing-normalised"
+        );
+        // A tag-token at the end (replaces it) — this is the "second tag"
+        // case: the user already has a tag, types another `tag:` partial,
+        // and then Tabs.
+        assert_eq!(
+            inject_tag("tag:sec tag:ll", "tag:llm"),
+            "tag:sec tag:llm ",
+            "the second (last) tag token is replaced; the first is preserved"
+        );
+    }
+
+    /// `suggest_tags` over an in-memory DB: the **partial** substring
+    /// match (case-insensitive) is what surfaces; an alias whose
+    /// canonical or alias text contains the partial is surfaced in
+    /// `alias → canonical` display.
+    #[test]
+    fn suggest_tags_filters_corpus_and_surfaces_aliases() {
+        let db = Db::open_in_memory_test().unwrap();
+        db.migrate().unwrap();
+        db.conn
+            .execute(
+                "INSERT INTO page_tags(abs_path, tag) VALUES ('/a.md', 'secret'), ('/b.md', 'security'), ('/c.md', 'llm')",
+                [],
+            )
+            .unwrap();
+        db.conn
+            .execute(
+                "INSERT INTO tag_aliases(alias, canonical) VALUES ('sec', 'security')",
+                [],
+            )
+            .unwrap();
+        let out = suggest_tags(&db, "se");
+        // Both the `sec → security` alias and the bare `security` + `secret`
+        // are candidates; the dedup key is the **canonical** form, so the
+        // alias (display `sec → security`) and the bare `security` collide
+        // on the key `security` — the alias wins (it was pushed first).
+        let canon: Vec<String> = out.iter().map(|s| s.canonical.clone()).collect();
+        let displays: Vec<String> = out.iter().map(|s| s.display.clone()).collect();
+        assert!(canon.contains(&"security".to_string()), "security must be surfaced (alias or tag)");
+        assert!(canon.contains(&"secret".to_string()), "secret must be surfaced (a bare corpus tag)");
+        // The alias display `sec → security` must survive.
+        let has_alias_display = displays.iter().any(|d| d.starts_with("sec → security"));
+        assert!(has_alias_display, "the alias display `sec → security` must survive");
+        // `llm` does NOT contain "se" — must be excluded.
+        assert!(!canon.contains(&"llm".to_string()), "llm must NOT be surfaced by partial 'se'");
+    }
+
+    /// With an *empty* partial the whole corpus surfaces (the `tag:` →
+    /// `Tab`-to-complete path).
+    #[test]
+    fn suggest_tags_empty_partial_returns_whole_corpus() {
+        let db = Db::open_in_memory_test().unwrap();
+        db.migrate().unwrap();
+        db.conn
+            .execute(
+                "INSERT INTO page_tags(abs_path, tag) VALUES ('/a.md', 'alpha'), ('/b.md', 'beta')",
+                [],
+            )
+            .unwrap();
+        let out = suggest_tags(&db, "");
+        assert_eq!(out.len(), 2);
+        assert!(out.iter().any(|s| s.canonical == "alpha"));
+        assert!(out.iter().any(|s| s.canonical == "beta"));
+    }
+
+    /// `search_rows_to_pages` attaches the **real** tags + gates (from
+    /// `page_tags` / `page_gates`) to each FTS-matched row, keyed by
+    /// `abs_path`. This is the one TUI-specific glue path between the CLI's
+    /// `search_rows` and the Browse-parity `PageRow` shape — it was only
+    /// compile-verified before. A row with *no* tags/gates in the DB must
+    /// get empty lists (not a DB error, not a panic). Pure over its inputs.
+    #[test]
+    fn search_rows_to_pages_attaches_tags_and_gates_by_abs_path() {
+        use crate::cli::search::SearchRow;
+        let db = Db::open_in_memory_test().unwrap();
+        db.migrate().unwrap();
+        // Two pages: /x.md has both tags + a gate; /y.md has neither.
+        db.conn
+            .execute(
+                "INSERT INTO page_tags(abs_path, tag) VALUES
+                 ('/x.md', 'llm'), ('/x.md', 'security'),
+                 ('/z.md', 'unrelated')",
+                [],
+            )
+            .unwrap();
+        db.conn
+            .execute(
+                "INSERT INTO page_gates(abs_path, term) VALUES ('/x.md', 'secret sauce')",
+                [],
+            )
+            .unwrap();
+
+        // A faithful `SearchRow` (the same field set `search_rows` binds),
+        // for a matched /x.md and an unmatched /y.md.
+        let rows = vec![
+            SearchRow {
+                abs_path: "/x.md".into(),
+                id: "wiki:x".into(),
+                pt: "wiki".into(),
+                title: Some("X".into()),
+                description: None,
+                root: "/root".into(),
+                rel_path: "x.md".into(),
+                search_required_phrase: Some("secret sauce".into()),
+                score: Some(1.5),
+            },
+            SearchRow {
+                abs_path: "/y.md".into(),
+                id: "note:y".into(),
+                pt: "note".into(),
+                title: None, // a row with no title must not error
+                description: None,
+                root: "/root".into(),
+                rel_path: "y.md".into(),
+                search_required_phrase: None,
+                score: None,
+            },
+        ];
+
+        let pages = search_rows_to_pages(&db, &rows);
+        assert_eq!(pages.len(), 2, "every matched row becomes a PageRow");
+
+        let x = pages.iter().find(|p| p.abs_path == "/x.md").expect("/x.md present");
+        // Tags attached in DB order (ORDER BY tag: llm, security).
+        assert_eq!(x.tags, vec!["llm", "security"], "tags attached by abs_path");
+        assert_eq!(x.gates, vec!["secret sauce"], "gate(s) attached by abs_path");
+
+        let y = pages.iter().find(|p| p.abs_path == "/y.md").expect("/y.md present");
+        assert!(y.tags.is_empty(), "a row with no tags gets empty tags (not an error)");
+        assert!(y.gates.is_empty(), "a row with no gates gets empty gates (not an error)");
+        assert_eq!(y.title, "", "a None title degrades to the empty string");
+
+        // An empty input slice returns an empty vec (total: no DB call needed).
+        assert!(search_rows_to_pages(&db, &[]).is_empty(), "empty rows → empty pages");
+    }
+
+    /// `search_commit` folds the bundle into `Search` state. With an empty
+    /// query the bundle is `Some(empty)` + no suggestions (the UI shows an
+    /// empty-result pane, not a "no data" state); with a non-empty query
+    /// the FTS surface is exercised (tested in `kb-cli`), but the *state*
+    /// invariant is what this test asserts: `sel` is clamped to range and
+    /// `tag_sel` is reset to the top of the suggestion list. Behaviour is
+    /// total over a fresh DB (no re-index needed).
+    #[test]
+    fn search_commit_clamps_sel_and_resets_tag_sel() {
+        let db = Db::open_in_memory_test().unwrap();
+        db.migrate().unwrap();
+        let mut app = App::new(db).unwrap();
+        app.open_search().unwrap();
+        app.search_commit();
+        let s = match &app.mode {
+            Mode::Search(s) => s,
+            _ => panic!("expected Search mode"),
+        };
+        assert!(s.results.as_ref().is_some_and(|r| r.is_empty()));
+        assert!(s.tag_sugs.is_empty());
+        assert_eq!(s.sel, 0);
+        assert_eq!(s.tag_sel, 0);
+
+        // Force a non-empty query through `search_commit`; the bundle is
+        // built but the DB is empty so `results` is `Some([])`. `sel`
+        // must stay in range (`0`).
+        if let Mode::Search(ss) = &mut app.mode {
+            ss.query = "x desc".to_string();
+            ss.sel = 99; // simulate a stale cursor past the end
+        }
+        app.search_commit();
+        let s = match &app.mode {
+            Mode::Search(s) => s,
+            _ => panic!("expected Search mode"),
+        };
+        let n = s.results.as_ref().unwrap().len();
+        assert!(s.sel <= n, "`sel` must be clamped to the result count (was {0}, got {1})", n, s.sel);
+        assert_eq!(s.tag_sel, 0);
     }
 }

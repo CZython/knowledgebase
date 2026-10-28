@@ -197,7 +197,20 @@ fn render_search(rows: &[SearchRow], json: bool, query: &str) {
 }
 
 
-pub(crate) fn cmd_search(dbpath: Option<&Path>, query: &str, json: bool, limit: usize) -> Kb {
+/// Core search pipeline: parse → load tag data → build SQL → execute →
+/// return `Vec<SearchRow>`.
+///
+/// Returns `(rows, missing_tag)` where `missing_tag` is `Some(tag_value)`
+/// if the query was short-circuited because a tag filter had no match in
+/// the corpus (the CLI prints a specific message for this case).
+///
+/// `db` is already open + migrated; this function performs **all** the I/O
+/// (alias loads, FTS query) but does **not** open or close the connection.
+pub(crate) fn search_rows(
+    db: &Db,
+    query: &str,
+    limit: usize,
+) -> Result<(Vec<SearchRow>, Option<String>), (String, i32)> {
     let parsed = search_grammar::parse(query);
     let has_and = !parsed.and_terms.is_empty();
     let has_or = !parsed.or_group.is_empty();
@@ -212,12 +225,8 @@ pub(crate) fn cmd_search(dbpath: Option<&Path>, query: &str, json: bool, limit: 
         parts.join(" ")
     };
 
-    let db = open_db(dbpath)?;
-
-    // tag filters need corpus + alias data (loaded outside the main query)
-    // SECURITY_REPORT 3.17: hoist the alias + distinct-tag loads outside the
-    // per-filter loop — N tag filters used to trigger N full table scans of
-    // the same data.
+    // SECURITY_REPORT 3.17: hoist alias + distinct-tag loads outside the
+    // per-filter loop so N tag filters don't trigger N full table scans.
     let has_tag_filter = parsed.filters.iter().any(|f| f.is_tag());
     let (aliases, all_tags) = if has_tag_filter {
         let aliases: Vec<(String, String)> = {
@@ -242,6 +251,9 @@ pub(crate) fn cmd_search(dbpath: Option<&Path>, query: &str, json: bool, limit: 
     } else {
         (Vec::new(), Vec::new())
     };
+
+    // For tag-filters that don't appear in the corpus, short-circuit with
+    // a `(empty, Some(tag))` signal so the CLI can print a specific message.
     let mut tag_match_sets: Vec<Vec<String>> = Vec::new();
     for f in &parsed.filters {
         if f.is_tag() {
@@ -249,12 +261,7 @@ pub(crate) fn cmd_search(dbpath: Option<&Path>, query: &str, json: bool, limit: 
             let match_set: Vec<String> = kbtags::canonicalize(&tag_val, &all_tags, &aliases)
                 .into_iter().map(|s: &str| s.to_string()).collect();
             if match_set.is_empty() {
-                if !json {
-                    println!("0 results (no pages tagged {tag_val:?} in the corpus)");
-                } else {
-                    println!("[]");
-                }
-                return Ok(EXIT_OK);
+                return Ok((Vec::new(), Some(tag_val)));
             }
             tag_match_sets.push(match_set);
         }
@@ -263,11 +270,7 @@ pub(crate) fn cmd_search(dbpath: Option<&Path>, query: &str, json: bool, limit: 
     let (sql, params_vec) =
         build_search_sql(&parsed, &gate_text, &tag_match_sets, has_match, has_not, limit);
 
-    let db_ref = &db;
-    let mut stmt = db_ref.conn.prepare(&sql).map_err(|e| {
-        // F5: the full query is a side-channel of the error message and is
-        // far louder than the failure warrants; keep it gated behind an
-        // explicit debug switch for when we actually want to inspect the SQL.
+    let mut stmt = db.conn.prepare(&sql).map_err(|e| {
         let msg = if std::env::var_os("KB_DEBUG_SQL").is_some() {
             format!("prepare search: {e}\nSQL: {sql}")
         } else {
@@ -293,6 +296,21 @@ pub(crate) fn cmd_search(dbpath: Option<&Path>, query: &str, json: bool, limit: 
         .collect::<Result<_, _>>()
         .map_err(|e| (format!("search rows: {e}"), EXIT_ERR))?;
 
+    Ok((rows, None))
+}
+
+
+pub(crate) fn cmd_search(dbpath: Option<&Path>, query: &str, json: bool, limit: usize) -> Kb {
+    let db = open_db(dbpath)?;
+    let (rows, missing_tag) = search_rows(&db, query, limit)?;
+    if let Some(tag) = missing_tag {
+        if !json {
+            println!("0 results (no pages tagged {tag:?} in the corpus)");
+        } else {
+            println!("[]");
+        }
+        return Ok(EXIT_OK);
+    }
     render_search(&rows, json, query);
     Ok(EXIT_OK)
 }
