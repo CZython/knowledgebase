@@ -316,6 +316,58 @@ fn drop_root_surviving_under_another_root_keeps_the_page() {
     assert_eq!(count(&outer.db, "pages"), 0);
 }
 
+/// Regression: re-indexing a *single* page through `build_page` with placeholder
+/// (empty) `root` / `rel_path` — exactly what the TUI `commit_edit` path does
+/// (it re-reads the file to refresh the frontmatter columns, and does not know
+/// the page's owning root) — must not clobber the row's stored `root`/`rel_path`.
+/// Without the `upsert_page` empty-sentinel guard, `DO UPDATE SET root =
+/// excluded.root` would overwrite the real value with `""`, breaking
+/// `kb browse`/`kb tag` (which read `rel_path` and sort by `root, rel_path`)
+/// and `kb stats`'s per-root page counts.
+#[test]
+fn reindex_single_page_preserves_root_and_rel_path() {
+    let s = Setup::new("reindex_preserve");
+    let abs = s.root.join("sub/alpha.md");
+    fs::create_dir_all(s.root.join("sub")).unwrap();
+    fs::write(&abs, "---\ntype: note\ntitle: Alpha\n---\n# Alpha\nbody\n").unwrap();
+
+    // Register the root so the page is under it in the DB.
+    let canon_root = fs::canonicalize(&s.root)
+        .unwrap()
+        .to_string_lossy()
+        .to_string();
+    s.db.add_root(&canon_root, None, false).unwrap();
+    refresh(&s.db).unwrap();
+    let abs_path = fs::canonicalize(&abs)
+        .unwrap()
+        .to_string_lossy()
+        .to_string();
+    let (root, rel) = (
+        strings(&s.db, &format!("SELECT root FROM pages WHERE abs_path = '{abs_path}'"))
+            .pop()
+            .expect("page row present"),
+        strings(&s.db, &format!("SELECT rel_path FROM pages WHERE abs_path = '{abs_path}'"))
+            .pop()
+            .expect("rel_path present"),
+    );
+    assert!(!root.is_empty() && !rel.is_empty(), "precondition: row has root/rel");
+
+    // The TUI commit path: build_page with empty placeholders, then upsert.
+    let rec = index::build_page(&fs::canonicalize(&abs).unwrap(), "", "", false).unwrap();
+    index::upsert_page(&s.db, &rec).unwrap();
+
+    let (root2, rel2) = (
+        strings(&s.db, &format!("SELECT root FROM pages WHERE abs_path = '{abs_path}'"))
+            .pop()
+            .expect("page row present"),
+        strings(&s.db, &format!("SELECT rel_path FROM pages WHERE abs_path = '{abs_path}'"))
+            .pop()
+            .expect("rel_path present"),
+    );
+    assert_eq!(root2, root, "root must be preserved, not clobbered to ''");
+    assert_eq!(rel2, rel, "rel_path must be preserved, not clobbered to ''");
+}
+
 #[test]
 fn walk_snapshot_surfaces_only_indexable_files() {
     let s = Setup::new("surfaces");

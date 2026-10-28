@@ -380,11 +380,19 @@ pub fn upsert_page(db: &Db, rec: &PageRecord) -> Result<usize> {
            description, {gate}, frontmatter_text, body,
            mtime_ns, content_hash, created_at, updated_at
          ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?14)
-         ON CONFLICT (abs_path) DO UPDATE SET
-           id = excluded.id,
-           type = excluded.type,
-           root = excluded.root,
-           rel_path = excluded.rel_path,
+          ON CONFLICT (abs_path) DO UPDATE SET
+            id = excluded.id,
+            type = excluded.type,
+            -- `root`/`rel_path` are the page's *ownership* (which registered
+            -- root it sits under), owned by `refresh`'s walk — not by
+            -- frontmatter. A caller that re-indexes a single page without
+            -- knowing its root/rel (the TUI `commit_edit` pass, which only
+            -- re-derives the frontmatter columns) passes `""` as a
+            -- "keep existing" sentinel; preserve the row's current value in
+            -- that case. `refresh`/`create` always pass non-empty values, so
+            -- they win as before.
+            root = COALESCE(NULLIF(excluded.root, ''), root),
+            rel_path = COALESCE(NULLIF(excluded.rel_path, ''), rel_path),
            title = excluded.title,
            language = excluded.language,
            description = excluded.description,
