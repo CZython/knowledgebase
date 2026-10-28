@@ -97,8 +97,9 @@ pub struct Doc {
     pub data: Vec<u8>,
     /// Headings in document order (skipping fenced code blocks).
     pub sections: Vec<Section>,
-    /// Byte offset of the first heading, or `data.len()` if none (the
-    /// preamble extends up to here).
+    /// Byte offset of the first heading — the byte the leading preamble ends
+    /// at. `0` when the document has no headings (there is nothing to
+    /// precede, so `Top` placement inserts at the very start of the file).
     pub preamble_end: usize,
     /// Total line count (newline-terminated lines; an unterminated trailing
     /// line counts as one line).
