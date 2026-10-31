@@ -60,8 +60,17 @@ use crate::tui::{App, Mode, PageRow, ReadState, StatusKind};
 use crate::tui::palette::Palette;
 
 /// Draw the whole screen for `app`. Called once per event-loop tick.
-pub fn draw(f: &mut Frame, app: &App) {
+/// Takes a **mutable** reference: the render pass writes the body pane
+/// inner width back to `app.body_pane_width` *before* dispatching (the
+/// scroll mutators in `mod.rs` read it on the *next* tick — the event loop
+/// draws before it polls a key, so the value is always current).
+pub fn draw(f: &mut Frame, app: &mut App) {
     let area = f.area();
+    // Write the body-pane inner width to `app` (used by scroll mutators).
+    // Done before the immutable match below so there is no borrow conflict.
+    let has_outline = matches!(&app.mode, Mode::Read(rs) if !rs.outline.is_empty());
+    app.body_pane_width = body_inner_width(area, has_outline);
+
     match &app.mode {
         Mode::Browse => draw_browse(f, app, area),
         Mode::Read(rs) => draw_read(f, app, rs, area),
@@ -122,6 +131,31 @@ fn draw_browse(f: &mut Frame, app: &App, area: ratatui::layout::Rect) {
     render_status_bar(f, app, chunks[2]);
 }
 
+/// Compute the inner width of the Read body pane (the value `draw_read`
+/// passes to `Paragraph` after the two-cell border subtract). The layout
+/// math is a pure function of the terminal `area` and whether an outline
+/// pane is present — no state, no IO.
+fn body_inner_width(area: ratatui::layout::Rect, has_outline: bool) -> usize {
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(1), // header
+            Constraint::Min(1),   // panes
+            Constraint::Length(1),// status
+        ])
+        .split(area);
+    let pane_constraints = if has_outline {
+        [Constraint::Percentage(60), Constraint::Percentage(40)]
+    } else {
+        [Constraint::Percentage(100), Constraint::Length(0)]
+    };
+    let panes = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints(pane_constraints)
+        .split(chunks[1]);
+    (panes[0].width as usize).saturating_sub(2)
+}
+
 /// The 1-line header for the Browse mode. Reflects the current filter
 /// state (so a user who typed `/abc` and is still in the input context
 /// sees "filter abc (editing…)" — the *visual* confirmation that the
@@ -147,7 +181,23 @@ fn draw_read(f: &mut Frame, app: &App, rs: &ReadState, area: ratatui::layout::Re
         ])
         .split(area);
 
-    let header = Paragraph::new(format!("  kb tui — reading {} (row {} of {})", rs.id, rs.row_idx + 1, app.rows.len()))
+    // The header now carries the **absolute file path** (issue 3): users
+    // want the file location up top so they can `cd` / `copy` / `git add`
+    // from a shell prompt without re-typing it. The id remains for the
+    // "which kb page" identity (a root may have multiple pages under the
+    // same name), and the row count is the corpus position (a `full-rebuild`
+    // may reassign rowids, so this is display-only — identity lives on
+    // `abs_path`).
+    //
+    // Fitting the header: the pane is `area.width` wide. After the two-cell
+    // left/right borders, the inner is `area.width.saturating_sub(2)`. I
+    // build `<id> — <abs_path>` and let the terminal truncate; the id
+    // stays visible (it comes first) and the path fills the rest. A CJK
+    // path is wider than its byte length; we don't need to be exact here —
+    // the terminal's own word-truncate handles the overflow for free.
+    let header_text = format!("  kb tui — reading {}  {}  (row {} of {})",
+        rs.id, rs.abs_path, rs.row_idx + 1, app.rows.len());
+    let header = Paragraph::new(header_text)
         .style(app.palette.label);
     f.render_widget(header, chunks[0]);
 
@@ -167,33 +217,34 @@ fn draw_read(f: &mut Frame, app: &App, rs: &ReadState, area: ratatui::layout::Re
         .constraints(pane_constraints)
         .split(chunks[1]);
 
-    // Body pane: render a window from `scroll_top`, clipped to the pane
-    // height. We take up to `pane_height` lines — the `Paragraph` widget
-    // already scrolls past the end if there are more, but we want the
-    // *viewport* to be exactly the pane height, so the scroll stays in
-    // sync with what's on screen.
+    // Body pane: render the FULL body in a `Paragraph` with `Wrap{trim:false}`
+    // and `Paragraph::scroll((scroll_top, 0))`. The `Paragraph` reflow
+    // (its `WordWrapper`) is the *exact* wrap engine the terminal sees, so
+    // the scroll offset unit matches what the user perceives as one row
+    // on screen. One press of ↓ advances `scroll_top` by 1 (one rendered
+    // row, not one logical line) — the word-wrapping "stutter" is gone.
     //
     // P7: ATX headings (`#` through `######`) render in the `p.label` role;
-    // every other line stays in the default `p.default` role. The detection
-    // is cheap (prefix check on up to 7 leading `#` + a space) and runs on
-    // *every* windowed line, so it stays in lockstep with the scroll.
+    // every other line stays in the default `p.default` role.
     let p = &app.palette;
-    let body_lines: Vec<Line<'static>> = rs
-        .body
-        .lines()
-        .skip(rs.scroll_top)
-        .take(body_window_height(panes[0].height))
-        .map(|l| read_line(p, l))
-        .collect();
+    let body_lines: Vec<Line<'static>> = rs.body.lines().map(|l| read_line(p, l)).collect();
+    // The "row N of M" note in the body pane title now reports rendered
+    // rows (what the user sees), not logical lines. `scroll_top` is the
+    // *first* rendered row shown, so `+1` gives a 1-based "row N" the user
+    // can quote in a bug report.
+    let total_rows = crate::tui::scroll_max_top(&rs.body, app.body_pane_width) + 1;
     let body_widget = Paragraph::new(body_lines)
         .block(
             Block::default()
                 .borders(Borders::ALL)
-                .title(format!(" body — line {} of {} (jk/PgUp/Dn, g/G, Esc back)",
+                .title(format!(
+                    " body — row {} of {} (jk/PgUp/Dn, g/G, Esc back)",
                     rs.scroll_top + 1,
-                    rs.body.lines().count())),
+                    total_rows,
+                )),
         )
-        .wrap(ratatui::widgets::Wrap { trim: false });
+        .wrap(ratatui::widgets::Wrap { trim: false })
+        .scroll((rs.scroll_top as u16, 0));
     f.render_widget(body_widget, panes[0]);
 
     if has_outline {
@@ -870,17 +921,6 @@ fn draw_search(
     render_status_bar(f, app, chunks[3]);
 }
 
-/// The number of body lines to render in the viewport. The pane height is
-/// already in "lines" (minus borders), so this is a direct pass-through —
-/// the scroll offset `scroll_top` (in line counts) plus this window gives the
-/// visible line range. Capped to ≥ 0 (a zero-height pane renders
-/// nothing; the scroll mutators are no-ops).
-fn body_window_height(h: u16) -> usize {
-    // Subtract 2 for the top+bottom borders (the body title lives in the
-    // top border, so it's already accounted for by ratatui's layout).
-    h.saturating_sub(2) as usize
-}
-
 /// Build the status bar as one `Line` (a list of `Span`s). The *severity
 /// glyph* is its own span — `✓ ` for success, `! ` for error, none for info —
 /// so the meaning survives even if a user's palette makes `error` and
@@ -997,59 +1037,67 @@ fn ellipsize_cells(s: &str, max: usize) -> String {
 /// The gate marker is double-encoded (the symbol *and* the palette role —
 /// `gated` vs `open`) so a colorblind user sees the distinction even
 /// after recoloring.
-/// `rel_path` (the locator) is kept whole, and the `id` ellipsizes to what
-/// fits; total + width-bounded. If the pane is too narrow to fit the 4-cell
-/// marker overhead, the marker drops and the row degrades to the old
-/// `<id> <rel_path>` shape so the row still renders.
+///
+/// Truncation priority: the **id** (page identity / title) is kept whole;
+/// the **rel_path** (file path / locator) is ellipsized to fit; the gate
+/// marker is shown only when there is room for it + a minimum path fragment.
+/// This means a user browsing a list always sees the page's name first, and
+/// the file location is a secondary, truncatable element.
+///
+/// Total + width-bounded: the output never exceeds `width` display cells.
+/// When the id alone is wider than the pane (a degenerate narrow window),
+/// the id is ellipsized and no path or marker is shown.
 fn browse_row(p: &Palette, row: &PageRow, width: usize) -> Vec<Span<'static>> {
     if width == 0 {
         return Vec::new();
     }
+    let id_w = row.id.width();
+    let rel_w = row.rel_path.width();
+
+    // Degenerate: the id alone does not fit the pane → truncate only the
+    // id (nothing better to truncate).
+    if id_w > width {
+        let id = ellipsize_cells(&row.id, width);
+        return vec![Span::styled(id, p.default)];
+    }
+
+    // The id fits whole.  `remaining` = cells available for [marker +] sep + path.
+    let remaining = width - id_w;
+    let marker_cells = 3usize; // "◇  " or "◆  "
+    let sep_cells = 1usize;
+
+    let (show_marker, path_budget) = if remaining > marker_cells + sep_cells {
+        // Room for marker + separator + at least 1 cell of path.
+        (true, remaining - marker_cells - sep_cells)
+    } else if remaining > sep_cells {
+        // Room for separator + at least 1 cell of path, but no marker.
+        (false, remaining - sep_cells)
+    } else {
+        // Not even room for separator after the id → show just the id.
+        (false, 0)
+    };
+
     let (marker, mstyle): (&str, Style) = if row.gates.is_empty() {
         ("◇  ", p.open)
     } else {
         ("◆  ", p.gated)
     };
-    let rel_w = row.rel_path.width();
-    let has_rel = rel_w > 0;
-    // rel_path is the locator: reserve its width and the 1-space separator,
-    // then fit the id into what remains.
-    let old_id_budget = if width > rel_w + 1 {
-        width - rel_w - 1
-    } else {
-        0
-    };
-    // The gate marker is a nicety, not a requirement: it is shown only when
-    // the id still fits (no ellipsis) inside the narrower budget. Otherwise
-    // we degrade to the pre-P6 shape so a narrow pane never loses the id.
-    let with_marker = {
-        let ib = if width > rel_w + 1 + 3 {
-            width - rel_w - 1 - 3
-        } else {
-            0
-        };
-        ib >= 1 && ellipsize_cells(&row.id, ib) == row.id
-    };
+
     let mut out = Vec::new();
-    if with_marker {
+    if show_marker {
         out.push(Span::styled(marker, mstyle));
     }
-    let id = ellipsize_cells(&row.id, old_id_budget);
-    if !id.is_empty() {
-        out.push(Span::styled(id, p.default));
-        if has_rel {
-            out.push(Span::raw(" "));
+    out.push(Span::styled(row.id.clone(), p.default));
+    if path_budget > 0 {
+        out.push(Span::raw(" "));
+        let path = if rel_w <= path_budget {
+            row.rel_path.clone()
+        } else {
+            ellipsize_cells(&row.rel_path, path_budget)
+        };
+        if !path.is_empty() {
+            out.push(Span::styled(path, p.dim));
         }
-    }
-    if has_rel {
-        out.push(Span::styled(
-            if rel_w > width {
-                ellipsize_cells(&row.rel_path, width)
-            } else {
-                row.rel_path.clone()
-            },
-            p.dim,
-        ));
     }
     out
 }
@@ -1117,40 +1165,58 @@ mod tests {
         s.width()
     }
 
-    /// The whole point of the fix: a row must **never overflow** its pane
-    /// (that was what pushed `rel_path` off the right edge with no marker),
-    /// and the **locator must stay visible**. "Fills exactly" is *not* a
-    /// real guarantee — a CJK cut can leave a 1-cell gap that ratatui pads
-    /// with a trailing space — so we assert `<= width`, never `== width`.
-    /// The `browse_row` is now a span list (P6: the row's `◆`/`◇` marker
-    /// needs a palette role). The tests compare the *flattened* text via
-    /// `browse_row_text`, so they keep their existing shape.
+    /// The whole point of the fix: a row must **never overflow** its pane,
+    /// and the **id (page identity/title) is kept whole** — it is the thing
+    /// a user reads to tell pages apart. The path (rel_path) is the element
+    /// that truncates. "Fills exactly" is *not* a real guarantee — a CJK cut
+    /// can leave a 1-cell gap that ratatui pads with a trailing space — so
+    /// we assert `<= width`, never `== width`. The row is a span list (P6:
+    /// the `◆`/`◇` marker needs a palette role); the tests compare the
+    /// *flattened* text via `browse_row_text`.
+    /// `…` is drawn in one cell by a terminal; measure a string in *cells*
+    /// (width-aware) so CJK/fullwidth chars count as two, matching what the
+    /// user actually sees on screen.
     #[test]
-    fn browse_row_never_overflows_and_keeps_rel_path() {
+    fn browse_row_never_overflows_and_keeps_the_id() {
         let long_id = "note:Realistic Document Title with a lot of words";
+        let rel = "real60.md";
+        let id_cells = cells(long_id);
         for w in [1usize, 5, 20, 38, 40, 50, 78, 100, 200] {
-            let out = browse_row_text(&row(long_id, "real60.md"), w);
+            let out = browse_row_text(&row(long_id, rel), w);
             let got = cells(&out);
             assert!(got <= w, "row ({out:?}) is {got} cells, must be <= {w}");
-            // The 3-cell gate marker is *part* of the row now; the test's
-            // old expectations still hold because they only look at the
-            // suffix (the rel_path) and the width bound.
-            assert!(
-                out.ends_with("real60.md") || cells(&out) < cells("real60.md"),
-                "locator (rel_path) never pushed off the edge: {out:?}"
-            );
         }
+        // The id is the identity and stays whole whenever it fits the pane.
+        // A wide-enough pane: id whole + path whole (no ellipsis).
+        let out = browse_row_text(&row(long_id, rel), id_cells + cells(rel) + 5);
+        assert!(out.contains(long_id), "id whole: {out:?}");
+        assert!(out.contains(rel), "path whole: {out:?}");
+        assert!(!out.contains('…'), "no ellipsis at this width: {out:?}");
     }
 
-    /// When the id alone is longer than the whole pane, the row still
-    /// keeps the locator and marks the drop with `…` — never a bare clip.
+    /// Degenerate: the id alone overflows the whole pane → the id truncates
+    /// (nothing else can compete for the space) and the row is still bounded.
     #[test]
-    fn browse_row_ellipsizes_the_id_not_the_locator() {
-        let id = "note:".to_string() + &"a".repeat(120);
-        let out = browse_row_text(&row(&id, "dir/a/b/c.md"), 40);
+    fn browse_row_truncates_the_id_when_it_alone_overflows() {
+        let id = "note:".to_string() + &"a".repeat(120); // 125 cells > 40
+        let out = browse_row_text(&row(&id, "x.md"), 40);
         assert!(cells(&out) <= 40);
-        assert!(out.ends_with("dir/a/b/c.md"), "locator wins over the id: {out:?}");
-        assert!(out.contains('…'), "the cut id must carry an ellipsis: {out:?}");
+        assert!(!out.contains("x.md"), "no path once the id fills the pane: {out:?}");
+        assert!(out.contains('…'), "the cut id carries an ellipsis: {out:?}");
+    }
+
+    /// When id + path together exceed the pane, the **path** is the element
+    /// that ellipsizes (the id stays whole) — never a bare clip of the id.
+    #[test]
+    fn browse_row_ellipsizes_the_path_not_the_id() {
+        let id = "note:".to_string() + &"a".repeat(12); // 17 cells — fits a 40 pane
+        let rel = "dir/a/b/c/very/long/relative/path/segment.md"; // 45 cells > budget
+        let w = 40;
+        let out = browse_row_text(&row(&id, rel), w);
+        assert!(cells(&out) <= w);
+        assert!(out.contains(&id), "id keeps whole when it fits the budget: {out:?}");
+        assert!(!out.ends_with(rel), "path is what truncates, not the id: {out:?}");
+        assert!(out.contains('…'), "the cut path must carry an ellipsis: {out:?}");
     }
 
     /// P8: every *populated* field in the picker shows `◆` styled with
@@ -1265,43 +1331,44 @@ mod tests {
     }
 
     /// A CJK id must be measured in *cells* (each fullwidth char = 2, not
-    /// 1), never split mid-char, and never push the row past the pane.
-    /// Whether it's cut depends on the width: if the id fits, it's shown
-    /// whole (no marker); if it must shrink, a `…` marks the drop and the
-    /// loss is at most the one cell a 2-wide char can leave. We branch on
-    /// which case applies rather than assuming the row always nearly fills.
+    /// 1), never split mid-char, and never push the row past the pane. The
+    /// id is the identity: it stays whole whenever it fits the budget, and
+    /// only the *path* truncates (the new priority). We branch on whether
+    /// the id fits rather than assuming the row always nearly fills.
     #[test]
     fn browse_row_is_width_aware_for_cjk() {
         // "note:" (5 cells) + 30 x 量 (60 cells) = 65 cells of id; "cjk.md"
-        // = 6 cells of locator.
+        // = 6 cells of path.
         let id = "note:".to_string() + &"量".repeat(30);
         let id_cells = id.width(); // 65
         let rel = "cjk.md";
         let rel_cells = rel.width(); // 6
-        for w in [10usize, 20, 30, 40, 70, 80, 100] {
+        for w in [10usize, 20, 30, 40, 60, 70, 80, 100] {
             let out = browse_row_text(&row(&id, rel), w);
             let got = out.width();
             assert!(got <= w, "row ({out:?}) = {got} cells must be <= {w}");
-            assert!(out.ends_with(rel), "locator stays visible: {out:?}");
-            let budget = w.saturating_sub(rel_cells + 4); // marker(3) + 1 sep
-            if id_cells <= budget {
-                // The id fits: shown whole, no marker, exact width.
-                assert!(
-                    !out.contains('…'),
-                    "a fitting id must not carry a marker: {out:?}"
-                );
-                assert!(
-                    got == id_cells + 4 + rel_cells,
-                    "fitting id fills exactly (marker + sep + id + rel): {got}",
-                );
+            if id_cells > w {
+                // id doesn't fit at all → id (and only the id) truncates.
+                assert!(out.contains('…'), "a cut id carries a marker: {out:?}");
+                assert!(!out.contains(rel), "no path when the id doesn't fit: {out:?}");
             } else {
-                // The id is cut: marked, and the loss is <= one cell (a 2-wide
-                // char can straddle the budget boundary — no half-char).
-                assert!(out.contains('…'), "a cut id must carry a marker: {out:?}");
-                assert!(
-                    got >= w.saturating_sub(1),
-                    "no half-char truncation: {out:?}"
-                );
+                // id fits → shown whole; only the *path* may truncate.
+                assert!(out.contains(&id), "fitting id stays whole (CJK, cell-aware): {out:?}");
+                let path_budget = w - id_cells;
+                // Mirror browse_row's priority: spend marker (1) + separator (1)
+                // if it fits and still leaves at least 1 cell for the path
+                // itself; otherwise spend only the separator if it still fits.
+                let mb = if path_budget.saturating_sub(4) > 0 {
+                    path_budget - 4
+                } else {
+                    path_budget.saturating_sub(1)
+                };
+                if rel_cells <= mb {
+                    assert!(out.contains(rel), "path whole when it fits: {out:?}");
+                    assert!(!out.contains('…'), "no ellipsis when path fits: {out:?}");
+                } else {
+                    assert!(out.contains('…'), "path truncates; id must not: {out:?}");
+                }
             }
         }
     }

@@ -75,6 +75,7 @@ use ratatui::Terminal;
 use kb_db::Db;
 use kb_core::frontmatter as fm;
 use kb_core::section as section_core;
+use unicode_width::UnicodeWidthStr;
 
 use crate::EXIT_ERR;
 use crate::EXIT_OK;
@@ -179,7 +180,9 @@ pub struct RootsState {
     /// `list` is empty.
     pub selected: usize,
     /// `false` = the add form is active; `true` = the list is active.
-    /// `Tab` toggles.
+    /// `Tab` toggles. On open, the *list* is focused when there is
+    /// something to select (so navigation works immediately) and the *form*
+    /// only when the list is empty.
     pub focused: bool,
 }
 
@@ -259,10 +262,14 @@ pub struct ReadState {
     /// heading, in body order. Recomputed per load so the outline always
     /// reflects what's on screen (not a stale cache).
     pub outline: Outline,
-    /// The first body line to render (scroll offset, total on any body).
-    /// 0 = top; values beyond the last line are no-ops (clamped by the
-    /// scroll mutators, never the render pass).
+    /// The first **rendered row** to show (scroll offset, total on any body).
+    /// A rendered row is one row as the terminal sees it — a logical line
+    /// that wraps to N rows contributes N rows, so one press of ↓ moves one
+    /// rendered row (not one logical line).
+    /// 0 = top; values beyond the max are clamped by the mutators.
     pub scroll_top: usize,
+    /// The absolute file path, shown in the header for easy `cd`/`copy`.
+    pub abs_path: String,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -542,6 +549,16 @@ pub struct App {
     pub selected: usize,
     /// Which screen we're on.
     pub mode: Mode,
+    /// Return address (M8.4). When a Read was opened **from Search**
+    /// (`search_open`), this holds the `SearchState` so `close_read`
+    /// restores it — query buffer, live results, and result selection all
+    /// intact. `open_read` clears it (a Browse/filter-opened read has no
+    /// search to go back to), `search_open` sets it just before entering
+    /// Read, and `close_read` consumes it via `.take()`. Every path that
+    /// leaves Read and re-enters it goes through `open_read` (clears) or
+    /// `search_open` (sets fresh), so a stale address is never
+    /// resurrected.
+    pub search_return: Option<SearchState>,
     /// The status-bar text (last event message).
     pub status: Status,
     /// The active color palette (P2). **`Copy`** and read by `render.rs` for
@@ -549,6 +566,13 @@ pub struct App {
     /// `kb tui` runs with no `--palette`; set by `with_palette` after a
     /// `--palette <name|path>` resolves.
     pub palette: palette::Palette,
+    /// The **inner** width of the Read body pane (the value `draw_read` passes
+    /// to the body `Paragraph` after subtracting the two borders). Written by
+    /// the render pass each frame (the event loop draws *before* it polls a
+    /// key, so the scroll mutators always read a current value). 0 until the
+    /// first frame, in which case the clamp falls back to the logical-line
+    /// model (a window too narrow to matter).
+    pub body_pane_width: usize,
 }
 
 /// A `Result` over the `(message, exit-code)` tuple the rest of `kb`
@@ -567,7 +591,7 @@ impl App {
         let status = if rows.is_empty() {
             Status::info("no pages indexed yet — run `kb add <root>` then re-run `kb tui`")
         } else {
-            Status::info("↑↓/jk move · / filter · e edit · a alias · r roots · Enter open · v $EDITOR · q quit")
+            Status::info("↑↓/jk move · / filter · s search · e edit · a alias · r roots · Enter open · v $EDITOR · q quit")
         };
         Ok(App {
             view: rows.clone(),
@@ -577,8 +601,15 @@ impl App {
             filter_active: false,
             selected: 0,
             mode: Mode::Browse,
+            search_return: None,
             status,
             palette: palette::Palette::default_palette(),
+            // 80 columns is a reasonable *default* pane width: it matches
+            // the conventional `COLUMNS=80` terminal and keeps the scroll
+            // mutators total before the first render pass has written the
+            // real width. `draw_read` overwrites this every frame with the
+            // real value computed from the live terminal size.
+            body_pane_width: 80,
         })
     }
 
@@ -666,11 +697,16 @@ impl App {
         format!("row {} of {} — {}", self.selected + 1, self.view.len(), id)
     }
 
-    /// Scroll the Read body by `delta` lines (total: clamped to
-    /// `[0, max_top]`, where `max_top` is the last first-visible line).
+    /// Scroll the Read body by `delta` **rendered rows** (the user's perceptual
+    /// unit: one press = one row on screen). The clamp is against the
+    /// *width-aware* max (a logical line that wraps to N rendered rows adds N
+    /// to the scroll range, not 1). The pane width is `body_pane_width`,
+    /// written by the render pass (`draw_read`) on the previous frame — the
+    /// event loop draws before it dispatches the key, so this mirror is
+    /// always current.
     pub fn scroll_body(&mut self, delta: isize) {
         if let Mode::Read(r) = &mut self.mode {
-            let max_top = scroll_max_top(&r.body);
+            let max_top = scroll_max_top(&r.body, self.body_pane_width);
             let n = r.scroll_top as isize + delta;
             r.scroll_top = n.clamp(0, max_top as isize) as usize;
         }
@@ -683,10 +719,10 @@ impl App {
         }
     }
 
-    /// Scroll the Read body to the bottom (the last line visible).
+    /// Scroll the Read body to the bottom (the last rendered row).
     pub fn scroll_body_bottom(&mut self) {
         if let Mode::Read(r) = &mut self.mode {
-            r.scroll_top = scroll_max_top(&r.body);
+            r.scroll_top = scroll_max_top(&r.body, self.body_pane_width);
         }
     }
 
@@ -701,6 +737,11 @@ impl App {
             Some(r) => r.clone(),
             None => return Ok(()),
         };
+        // This read is a Browse/filter open — no Search context to return to.
+        // (A read opened *from* Search sets `search_return` explicitly in
+        // `search_open`; clearing here also kills any stale address from an
+        // earlier search session.)
+        self.search_return = None;
         let (body, outline) = load_body(&self.db, &row.abs_path)?;
         let id = row.id;
         // Keep a stable row-index for the header display: the index of the
@@ -717,16 +758,28 @@ impl App {
             body,
             outline,
             scroll_top: 0,
+            abs_path: row.abs_path,
         };
         self.mode = Mode::Read(rs);
         Ok(())
     }
 
-    /// Go back from Read to Browse (keeps `view` / `selected` intact — the
-    /// selection is preserved across the round trip, so `Esc` in Read then
-    /// `j` continues where the user left off).
+    /// Go back from Read to *where the read was opened from*: if a Search
+    /// context is parked in `search_return`, restore it (Esc from
+    /// Search→Read returns to the search, query intact); otherwise return to
+    /// Browse with `view` / `selected` intact (the selection is preserved
+    /// across the round trip, so `Esc` in Read then `j` continues where the
+    /// user left off). `.take()` makes this idempotent — a double-Esc (or an
+    /// `open_read` that cleared the address) never resurrects a second
+    /// search.
     pub fn close_read(&mut self) {
-        self.mode = Mode::Browse;
+        if let Some(search) = self.search_return.take() {
+            self.mode = Mode::Search(search);
+            let note = self.position_note();
+            self.set_info(note);
+        } else {
+            self.mode = Mode::Browse;
+        }
     }
 
     /// Open the *selected page's file* directly in the user's
@@ -1653,6 +1706,13 @@ impl App {
         if let Ok(rows) = list_pages(&self.db) {
             self.rows = rows;
             self.apply_filter();
+            // The corpus just changed (edit commit / root add / root drop):
+            // any parked search context now holds pre-mutation result rows,
+            // so clear the return address. A search re-run (`search_open`)
+            // re-queries against the fresh index. This makes the stale-result
+            // window (Search parked while the corpus mutates, then Esc-
+            // returned) a no-op instead of a lie.
+            self.search_return = None;
         }
     }
 
@@ -1838,17 +1898,29 @@ impl App {
     //  M8.3 — Roots manager
     //  ===================================================================
 
-    /// Open the **Roots** manager: load the current `roots` snapshot and arm
-    /// the *add form*. **Total**: always succeeds.
+    /// Open the **Roots** manager: load the current `roots` snapshot and
+    /// focus the right pane up front. **Total**: always succeeds.
+    ///
+    /// Focus rule: if there is *anything* to navigate (a non-empty roots
+    /// list) the **list** opens focused — `↑`/`↓`/`j`/`k` and `x` work
+    /// immediately, with no `Tab` press required to start. Only when the
+    /// list is empty (nothing to select) does the **add form** open focused,
+    /// so the user is dropped straight into typing a path. `Tab` always
+    /// toggles between the two.
     pub fn open_roots(&mut self) -> KbResult<()> {
         let list = list_roots(&self.db)?;
+        let focused = !list.is_empty();
         self.mode = Mode::Roots(RootsState {
             list,
             input: String::new(),
             selected: 0,
-            focused: false,
+            focused,
         });
-        self.set_info("roots — Tab list · type an absolute path then Enter add · x drop · Esc back");
+        if focused {
+            self.set_info("roots — ↑↓/jk select · x drop · Tab add form · Esc back");
+        } else {
+            self.set_info("no roots yet — type an absolute path then Enter add · Tab list · Esc back");
+        }
         Ok(())
     }
 
@@ -2115,6 +2187,13 @@ impl App {
                 }
             }
         };
+        // Park the search context so `close_read` returns *here* (not to
+        // Browse) — query buffer, results, and result selection all intact.
+        let search = match std::mem::replace(&mut self.mode, Mode::Browse) {
+            Mode::Search(s) => s,
+            _ => unreachable!("selected the row above only if in Search mode"),
+        };
+        self.search_return = Some(search);
         let (body, outline) = load_body(&self.db, &abs_path)?;
         let row_idx = self.rows.iter().position(|r| r.abs_path == abs_path).unwrap_or(0);
         self.mode = Mode::Read(ReadState {
@@ -2123,8 +2202,9 @@ impl App {
             body,
             outline,
             scroll_top: 0,
+            abs_path: abs_path.clone(),
         });
-        self.set_info("open page — ↑↓ scroll · Esc back");
+        self.set_info("open page — ↑↓ scroll · Esc back to search");
         Ok(())
     }
 
@@ -2148,17 +2228,35 @@ impl App {
         self.status = Status::error(&text.into());
     }
 }
-
-/// The highest legitimate `scroll_top` for a body — such that the *last*
-/// line can be the first visible one. We cap at `lines - 1` (not `lines`)
-/// so every reachable scroll position renders a non-empty window. The value
-/// is a pure function of the body (no viewport math in here), which keeps
-/// the scroll mutators total + trivially testable. Degenerate: an empty body
-/// caps at 0.
-pub fn scroll_max_top(body: &str) -> usize {
-    // `lines()` splits on `\n` and drops a single trailing newline, so
-    // "one\n" → 1 line, "one\ntwo" → 2 lines, "" → 0 lines.
-    body.lines().count().max(1) - 1
+/// The largest `scroll_top` for `body` rendered in a pane of `pane_width`
+/// cells. The scroll offset is in **rendered rows** (not logical lines): a
+/// logical line that wraps to N rendered rows contributes N to the total.
+///
+/// Counting a line as `cells.div_ceil(pane_width)` rows is the same "how
+/// many rows of `pane_width` cells does this content occupy" that the TUI's
+/// `WordWrapper` produces (within one row of word-boundary slack, which is
+/// immaterial for a scroll clamp — the user can nudge with arrows).
+/// A blank line still occupies one rendered row (an empty line on screen).
+///
+/// When `pane_width` is 0/1 (a window too narrow to matter, or before the
+/// first render has told `App` the real pane width) we fall back to the
+/// logical-line model so the mutators remain total and monotonic.
+///
+/// Pure + total. Empty body → 0.
+pub fn scroll_max_top(body: &str, pane_width: usize) -> usize {
+    let lines = body.lines().count();
+    if lines == 0 {
+        return 0;
+    }
+    if pane_width <= 1 {
+        return lines - 1;
+    }
+    let mut total = 0usize;
+    for line in body.lines() {
+        let cells = line.width().max(1);
+        total += cells.div_ceil(pane_width);
+    }
+    total - 1
 }
 
 /// Extract the section outline from a `body`: a `(line_index, level,
@@ -2866,7 +2964,7 @@ fn event_loop(mut app: App) -> i32 {
     let _cleanup = Cleanup;
 
     loop {
-        if let Err(e) = terminal.draw(|f| render::draw(f, &app)) {
+        if let Err(e) = terminal.draw(|f| render::draw(f, &mut app)) {
             eprintln!("tui: draw failed: {e}");
             break;
         }
@@ -2997,16 +3095,31 @@ mod tests {
         abs
     }
 
-    /// `scroll_max_top` is a pure function of the body (total, no IO): it
-    /// caps at `lines - 1` so every reachable scroll position renders a
-    /// non-empty window. Empty body → 0.
+    /// `scroll_max_top` is pure over *(body, pane_width)*: the same body
+    /// at a wider pane has a smaller max (fewer rendered rows). A blank
+    /// line still counts as a rendered row. `pane_width = 0` (before the
+    /// first render) falls back to the logical-line model so the mutators
+    /// remain total.
     #[test]
-    fn scroll_max_top_is_a_pure_function_of_the_body() {
-        assert_eq!(scroll_max_top(""), 0);
-        assert_eq!(scroll_max_top("one\n"), 0); // 1 line → max top 0
-        assert_eq!(scroll_max_top("one\ntwo"), 1); // 2 lines → max top 1
-        assert_eq!(scroll_max_top("one\ntwo\n"), 1);
-        assert_eq!(scroll_max_top("# H\nbody line\ntrailer"), 2);
+    fn scroll_max_top_is_a_pure_function_of_body_and_width() {
+        // Empty body → 0 at any width.
+        assert_eq!(scroll_max_top("", 80), 0);
+        // A single logical line → 0 max (the one rendered row is visible
+        // from the top; no scroll range).
+        assert_eq!(scroll_max_top("one\n", 80), 0);
+        // Two single-line lines → 1.
+        assert_eq!(scroll_max_top("one\ntwo", 80), 1);
+        // A wide line: 25 cells at width 10 wraps to 3 rendered rows →
+        // max top = 2.
+        let line: String = "a".repeat(25);
+        assert_eq!(scroll_max_top(&line, 10), 2);
+        // Same body at a wider pane → smaller max.
+        assert!(scroll_max_top(&line, 10) > scroll_max_top(&line, 100));
+        // A blank line counts as one rendered row (it's still a row).
+        assert_eq!(scroll_max_top("a\n\nb", 80), 2);
+        // degenerate width 0/1 → the logical-line fallback.
+        assert_eq!(scroll_max_top("a\nb\nc", 0), 2);
+        assert_eq!(scroll_max_top("a\nb\nc", 1), 2);
     }
 
     /// The scroll mutators are total + bounded: on any body the resulting
@@ -3021,9 +3134,18 @@ mod tests {
         let mut app = App::new(db).unwrap();
         app.open_read().unwrap();
 
+        // Set the pane width explicitly (tests don't go through the render
+        // pass, so `app.body_pane_width` is still the 0 fallback). 80 is a
+        // reasonable "wide enough" width for the test body's single-word
+        // lines (each "lN" is 2 cells, so no wrapping at 80).
+        app.body_pane_width = 80;
+
         // scroll down past the bottom: clamps to max, does not grow.
         app.scroll_body(100);
-        let max = scroll_max_top(&match &app.mode { Mode::Read(r) => r.body.clone(), _ => panic!() });
+        let max = scroll_max_top(
+            &match &app.mode { Mode::Read(r) => r.body.clone(), _ => panic!() },
+            app.body_pane_width,
+        );
         if let Mode::Read(r) = &app.mode {
             assert_eq!(r.scroll_top, max, "scroll past bottom clamps to max");
         } else {
@@ -3069,7 +3191,7 @@ mod tests {
             assert_eq!(r.scroll_top, 0);
         }
         app.scroll_body_bottom();
-        let max = scroll_max_top("a\nb\nc\nd\ne\n");
+        let max = scroll_max_top("a\nb\nc\nd\ne\n", app.body_pane_width);
         if let Mode::Read(r) = &app.mode {
             assert_eq!(r.scroll_top, max);
         }
@@ -5102,4 +5224,66 @@ mod tests {
         assert!(s.sel <= n, "`sel` must be clamped to the result count (was {0}, got {1})", n, s.sel);
         assert_eq!(s.tag_sel, 0);
     }
+
+    /// Regression: Search→Read→Esc must return to **Search** (query buffer,
+    /// live results, and result selection all intact), not drop into Browse
+    /// and lose the search context. `search_open` parks the `SearchState` in
+    /// `search_return`; `close_read` consumes it via `.take()` (idempotent —
+    /// a second Esc falls back to Browse with an empty list). A Browse-opened
+    /// read still Escs back to Browse (`open_read` clears any stale address).
+    #[test]
+    fn search_esc_from_read_returns_to_search() {
+        let db = Db::open_in_memory_test().unwrap();
+        db.migrate().unwrap();
+        insert_page(&db, "transformer", "Transformer", "the transformer architecture\n");
+        insert_page(&db, "k8s", "Cluster Ops", "kubernetes rollout\n");
+        let mut app = App::new(db).unwrap();
+
+        // Arm Search and type a query that matches exactly one page
+        // via the real FTS engine (`search_type` → `search_commit`).
+        app.open_search().unwrap();
+        for c in "transformer".chars() {
+            app.search_type(c);
+        }
+        let s = match &app.mode {
+            Mode::Search(s) => s,
+            _ => panic!("expected Search after open_search"),
+        };
+        let results = s.results.as_ref().expect("results materialized");
+        assert_eq!(results.len(), 1, "one page matches 'transformer'");
+        assert_eq!(results[0].id, "note:transformer", "FTS returned the transformer page");
+
+        // Open the result → Read. The search context must now be parked
+        // in `search_return`.
+        app.search_open().unwrap();
+        assert!(matches!(app.mode, Mode::Read(_)), "search_open puts us in Read");
+        assert!(app.search_return.is_some(), "the Search context is parked for the return trip");
+
+        // Esc from Read → back to Search with the query + result selection
+        // intact (the bug this test pins).
+        app.close_read();
+        let s = match &app.mode {
+            Mode::Search(s) => s,
+            _ => panic!("Esc from a search-opened Read must return to Search, not Browse"),
+        };
+        assert_eq!(s.query, "transformer", "query buffer survives the round trip");
+        let results = s.results.as_ref().expect("results survive the round trip");
+        assert_eq!(results.len(), 1, "result count unchanged");
+        assert_eq!(results[0].id, "note:transformer");
+        assert_eq!(s.sel, 0, "result selection intact");
+
+        // A second Esc from Search returns to Browse (the global pop).
+        app.close_search();
+        assert!(matches!(app.mode, Mode::Browse));
+        assert!(app.search_return.is_none(), "the parked context was consumed, not duplicated");
+
+        // Fresh Browse-opened read → Esc still pops to Browse (no stale
+        // search address resurrected).
+        app.selected = 0;
+        app.open_read().unwrap();
+        assert!(app.search_return.is_none(), "a Browse open clears any stale search address");
+        app.close_read();
+        assert!(matches!(app.mode, Mode::Browse), "a Browse open Escs back to Browse");
+    }
+
 }

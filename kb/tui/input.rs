@@ -186,10 +186,11 @@ fn handle_read(app: &mut App, ev: KeyEvent) -> bool {
     match ev.code {
         KeyCode::Char('q') => true,
         KeyCode::Char('c') if ev.modifiers.contains(KeyModifiers::CONTROL) => true,
-        // Esc pops back to Browse (the selection is preserved).
+        // Esc pops back to where the read was opened from (Browse, or the
+        // search that armed it — query + results intact). `close_read` owns
+        // the status-bar note, so we must not overwrite it here.
         KeyCode::Esc => {
             app.close_read();
-            app.set_info(app.position_note());
             false
         }
 
@@ -933,6 +934,63 @@ mod tests {
     }
 
     /// The Search mode (M8.4) full loop: `s` arms Search; typing a partial
+    /// `open_roots` opens with the right default focus:
+    /// - **list** focused when a root exists (so `↑↓`/`jk`/`x` work
+    ///   immediately — no `Tab` press needed to start navigating);
+    /// - **form** focused when no root exists (there is nothing to select;
+    ///   the user is dropped straight into typing a path).
+    #[test]
+    fn roots_open_picks_the_right_default_focus() {
+        // Case 1: empty DB → no root → form focused.
+        {
+            let db = crate::tui::Db::open_in_memory_test().unwrap();
+            db.migrate().unwrap();
+            let mut app = App::new(db).unwrap();
+            app.open_roots().unwrap();
+            match &app.mode {
+                crate::tui::Mode::Roots(r) => assert!(
+                    !r.focused,
+                    "with no roots, the add form is focused so a path can be typed immediately"
+                ),
+                _ => panic!("expected Roots mode"),
+            }
+        }
+        // Case 2: a real root exists → list focused.
+        {
+            let db = crate::tui::Db::open_in_memory_test().unwrap();
+            db.migrate().unwrap();
+            let root = std::env::temp_dir().join("kb_tui_roots_focus");
+            let _ = std::fs::remove_dir_all(&root);
+            std::fs::create_dir_all(&root).unwrap();
+            std::fs::write(
+                root.join("note.md"),
+                "---\ntitle: Focus Test\n---\n\nbody\n",
+            )
+            .unwrap();
+            let root_str = root.to_string_lossy().into_owned();
+            db.add_root(&root_str, None, false).expect("add_root");
+            // `list_roots` reads the `roots` table directly; `App::new` will
+            // populate `r.list` from it without a full refresh
+            // (`add_root` already registered the row).
+            let mut app = App::new(db).unwrap();
+            app.open_roots().unwrap();
+            match &app.mode {
+                crate::tui::Mode::Roots(r) => {
+                    assert!(
+                        !r.list.is_empty(),
+                        "precondition: list has at least one root"
+                    );
+                    assert!(
+                        r.focused,
+                        "with roots present, the list is focused (no Tab press needed)"
+                    );
+                }
+                _ => panic!("expected Roots mode"),
+            }
+            let _ = std::fs::remove_dir_all(&root);
+        }
+    }
+
     /// tag (`tag:se`) populates the suggestion list; `Down` moves the
     /// suggestion cursor; `Tab` injects the highlighted tag into the query
     /// (replacing the `tag:se` partial); `Esc` pops back to Browse.
