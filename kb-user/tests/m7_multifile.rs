@@ -269,6 +269,114 @@ fn search_tag_filter_uses_alias_expansion() {
     assert!(out.contains("Attention"), "alias-expanded tag match: {out}");
 }
 
+// ---------------------------------------------------------------------------
+// the `Null` absence sentinel (exact-cased) — a page *lacks* the field
+// ---------------------------------------------------------------------------
+
+#[test]
+fn language_null_matches_pages_without_language() {
+    let s = Setup::new("null_lang");
+    write_page(&s, "with.md", "type: note\ntitle: With\nlanguage: en\n", "x\n");
+    write_page(&s, "without.md", "type: note\ntitle: Without\n", "y\n");
+    add(&s);
+
+    // Without-language page hit, with-language page not.
+    let (code, out, err) = run(&s, &["search", "language:Null"]);
+    assert_eq!(code, 0, "stderr: {err}");
+    assert!(out.contains("Without"), "absence hit: {out}");
+    assert!(
+        !out.contains("With\n"),
+        "page with a language must be excluded (see `Without`): {out}"
+    );
+
+    // The exact-cased sentinel only; lowercase `language:null` is a plain
+    // exact-value filter (and here, a no-match) — not the absence path.
+    let (code, out, err) = run(&s, &["search", "language:null"]);
+    assert_eq!(code, 0, "stderr: {err}");
+    assert!(
+        !out.contains("Without") && !out.contains("With\n"),
+        "lowercase value-match finds no literal \"null\" field: {out}"
+    );
+}
+
+#[test]
+fn type_null_is_a_documented_noop() {
+    let s = Setup::new("null_type");
+    write_page(&s, "typed.md", "type: note\ntitle: Typed\n", "x\n");
+    write_page(&s, "untitled.md", "title: Untyped\n", "y\n");
+    add(&s);
+
+    // A page without a `type:` field is *skipped from indexing* (the `NoType`
+    // `IndexError` → `skipped_no_type`), so it never becomes a `pages` row.
+    // `type:Null` therefore has no candidate to match — a documented no-op —
+    // rather than matching the (never-indexed) typeless page. This is the
+    // *other* of the two `IS NULL` paths; the `language_null` test above
+    // exercises the identical code shape for an indexable field.
+    let (code, out, err) = run(&s, &["search", "type:Null"]);
+    assert_eq!(code, 0, "stderr: {err}");
+    assert!(
+        out.contains("0 results") || out.trim() == "[]",
+        "typeless pages are skipped from the index, so type:Null is a no-op: {out}"
+    );
+    assert!(
+        !out.contains("Typed"),
+        "a type-bearing page must be excluded: {out}"
+    );
+}
+
+#[test]
+fn tag_null_matches_pages_without_any_tags() {
+    let s = Setup::new("null_tag");
+    write_page(
+        &s,
+        "tagged.md",
+        "type: note\ntitle: Tagged\ntags:\n  - foo\n  - bar\n",
+        "x\n",
+    );
+    write_page(&s, "tagless.md", "type: note\ntitle: Tagless\n", "y\n");
+    add(&s);
+
+    // tag:Null — the page lacks the tag field entirely (no `page_tags` row).
+    // A page that has *other* tags is still excluded; a page with a tag
+    // literally spelled "null" would be (the §5 absence contract).
+    let (code, out, err) = run(&s, &["search", "tag:Null"]);
+    assert_eq!(code, 0, "stderr: {err}");
+    assert!(out.contains("Tagless"), "absence hit: {out}");
+    assert!(
+        !out.contains("Tagged"),
+        "page carrying tags must be excluded: {out}"
+    );
+}
+
+#[test]
+fn null_sentinel_composes_with_content() {
+    let s = Setup::new("null_compose");
+    write_page(
+        &s,
+        "en.md",
+        "type: note\ntitle: En\nlanguage: en\n",
+        "transformer architecture\n",
+    );
+    write_page(
+        &s,
+        "unknown.md",
+        "type: note\ntitle: Unknown\n",
+        "transformer benchmarks\n",
+    );
+    add(&s);
+
+    // `transformer` matches both on content; `language:Null` narrows to the
+    // page without a language field.
+    let (code, out, err) = run(&s, &["search", "transformer language:Null"]);
+    assert_eq!(code, 0, "stderr: {err}");
+    assert!(out.contains("Unknown"), "content+narrowing hit: {out}");
+    assert!(
+        !out.contains("En\n"),
+        "language-bearing page excluded by the sentinel: {out}"
+    );
+}
+
+
 #[test]
 fn search_multiword_tag_filter_via_quoted_alias() {
     let s = Setup::new("search_multiword_tag");

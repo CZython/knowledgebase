@@ -12,6 +12,10 @@
 //! - `type:wiki` `language:en` — a **filter** on a *whitelisted* frontmatter
 //!   column (v1 keys: `type`, `language`, plus `tag:…` which joins `page_tags`);
 //!   exact string on the stored value. These are **not** FTS content.
+//! - `type:Null` `language:Null` `tag:Null` — the **absence** filter for the
+//!   same keys: the column must be `NULL` (or, for `tag`, no such tag row).
+//!   The sentinel is exact-cased `Null`, so a literal value `null` is
+//!   still an ordinary exact-value filter (`language:null`).
 //! - `apple banana` — FTS **AND** (implicit: whitespace-joined terms).
 //! - `~apple ~orange` — FTS **OR** group (one parenthesised `(a OR b)` clause).
 //! - `-pear` — FTS **NOT**.
@@ -63,6 +67,8 @@ pub struct Filter {
     /// The key (`type` / `language` / `tag`).
     pub key: String,
     /// The exact value to match (whitespace-trimmed, verbatim otherwise).
+    /// The special value `Null` means "the page **lacks** this field"
+    /// (the SQL layer renders `IS NULL` / a missing-tag `NOT EXISTS`).
     pub value: String,
 }
 
@@ -72,6 +78,17 @@ impl Filter {
     #[inline]
     pub fn is_tag(&self) -> bool {
         self.key == "tag"
+    }
+
+    /// `true` iff the value is the `Null` sentinel: "the page must **not**
+    /// have this field" (`type:Null` → `pages.type IS NULL`;
+    /// `language:Null` → `pages.language IS NULL`;
+    /// `tag:Null` → no row in `page_tags` with that name). Exact-cased
+    /// (`Null`), so a field value literally spelled `null` still matches
+    /// `language:null`.
+    #[inline]
+    pub fn is_null(&self) -> bool {
+        self.value == "Null"
     }
 }
 
@@ -491,6 +508,47 @@ mod tests {
         assert!(keys.contains("tag"));
         assert!(!keys.contains("foo"));
         assert_eq!(keys.len(), 3);
+    }
+
+    // ---- the `Null` absence sentinel --------------------------------------
+
+    #[test]
+    fn null_sentinel_is_a_filter_per_key() {
+        for key in ["type", "language", "tag"] {
+            let q = parse(&format!("{key}:Null"));
+            assert!(
+                q.filters.iter().any(|f| f.key == key && f.is_null()),
+                "{key}:Null must parse as a null filter"
+            );
+            assert!(q.and_terms.is_empty());
+        }
+    }
+
+    #[test]
+    fn null_sentinel_is_exact_cased() {
+        // `language:Null` is the sentinel…
+        let q = parse("language:Null");
+        let f = q.filters.iter().find(|f| f.key == "language").expect("a language filter");
+        assert!(f.is_null());
+        // …but `language:null` (lowercase) is a plain exact-value filter on
+        // the string "null" — a field *value* literally spelled "null" still
+        // matches, and the absence sentinel is exact-cased `Null`.
+        let q = parse("language:null");
+        let f = q.filters.iter().find(|f| f.key == "language").expect("a language filter");
+        assert!(!f.is_null());
+        assert_eq!(f.value, "null");
+        // Case-mixed is also not the sentinel.
+        assert!(parse("language:NULL")
+            .filters
+            .iter()
+            .all(|f| !f.is_null()));
+    }
+
+    #[test]
+    fn null_sentinel_and_content_coexist() {
+        let q = parse("language:Null attention");
+        assert!(q.filters.iter().any(|f| f.is_null()));
+        assert_eq!(q.and_terms.len(), 1);
     }
 
     // ---- AND / OR / NOT parsing --------------------------------------------

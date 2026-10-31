@@ -79,11 +79,27 @@ fn build_search_sql(
 
     for f in &parsed.filters {
         if !f.is_tag() {
-            params_vec.push(f.value.clone());
-            wheres.push(format!(
-                "lower(pages.{}) = lower(?{})",
-                f.key, params_vec.len()
-            ));
+            if f.is_null() {
+                // `type:Null` / `language:Null` — the absence filter: the
+                // column must be NULL. `lower(NULL)` is NULL in SQLite, so a
+                // simple `lower(pages.x) = lower(NULL)` never matches; the
+                // absence intent needs an explicit IS NULL.
+                wheres.push(format!("pages.{} IS NULL", f.key));
+            } else {
+                params_vec.push(f.value.clone());
+                wheres.push(format!(
+                    "lower(pages.{}) = lower(?{})",
+                    f.key, params_vec.len()
+                ));
+            }
+        } else if f.is_null() {
+            // `tag:Null` — the page lacks the tag field entirely: no row in
+            // `page_tags` for it (the list field is absent, per the §5
+            // "page lacks this field" contract — not "no tag named null").
+            wheres.push(
+                "NOT EXISTS (SELECT 1 FROM page_tags pt WHERE pt.abs_path = pages.abs_path)"
+                    .into(),
+            );
         }
     }
 
@@ -256,7 +272,7 @@ pub(crate) fn search_rows(
     // a `(empty, Some(tag))` signal so the CLI can print a specific message.
     let mut tag_match_sets: Vec<Vec<String>> = Vec::new();
     for f in &parsed.filters {
-        if f.is_tag() {
+        if f.is_tag() && !f.is_null() {
             let tag_val = f.value.clone();
             let match_set: Vec<String> = kbtags::canonicalize(&tag_val, &all_tags, &aliases)
                 .into_iter().map(|s: &str| s.to_string()).collect();
