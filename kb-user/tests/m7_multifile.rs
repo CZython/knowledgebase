@@ -270,7 +270,7 @@ fn search_tag_filter_uses_alias_expansion() {
 }
 
 // ---------------------------------------------------------------------------
-// the `Null` absence sentinel (exact-cased) — a page *lacks* the field
+// the `Null` absence sentinel (case-insensitive) — a page *lacks* the field
 // ---------------------------------------------------------------------------
 
 #[test]
@@ -285,7 +285,7 @@ fn language_null_matches_pages_without_language() {
     write_page(&s, "without.md", "type: note\ntitle: Without\n", "y\n");
     add(&s);
 
-    // Without-language page hit, with-language page not.
+    // `language:Null` — without-language page hit, with-language page not.
     let (code, out, err) = run(&s, &["search", "language:Null"]);
     assert_eq!(code, 0, "stderr: {err}");
     assert!(out.contains("Without"), "absence hit: {out}");
@@ -294,13 +294,17 @@ fn language_null_matches_pages_without_language() {
         "page with a language must be excluded (see `Without`): {out}"
     );
 
-    // The exact-cased sentinel only; lowercase `language:null` is a plain
-    // exact-value filter (and here, a no-match) — not the absence path.
+    // The sentinel is case-insensitive: lowercase `language:null` is the
+    // *same* absence path, so it also matches the without-language page.
     let (code, out, err) = run(&s, &["search", "language:null"]);
     assert_eq!(code, 0, "stderr: {err}");
     assert!(
-        !out.contains("Without") && !out.contains("With\n"),
-        "lowercase value-match finds no literal \"null\" field: {out}"
+        out.contains("Without"),
+        "lowercase sentinel is the absence path: {out}"
+    );
+    assert!(
+        !out.contains("With\n"),
+        "page with a language must be excluded (see `Without`): {out}"
     );
 }
 
