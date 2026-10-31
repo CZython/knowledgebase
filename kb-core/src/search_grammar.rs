@@ -528,20 +528,25 @@ mod tests {
     fn null_sentinel_is_exact_cased() {
         // `language:Null` is the sentinel…
         let q = parse("language:Null");
-        let f = q.filters.iter().find(|f| f.key == "language").expect("a language filter");
+        let f = q
+            .filters
+            .iter()
+            .find(|f| f.key == "language")
+            .expect("a language filter");
         assert!(f.is_null());
         // …but `language:null` (lowercase) is a plain exact-value filter on
         // the string "null" — a field *value* literally spelled "null" still
         // matches, and the absence sentinel is exact-cased `Null`.
         let q = parse("language:null");
-        let f = q.filters.iter().find(|f| f.key == "language").expect("a language filter");
+        let f = q
+            .filters
+            .iter()
+            .find(|f| f.key == "language")
+            .expect("a language filter");
         assert!(!f.is_null());
         assert_eq!(f.value, "null");
         // Case-mixed is also not the sentinel.
-        assert!(parse("language:NULL")
-            .filters
-            .iter()
-            .all(|f| !f.is_null()));
+        assert!(parse("language:NULL").filters.iter().all(|f| !f.is_null()));
     }
 
     #[test]

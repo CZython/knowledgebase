@@ -34,6 +34,10 @@ default = []
 # compiles in the same way as `kb-user` does.
 editor = []
 tui = ["dep:ratatui", "dep:crossterm", "dep:unicode-width", "dep:serde", "dep:toml"]
+# Shell-completion surface (`kb-hardened complete bash|zsh`). OFF by default
+# (headless/agent builds don't complete shells); toggling it on pulls in
+# `clap_complete` and compiles the `Complete` verb.
+completions = ["dep:clap_complete"]
 
 [[bin]]
 name = "kb-hardened"
@@ -41,6 +45,9 @@ path = "src/main.rs"
 
 [dependencies]
 clap = { workspace = true }
+# `kb-hardened complete` — same gate as kb-user, OFF by default in the
+# headless build (see [features]).
+clap_complete = { workspace = true, optional = true }
 kb-core = { workspace = true }
 kb-db   = { workspace = true }
 dirs    = { workspace = true }

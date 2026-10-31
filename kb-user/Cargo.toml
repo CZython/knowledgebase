@@ -28,9 +28,12 @@ description = "kb — the full knowledge-base CLI (interactive TUI + $EDITOR flo
 workspace = true
 
 [features]
-default = ["editor", "tui"]
+default = ["editor", "tui", "completions"]
 editor = []
 tui = ["dep:ratatui", "dep:crossterm", "dep:unicode-width", "dep:serde", "dep:toml"]
+# Shell-completion surface (`kb complete bash|zsh`). ON by default here:
+# it is an interactive convenience; the hardened build keeps it OFF.
+completions = ["dep:clap_complete"]
 
 [[bin]]
 name = "kb"
@@ -38,6 +41,9 @@ path = "src/main.rs"
 
 [dependencies]
 clap = { workspace = true }
+# `kb complete bash|zsh` — feature-gated behind `completions` (default on)
+# so the code + dep only exist when the surface is available.
+clap_complete = { workspace = true, optional = true }
 kb-core = { workspace = true }
 kb-db   = { workspace = true }
 dirs    = { workspace = true }

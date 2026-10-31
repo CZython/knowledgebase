@@ -74,6 +74,10 @@ rusqlite = { version = "0.32", features = ["bundled"] }
 
 # --- CLI ---
 clap = { version = "4.5", features = ["derive"] }
+# Shell-completion generator (`kb complete bash|zsh`). Pulled in only by
+# `kb-user` under its `completions` feature (on by default there, off in
+# `kb-hardened`) — same split as the TUI crates.
+clap_complete = "4.6"
 
 # --- XDG dirs (for ~/.local/share/knowledgebase/kb.db) ---
 dirs = "5"

@@ -460,6 +460,27 @@ pub(crate) enum Cmd {
         #[arg(long)]
         list_palettes: bool,
     },
+    /// Generate a shell completion script for <shell> (`bash` | `zsh`).
+    ///
+    /// Self-contained: `kb complete <shell>` prints a completion script for
+    /// `kb` itself, subcommand completions included. Install with
+    /// `source <(kb complete bash)` (bash) or
+    /// `fpath=(~/.local/share/kb $fpath); rehash` after
+    /// `kb complete zsh > ~/.local/share/kb/_kb` (zsh). No external
+    /// `completion` package required.
+    ///
+    /// Gated behind the `completions` feature (ON by default in `kb-user`,
+    /// OFF by default in `kb-hardened`): the hardened build rejects the
+    /// subcommand as unknown, mirroring the `tui` gate.
+    #[cfg(feature = "completions")]
+    Complete {
+        /// Target shell. Exactly one of `bash`, `zsh`.
+        #[arg(value_name = "SHELL")]
+        shell: String,
+        /// Write the script to this file instead of stdout.
+        #[arg(long, value_name = "FILE")]
+        file: Option<PathBuf>,
+    },
 }
 
 /// The section-level write verbs (all bind to the pure `kb-core::section` ops).
@@ -584,6 +605,13 @@ pub(crate) fn main() {
         "tag-alias", "links", "resolve", "info", "stats", "cron",
         "tui",
         "create",
+        // `complete` is only present when the `completions` feature is on
+        // (ON by default in `kb-user`; OFF in `kb-hardened`). Listing it
+        // unconditionally mirrors the `tui`/`edit` entries: in the hardened
+        // build the variant is `cfg`-compiled out and clap rejects the
+        // subcommand itself, rather than the bare-token shortcut falling
+        // through to a stray "0 results" search.
+        "complete",
         // section ops (also reachable bare in principle)
         "set", "append", "insert",
         "edit",
@@ -699,6 +727,9 @@ pub(crate) fn run(cli: &Cli) -> i32 {
                 c => Err(("tui exited unsuccessfully".into(), c)),
             }
         }
+        #[allow(unused_variables)]
+        #[cfg(feature = "completions")]
+        Cmd::Complete { shell, file } => cmd_complete(shell, file.as_deref()),
         Cmd::Cron { json } => {
             let bin = std::env::current_exe()
                 .map(|p| p.display().to_string())
@@ -752,6 +783,95 @@ pub(crate) fn run(cli: &Cli) -> i32 {
 }
 
 // ========================== M7 multi-file namespace ==========================
+
+/// The clap command **for the `kb complete` surface**. Starts from the
+/// derive-built CLI (so `name` / `version` / every subcommand + flag are
+/// identical) and grafts a `PossibleValuesParser` on the `search <query>`
+/// positional so the generated script completes the canonical filter keys
+/// plus the `Null` absence sentinel.
+///
+/// This is a **separate instance** from the one `Cli::parse()` uses at
+/// runtime: the runtime parser stays free-text (a possible-values
+/// restriction would reject every query outside the allow-list, e.g.
+/// `language:en` or an arbitrary search term). Splitting completion
+/// decoration from parse behavior is the minimum-diff way to keep both
+/// intact — the runtime surface is never constricted by the completion
+/// hints.
+#[cfg(feature = "completions")]
+pub(crate) fn cli_command() -> clap::Command {
+    use clap::CommandFactory;
+    let mut cmd = Cli::command();
+    let Some(search) = cmd.find_subcommand_mut("search") else {
+        return cmd;
+    };
+    let candidates = [
+        "tag:Null",
+        "type:Null",
+        "language:Null",
+        "type:wiki",
+        "type:note",
+        "type:label",
+    ];
+    // `mut_arg` is consuming (`mut self`), so we hand it an owned clone of
+    // the `search` subcommand, graft the possible-values parser on `query`,
+    // and write the result back. The runtime parse path keeps its free-text
+    // parser (the derive-built `Cli::parse()` instance is untouched).
+    *search = search
+        .clone()
+        .mut_arg("query", |a| {
+            a.value_parser(clap::builder::PossibleValuesParser::new(candidates))
+        });
+    cmd
+}
+
+/// Implement `kb complete bash|zsh` (the `completions` feature).
+/// Self-contained: no external `completion` package required — the
+/// script is generated from the *same* clap command instance that
+/// parses `kb`, so the completion surface can never drift from the
+/// runtime surface.
+#[cfg(feature = "completions")]
+fn cmd_complete(shell: &str, file: Option<&Path>) -> Result<i32, (String, i32)> {
+    use clap_complete::{generate, Shell};
+    let target: Shell = match shell {
+        "bash" => Shell::Bash,
+        "zsh" => Shell::Zsh,
+        other => {
+            return Err((
+                format!("complete: `bash` or `zsh` accepted, got `{other}`"),
+                EXIT_ERR,
+            ));
+        }
+    };
+    let bin_name = std::env::args()
+        .next()
+        .and_then(|p| {
+            // The binary path is `.../kb` or `.../kb-hardened`; take its
+            // file stem. We use the *actual* binary name so the emitted
+            // completion function names the right command.
+            std::path::Path::new(&p)
+                .file_stem()
+                .map(|s| s.to_string_lossy().into_owned())
+        })
+        .unwrap_or_else(|| "kb".to_string());
+    let mut buf: Vec<u8> = Vec::new();
+    generate(
+        target,
+        &mut cli_command(),
+        bin_name,
+        &mut buf,
+    );
+    // `generate` panics on write error; catch the panic-free path.
+    match file {
+        Some(p) => std::fs::write(p, &buf)
+            .map_err(|e| (format!("complete: cannot write {}: {e}", p.display()), EXIT_ERR))?,
+        None => {
+            use std::io::Write;
+            std::io::stdout().lock().write_all(&buf).map_err(|e| (format!("write: {e}"), EXIT_ERR))?;
+        }
+    }
+    Ok(EXIT_OK)
+}
+
 
 pub(crate) fn open_db(path: Option<&Path>) -> Result<Db, (String, i32)> {
     let db = match path {

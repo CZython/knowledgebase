@@ -276,7 +276,12 @@ fn search_tag_filter_uses_alias_expansion() {
 #[test]
 fn language_null_matches_pages_without_language() {
     let s = Setup::new("null_lang");
-    write_page(&s, "with.md", "type: note\ntitle: With\nlanguage: en\n", "x\n");
+    write_page(
+        &s,
+        "with.md",
+        "type: note\ntitle: With\nlanguage: en\n",
+        "x\n",
+    );
     write_page(&s, "without.md", "type: note\ntitle: Without\n", "y\n");
     add(&s);
 
@@ -375,7 +380,6 @@ fn null_sentinel_composes_with_content() {
         "language-bearing page excluded by the sentinel: {out}"
     );
 }
-
 
 #[test]
 fn search_multiword_tag_filter_via_quoted_alias() {

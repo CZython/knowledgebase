@@ -217,3 +217,25 @@ fn hardened_section_edit_is_rejected() {
         "clap should mention 'edit' or 'unrecognized' in the rejection stderr; got: {err}"
     );
 }
+
+/// In the **hardened** build the `completions` feature is OFF by default,
+/// so `kb-hardened complete` is `#[cfg(feature = "completions")]`-gated out
+/// of the `Cmd` enum. clap must reject the subcommand as unknown (exit 2).
+/// The user-side invariant (it IS present, and emits the canonical
+/// candidate set) is pinned in `kb-user/tests/m9_dispatch_user.rs`.
+#[test]
+fn hardened_complete_is_rejected() {
+    let s = Setup::new("complete_rej");
+    let (code, _, err) = {
+        let mut c = hardened_bin();
+        run(&mut c, &s.db, &["complete", "bash"])
+    };
+    assert_eq!(
+        code, 2,
+        "the hardened build has no `complete` subcommand; clap usage error is exit 2: {err}"
+    );
+    assert!(
+        err.contains("unrecognized subcommand") || err.contains("complete"),
+        "clap should name the unknown subcommand: {err}"
+    );
+}
