@@ -245,6 +245,17 @@ pub struct TagSuggestion {
     pub canonical: String,
 }
 
+/// Display metadata from a page's frontmatter, shown above the ToC in the
+/// Read pane. All fields are optional — a page may lack any of them.
+#[derive(Debug, Clone, Default)]
+pub struct FmMeta {
+    pub page_type: Option<String>,
+    pub language: Option<String>,
+    pub description: Option<String>,
+    pub tags: Vec<String>,
+    pub search_required_phrase: Option<String>,
+}
+
 /// A snapshot of a page's *body* in the Read mode (loaded from the DB on
 /// `Enter`, cached in the App — reading it out is O(1) per scroll since
 /// `body` is already text, and the outline is recomputed once per load).
@@ -270,6 +281,8 @@ pub struct ReadState {
     pub scroll_top: usize,
     /// The absolute file path, shown in the header for easy `cd`/`copy`.
     pub abs_path: String,
+    /// Frontmatter display metadata (type, language, description, tags, gates).
+    pub fm: FmMeta,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -742,7 +755,7 @@ impl App {
         // `search_open`; clearing here also kills any stale address from an
         // earlier search session.)
         self.search_return = None;
-        let (body, outline) = load_body(&self.db, &row.abs_path)?;
+        let (body, outline, fm) = load_body(&self.db, &row.abs_path)?;
         let id = row.id;
         // Keep a stable row-index for the header display: the index of the
         // page in the full (un-filtered) `rows` snapshot — not in `view`,
@@ -759,6 +772,7 @@ impl App {
             outline,
             scroll_top: 0,
             abs_path: row.abs_path,
+            fm,
         };
         self.mode = Mode::Read(rs);
         Ok(())
@@ -814,9 +828,10 @@ impl App {
         // (cheap: one fs read + one DB parse; a failure is a no-op so the
         // TUI stays usable on a transient io error).
         if let Mode::Read(r) = &mut self.mode {
-            if let Ok((body, outline)) = load_body(&self.db, &path.to_string_lossy()) {
+            if let Ok((body, outline, fm)) = load_body(&self.db, &path.to_string_lossy()) {
                 r.body = body;
                 r.outline = outline;
+                r.fm = fm;
                 r.scroll_top = 0;
             }
         }
@@ -2194,7 +2209,7 @@ impl App {
             _ => unreachable!("selected the row above only if in Search mode"),
         };
         self.search_return = Some(search);
-        let (body, outline) = load_body(&self.db, &abs_path)?;
+        let (body, outline, fm) = load_body(&self.db, &abs_path)?;
         let row_idx = self.rows.iter().position(|r| r.abs_path == abs_path).unwrap_or(0);
         self.mode = Mode::Read(ReadState {
             row_idx,
@@ -2203,6 +2218,7 @@ impl App {
             outline,
             scroll_top: 0,
             abs_path: abs_path.clone(),
+            fm,
         });
         self.set_info("open page — ↑↓ scroll · Esc back to search");
         Ok(())
@@ -2826,11 +2842,13 @@ fn list_pages(db: &Db) -> KbResult<Vec<PageRow>> {
 type Outline = Vec<(usize, u8, String)>;
 
 /// Load a page's body text (from the `pages.body` column) + its outline
-/// (a `heading_of` extraction over the body). Called by `App::open_read`.
-/// Total: an empty/NULL body renders as the empty string + an empty outline.
+/// (a `heading_of` extraction over the body) + frontmatter display metadata.
+/// Called by `App::open_read`.
+/// Total: an empty/NULL body renders as the empty string + an empty outline;
+/// missing frontmatter fields render as `None` (the FmMeta is all-optional).
 /// The page is looked up by *absolute path* (the stable identity), so a
 /// `full-rebuild` (which reassigns SQLite rowids) cannot open the wrong page.
-fn load_body(db: &Db, abs_path: &str) -> KbResult<(String, Outline)> {
+fn load_body(db: &Db, abs_path: &str) -> KbResult<(String, Outline, FmMeta)> {
     let body: String = db
         .conn
         .query_row(
@@ -2840,7 +2858,47 @@ fn load_body(db: &Db, abs_path: &str) -> KbResult<(String, Outline)> {
         )
         .map_err(|e| (format!("body lookup for {abs_path}: {e}"), EXIT_ERR))?;
     let outline = outline_of(&body);
-    Ok((body, outline))
+    let fm = load_fm_meta(db, abs_path)?;
+    Ok((body, outline, fm))
+}
+
+/// Load the display metadata (type, language, description, tags, gates)
+/// from the `pages` + `page_tags` tables. All fields optional — a page
+/// may lack any of them. Failures are non-fatal (the Read pane still
+/// renders the body + outline; the metadata block is simply empty).
+fn load_fm_meta(db: &Db, abs_path: &str) -> KbResult<FmMeta> {
+    let (page_type, language, description, srp): (
+        Option<String>,
+        Option<String>,
+        Option<String>,
+        Option<String>,
+    ) = db
+        .conn
+        .query_row(
+            "SELECT type, language, description, search_required_phrase \
+             FROM pages WHERE abs_path = ?1",
+            [abs_path],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+        )
+        .map_err(|e| (format!("meta lookup for {abs_path}: {e}"), EXIT_ERR))?;
+    let mut tags: Vec<String> = Vec::new();
+    if let Ok(mut stmt) = db
+        .conn
+        .prepare("SELECT tag FROM page_tags WHERE abs_path = ?1 ORDER BY tag")
+    {
+        if let Ok(it) = stmt.query_map(rusqlite::params![abs_path], |r| r.get::<_, String>(0)) {
+            for t in it.flatten() {
+                tags.push(t);
+            }
+        }
+    }
+    Ok(FmMeta {
+        page_type,
+        language,
+        description,
+        tags,
+        search_required_phrase: srp,
+    })
 }
 /// Run the TUI: open the DB, load the snapshot, hand off to the event
 /// loop, and restore the terminal on the way out (the `Drop` guard in

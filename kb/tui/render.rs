@@ -56,7 +56,7 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, List as RatList, ListItem, ListState, Paragraph};
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
-use crate::tui::{App, Mode, PageRow, ReadState, StatusKind};
+use crate::tui::{App, FmMeta, Mode, PageRow, ReadState, StatusKind};
 use crate::tui::palette::Palette;
 
 /// Draw the whole screen for `app`. Called once per event-loop tick.
@@ -201,13 +201,13 @@ fn draw_read(f: &mut Frame, app: &App, rs: &ReadState, area: ratatui::layout::Re
         .style(app.palette.label);
     f.render_widget(header, chunks[0]);
 
-    // The panes row: body (~70%) | outline (~30%, or 0 if the page has no
-    // headings).
+    // The panes row: body | [frontmatter + outline, or body only].
+    let p = &app.palette;
+    let fm_lines = fm_meta_lines(p, &rs.fm);
+    let has_fm = !fm_lines.is_empty();
     let has_outline = !rs.outline.is_empty();
-    // 60/40 (was 70/30): the outline pane needs enough width that `L<n>` +
-    // indent + title sit on one line at common terminal widths; too narrow
-    // and a `Paragraph` wraps mid-word (see the H2→"sub/section" break).
-    let pane_constraints = if has_outline {
+    let has_right = has_fm || has_outline;
+    let pane_constraints = if has_right {
         [Constraint::Percentage(60), Constraint::Percentage(40)]
     } else {
         [Constraint::Percentage(100), Constraint::Length(0)]
@@ -226,7 +226,6 @@ fn draw_read(f: &mut Frame, app: &App, rs: &ReadState, area: ratatui::layout::Re
     //
     // P7: ATX headings (`#` through `######`) render in the `p.label` role;
     // every other line stays in the default `p.default` role.
-    let p = &app.palette;
     let body_lines: Vec<Line<'static>> = rs.body.lines().map(|l| read_line(p, l)).collect();
     // The "row N of M" note in the body pane title now reports rendered
     // rows (what the user sees), not logical lines. `scroll_top` is the
@@ -247,34 +246,99 @@ fn draw_read(f: &mut Frame, app: &App, rs: &ReadState, area: ratatui::layout::Re
         .scroll((rs.scroll_top as u16, 0));
     f.render_widget(body_widget, panes[0]);
 
-    if has_outline {
-        // A `List`, not a `Paragraph`: each heading stays on **one row** and
-        // never wraps mid-word (the old `Paragraph` + `Wrap{trim:false}` broke
-        // `L3  H2 section` into two visible lines in narrow panes). Rows are
-        // indented per heading level; the `L<n>` anchor is dimmed (the title
-        // is the focus) and `¶` marks an empty-title heading (same convention
-        // as the body's `read_line`). Palette-driven: `p.dim` for the anchor,
-        // `p.label` for the title, `p.label` for the empty-title glyph, and
-        // `p.selection` for the highlight (so the pane is visually ready for
-        // M8.2's Enter-to-jump — today there's no state, so no row stands out).
-        let rows: Vec<ratatui::widgets::ListItem> = rs
-            .outline
-            .iter()
-            .map(|(line, level, title)| {
-                ratatui::widgets::ListItem::new(outline_line(p, *line, *level as usize, title))
-            })
-            .collect();
-        let outline_widget = RatList::new(rows).block(
-            Block::default()
-                .borders(Borders::ALL)
-                .title(format!(" outline — {} section(s)  (M8.2: Enter will jump)", rs.outline.len())),
-        );
-        // No `ListState` (yet) — no highlight. When M8.2 lands, swap to
-        // `render_stateful_widget` + an `outline_cursor` field on `ReadState`.
-        f.render_widget(outline_widget, panes[1]);
+    if has_right {
+        // Right pane: frontmatter block on top (fixed rows), outline below
+        // (variable, takes the rest). Each sub-pane is a bordered widget, so
+        // the user can visually separate the two.
+        let mut sub_constraints: Vec<Constraint> = Vec::new();
+        if has_fm {
+            // The bordered block needs +1 (top border) row beyond the text rows;
+            // the bottom border rides on the next chunk's top border or the
+            // pane's edge, so `1 + len` is the guaranteed minimum.
+            sub_constraints.push(Constraint::Length(2 + fm_lines.len() as u16));
+        }
+        if has_outline {
+            sub_constraints.push(Constraint::Min(3));
+        }
+        let right_sub = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints(sub_constraints)
+            .split(panes[1]);
+
+        if has_fm {
+            let fm_widget = Paragraph::new(fm_lines).block(
+                Block::default()
+                    .borders(Borders::ALL)
+                    .title(" frontmatter"),
+            );
+            f.render_widget(fm_widget, right_sub[0]);
+        }
+
+        if has_outline {
+            let outline_area = if has_fm { right_sub[1] } else { right_sub[0] };
+            // A `List`, not a `Paragraph`: each heading stays on **one row** and
+            // never wraps mid-word (the old `Paragraph` + `Wrap{trim:false}` broke
+            // `L3  H2 section` into two visible lines in narrow panes). Rows are
+            // indented per heading level; the `L<n>` anchor is dimmed (the title
+            // is the focus) and `¶` marks an empty-title heading (same convention
+            // as the body's `read_line`).
+            let rows: Vec<ratatui::widgets::ListItem> = rs
+                .outline
+                .iter()
+                .map(|(line, level, title)| {
+                    ratatui::widgets::ListItem::new(outline_line(p, *line, *level as usize, title))
+                })
+                .collect();
+            let outline_widget = RatList::new(rows).block(
+                Block::default()
+                    .borders(Borders::ALL)
+                    .title(format!(" outline — {} section(s)", rs.outline.len())),
+            );
+            f.render_widget(outline_widget, outline_area);
+        }
     }
 
     render_status_bar(f, app, chunks[2]);
+}
+
+/// Render the frontmatter metadata as a list of Lines for the Read right pane.
+/// Empty input (all fields absent) → an empty vec (the caller hides the pane).
+/// Fields are rendered in a canonical order: type → language → description →
+/// tags → gates (search_required_phrase). Missing fields are skipped; the
+/// user sees only what the page actually has.
+fn fm_meta_lines(p: &Palette, fm: &FmMeta) -> Vec<Line<'static>> {
+    let mut out: Vec<Line<'static>> = Vec::new();
+    fn kv(out: &mut Vec<Line<'static>>, p: &Palette, k: &str, v: &str) {
+        out.push(Line::from(vec![
+            Span::styled(format!(" {k:<13}"), p.dim),
+            Span::styled(v.to_string(), p.default),
+        ]));
+    }
+    if let Some(t) = &fm.page_type {
+        kv(&mut out, p, "type", t);
+    }
+    if let Some(l) = &fm.language {
+        kv(&mut out, p, "language", l);
+    }
+    if let Some(d) = &fm.description {
+        out.push(Line::from(vec![
+            Span::styled(" description ", p.dim),
+            Span::styled(d.clone(), p.default),
+        ]));
+    }
+    if !fm.tags.is_empty() {
+        out.push(Line::from(vec![
+            Span::styled(" tags         ", p.dim),
+            Span::styled(fm.tags.join(", "), p.default),
+        ]));
+    }
+    if let Some(g) = &fm.search_required_phrase {
+        out.push(Line::from(vec![
+            Span::styled(" gates        ", p.dim),
+            Span::styled(g.clone(), p.label),
+        ]));
+    }
+    out
 }
 
 /// The form for the Edit mode (M8.2): a 1-line header (the "editing
