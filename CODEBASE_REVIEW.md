@@ -1,8 +1,8 @@
 # `kb` — general codebase review
 
-Date: 2026-10-24 · Branch: `main`
+Date: 2026-10-24 (re‑reviewed 2026‑11‑01) · Branch: `kb-threat-verification`
 Scope: everything *beyond* the hardened-variant pentest (see
-`PENTEST_KB-HARDENED.md`). Concerns: oversized functions, hidden
+`PENTEST_HARDENED.md`). Concerns: oversized functions, hidden
 `panic`/`unwrap`/index panics on the agent path, duplicated logic, error /
 JSON / SQL consistency, and **searchability** (can a newcomer or agent find a
 thing without already knowing where it lives?).
@@ -548,6 +548,82 @@ compatibility. Fine. The *comment* explains the why — good.
 `Cargo.toml:58`. A *single* SQLite in the tree. Good. The comment
 explains the why.
 
+### E7 · Supply-chain pins (2026‑11‑01) — [OK] **CONFORMS / noted**
+
+Re‑checked `Cargo.lock` on 2026‑11‑01 (cargo‑audit is not installed on this
+box, so this is a manual pin‑audit of the load‑bearing deps):
+
+| dep | version | note |
+|-----|---------|------|
+| `rusqlite` | 0.32.1 | bundled; the one SQLite in the tree (E6) |
+| `libsqlite3-sys` | 0.30.1 | the bundled SQLite C source — the only *native* surface |
+| `clap` | 4.6.7 | |
+| `ratatui` | 0.29.0 | TUI; compiled out of `kb-hardened` |
+| `crossterm` | 0.28.1 | |
+| `serde` / `serde_derive` | 1.0.229 | |
+| `toml` / `toml_edit` / `toml_datetime` | 0.8.23 / 0.22.27 / 0.6.11 | palette deserialization, `deny_unknown_fields` (see below) |
+| `dirs` / `dirs-sys` | 5.0.1 / 0.4.1 | `data_local_dir` default DB path |
+| `vstd` | `=0.0.0-2026-09-06‑0133` | exact pinned (E5) |
+
+- **Native surface is just `libsqlite3-sys@0.30.1`** (bundled). That is the
+  single dep a C‑level CVE would matter in; no other crate compiles native
+  code. No `unsafe` in any of our three crates (`workspace.lints` `forbid`,
+  C2).
+- `toml` deserialization (the one *external‑input* parser we run on file
+  content) is **TUI‑only** (`kb/tui/palette.rs`) and is gated
+  `#[serde(deny_unknown_fields)]` on the top table, so an unknown key is an
+  error, not silently dropped. It is **not** in the `kb-hardened` / agent
+  path at all (no TUI there).
+
+_No open CVE found by manual pin‑audit; the only residual is the usual
+"re‑run when cargo‑audit is available."_
+
+---
+
+## F. 2026‑11‑01 re‑review (code health vs. the new findings)
+
+Three findings from the 2026‑11‑01 re‑pentest
+(`SECURITY_REPORT.md` §3.18–§3.20) have code‑health / searchability
+consequences that belong here rather than in the security doc:
+
+### F1 · `needs_quoting` / `render_term` have no test pin for a `*` in the *content* — [M] **OPEN**
+
+`SECURITY_REPORT §3.18`. The `a"b` case is pinned
+(`search_grammar.rs:643`), but no test covers a content token that contains
+an FTS5 operator (`*`). That is exactly why the `**` collision shipped: the
+prefix‑append rule and the quoting rule live in two fns with no shared test
+for their *composition.*
+
+**Code‑health ask (beyond the one‑line security fix):** add a small table‑driven
+test to the existing block that pins `render_term` over `["abc*", "žltá*",
+"a b", 'a"b', "plain"]` and asserts the *exact* rendered string. That turns
+the "escaping/quoting correct" contract into an enforceable check instead of
+a comment, and would have caught 3.18.
+
+### F2 · `atomic_write` and `tag-alias --export` re‑implement the temp‑file discipline a third time — [M] **OPEN**
+
+`SECURITY_REPORT §3.19` + `§3.20`. The repo now has **three** copies of
+"write to a temp file, then move to the real path":
+1. `kb/cli/editor.rs:82-87` — editor buffer, **hardened** (pid+seq+nanos, F8).
+2. `kb/main.rs:1229-1246` — `atomic_write`, **not hardened** (fixed name, `O_CREAT|O_TRUNC`).
+3. `kb/cli/tag.rs:170` — alias export, **not hardened** (`std::fs::write`).
+
+That is the same "duplicated logic with divergent hardening" smell the B/A
+sections already flagged, and it is precisely why the editor path got fixed
+while the other two did not. **Code‑health ask:** extract one
+`unique_tmp_in(dir, base) -> PathBuf` (use the editor‑buffer naming recipe)
+and route all three through it. One owner, one TOCTOU answer — the same
+"c4 → `sql_quote_lower` single owner" pattern (C4) that already fixed §3.4.
+
+### F3 · `search_grammar` render‑order contract is load‑bearing but only partly pinned by the FTS5 probe — [L] **NOTED**
+
+`kb-db/tests/fts5.rs:312+` is the good part: it seeds real rows and asserts
+the *engine* returns the intended row set, so "the render string means what
+the grammar intends" is checked against the bundled build, not just a string
+equality. That is the right place for §3.18's regression to live (an FTS5
+probe for `MATCH '"abc*"*'`), in addition to the `render_term` unit pin
+(F1). Noted so the fix lands in *both* places and the two stay consistent.
+
 ---
 
 ## Summary of fixes ranked by impact
@@ -592,3 +668,11 @@ C5 (`load_corpus` NULL‑title surfaced), D2 (`GATE_COL` const), D4 (`Kb` →
 Confirmed‑conforming positive observations, no action: C6 (error‑shape
 consistency), E2 (`panic=abort`), E3 (`cargo user` alias), E4 (9‑line
 `main.rs` shells), E5 (`vstd` pin), E6 (`rusqlite` bundled)._
+
+**2026‑11‑01 re‑review:** three new items open — F1 (`render_term`/`needs_quoting`
+composition test gap · SEC §3.18), F2 (temp‑file discipline split across 3 sites
+· SEC §3.19/§3.20), F3 (note: FTS5 probe + unit pin both needed). The two
+code‑health asks (F1's table‑driven `render_term` pin and F2's single
+`unique_tmp_in` helper) are independent of the security‑doc fix and worth
+landing *before* the one‑line `needs_quoting` change, so the regression is
+tripped twice, not once. E7 confirms supply‑chain pins are current.

@@ -15,15 +15,15 @@
 
 The rest of the binary is in-process `std::fs` + `rusqlite` (all prepared statements — no SQL injection), and the remaining findings are correctness/robustness/logic bugs (silent no-ops, short-circuits, swallowed errors) and quadratic-scaling hotspots. None of them grant code execution. Rust's memory safety correctly caught no *memory* bugs across the surface I scanned — every finding I confirmed is a **logic** bug the borrow-checker is blind to.
 
-| Severity | Count | IDs |
-|----------|-------|-----|
-| HIGH     | 2     | 3.1, 3.3 |
-| MED      | 7     | 3.2, 3.4–3.9 |
-| LOW      | 6     | 3.10–3.15 |
-| LOW (perf) | 2   | 3.16, 3.17 |
-| **Total** | **17** | |
+| Severity    | Count | IDs |
+|-------------|-------|-----|
+| HIGH        | 2     | 3.1, 3.3 |
+| MED         | 8     | 3.2, 3.4–3.9, 3.18 |
+| LOW         | 8     | 3.10–3.15, 3.19, 3.20 |
+| LOW (perf)  | 2     | 3.16, 3.17 |
+| **Total**   | **20** | |
 
-**All 17 findings are RESOLVED.** 3.1 (RCE) was fixed by design decision (compile-time `edit` gating). 3.3 (GC) was the highest-priority *code* fix — it is now in place (`refresh.rs:224-229`, `gc_skipped`). Every other finding has a RESOLVED status tag in its header, and each fix carries a `SECURITY_REPORT 3.X` cross-ref in source plus a regression test.
+**Status at 2026-11-01:** the original 17 findings are all RESOLVED (3.1 RCE by design — compile-time `edit` gating; 3.3 GC now gated on walk success via `gc_skipped`, `refresh.rs:224-229`). **Three new findings (3.18 MED, 3.19 LOW, 3.20 LOW) were confirmed during the 2026-11-01 re-pentest against the current tree — see §3.18–§3.20 and §7.10–§7.12.** 3.18 is a one-line `needs_quoting` fix that violates the header's own "escaping/quoting correct" contract; 3.19/3.20 are the 3.2 temp-file TOCTOU pattern reappearing in the write and export paths.
 
 ---
 
@@ -59,6 +59,12 @@ Each finding lists **Where** (file:line), the **impact**, the **trigger**, and a
 | [3.15](#315-low--schema_version--on-an-unmigrated-db-returns-err-not-none) | LOW | `schema_version()` on an unmigrated DB returns `Err`, not `None` |
 | [3.16](#316-low-perf--quadratic--onm-scans-in-kb-core) | LOW (perf) | Quadratic / O(n·m) scans in `kb-core` |
 | [3.17](#317-low-perf--per-iteration-sql-prep-in-kb-cli) | LOW (perf) | Per-iteration SQL prep in `kb` CLI |
+| [3.18](#318-med--fts5-prefix-suffix-collision-reproduced-2026-11-01) | MED | FTS5 prefix-suffix collision: any user `*` makes the query error out (**OPEN**, 2026-11-01) |
+| [3.19](#319-low--predictable-atomic_write-temp-name-no-o_excl-reproduced-2026-11-01) | LOW | Predictable `atomic_write` temp name, no `O_EXCL` (3.2 pattern in the write path; **OPEN**, 2026-11-01) |
+| [3.20](#320-low---export-file-write-bypasses-atomic_write-reproduced-2026-11-01) | LOW | `tag-alias --export` writes without `atomic_write` (3.2 pattern in the export path; **OPEN**, 2026-11-01) |
+| [3.18](#318-med--fts5-prefix-suffix-collision-any-user--makes-the-query-error-out) | MED | FTS5 prefix-suffix collision: any user `*` makes the query error out |
+| [3.19](#319-low--predictable-atomic_write-temp-name-no-o_excl-32-pattern-in-the-write-path) | LOW | Predictable `atomic_write` temp name, no `O_EXCL` (3.2 pattern in the write path) |
+| [3.20](#320-low--tag-alias---export-writes-the-tsv-without-atomic_write-32-pattern-in-the-export-path) | LOW | `tag-alias --export` writes the TSV without `atomic_write` (3.2 pattern in the *export* path) |
 
 ### 3.1  HIGH — RCE via `$VISUAL`/`$EDITOR` (`kb section edit`) · **RESOLVED** · **reproduced (§7.1/§7.9)**
 
@@ -336,6 +342,72 @@ All CLI-reachable; fine at small corpus, painful at 10k+ pages/files.
 - `kb/src/main.rs:786-820` — for **each** `tag:` filter the code re-`prepare()`s and fully collects `tag_aliases` **and** `DISTINCT tag FROM page_tags`. N tag filters → N full table scans of the same data. **Fix:** hoist both loads before the filter loop.
 - `kb/src/main.rs:1600-1626` — `cmd_links` backlink loop calls `db.conn.prepare("SELECT to_path FROM links WHERE from_path = ?1")` **inside** `for (from_abs,_) in corpus_pages.iter()`. O(N) `prepare()` + N `query_map()` over a table that should be one prepared statement. 10k corpus → 10k prepares. **Fix:** load all forward edges into a `BTreeMap<String, Vec<String>>` once; iterate in memory.
 
+### 3.18 MED — FTS5 prefix-suffix collision: any user `*` makes the query error out · **OPEN** · **reproduced (§7.10)**
+
+Where: `kb-core/src/search_grammar.rs:210-241` — `needs_quoting()` and `render_term()`.
+
+`render_term`'s *bare-term* rule appends an FTS5 prefix `*` when the term is not a phrase. `needs_quoting` returns true for empty / whitespace / double-quote content, but **not for a literal `*`**, so a bare term that *does* contain `*` falls into the else branch and is emitted unquoted with **another** `*` suffix appended:
+
+```rust
+pub fn needs_quoting(s: &str) -> bool {          // :210
+    s.is_empty() || s.contains(' ') || s.contains('"')
+}
+pub fn render_term(t: &Term) -> String {         // :229
+    ...
+        } else if needs_quoting(text) {
+            format!("\"{}\"*", text.replace('"', "\"\""))
+        } else {
+            format!("{text}*")                   // `abc*` → `abc**`
+        }
+```
+
+FTS5 rejects a double prefix (`**`) at parse time — the query that `kb` then binds into `pages_fts MATCH ?N` is syntactically invalid. Reproduced against the release binary: `kb search 'abc*'` → `kb: search rows: fts5: syntax error near "*"` (exit 1); `kb search 'watch*'`, `kb search 'žltá*'` → the same FTS5 error. The same failure fires on the `--json` path, breaking the `--json` "stdout is always a clean JSON document" contract (a prose error leaks to stderr, but exit is still 1, so a script that pipes the JSON and `jq`es it gets nothing).
+
+**Impact:** any user/agent who types a `*` mid-term (e.g. to search for the literal word `star*` from `cargo`'s manifest, or a glob like `*.md` in a tag) gets a hard error instead of a 0-results row-set. The contract the header promises — *"escaping/quoting correct"* (line 7 of `search_grammar.rs` and `kb-db/tests/fts5.rs:338` "the render string means what the grammar intends") — is **violated** for tokens containing `*`.
+
+**Fix (one line + unit test):**
+```rust
+pub fn needs_quoting(s: &str) -> bool {
+    s.is_empty() || s.contains(' ') || s.contains('"') || s.contains('*')
+}
+```
+which routes `abc*` → `"abc"*` — valid FTS5 (quoted phrase + prefix), as confirmed by the standalone `sqlite3 :memory:` probe:
+```
+SELECT x FROM t WHERE t MATCH '"abc*"*' → rows whose text begins with `abc*`
+```
+Add a unit test pinning this in the existing `search_grammar` test block (the `a"b` case at `:643` is the model):
+```rust
+let t = Term::Token { text: "abc*".into(), phrase: false };
+assert_eq!(render_term(&t), "\"abc*\"*");
+let t = Term::Token { text: "žltá*".into(), phrase: false };
+assert_eq!(render_term(&t), "\"žltá*\"*");
+```
+
+### 3.19 LOW — predictable `atomic_write` temp name, no `O_EXCL` (3.2 pattern in the *write* path) · **OPEN**
+
+Where: `kb/main.rs:1229-1246` — `atomic_write`.
+
+```rust
+let tmp = dir.join(format!(".{name}.kb~tmp"));       // :1238  fixed predictable name
+let mut f = std::fs::File::create(&tmp)?;            // :1240  create-or-truncate
+```
+
+`File::create` is open-with-`O_CREAT|O_TRUNC`, not `O_EXCL`: if the caller does not own the directory (e.g. the target directory is world-writable, or a symlink was planted in between the earlier `fs::read` and the `rename`), the `rename` over the existing file follows the symlink and **replaces the target file's inode** with our `tmp` — the classic `mktemp`-style race. The `kb` write path uses `atomic_write` in every section/replace/fm op (see `commit` at `main.rs:1123`), so this is on the *hot write path* not just the editor path (3.2 was the editor temp buffer; 3.19 is the file-write temp).
+
+Note the editor-temp buffer already got the pid+seq+nanos hardening (F8, `kb/cli/editor.rs:82-87`) but the file-write temp did not — the hardening only covered the editor.
+
+**Impact:** in a hostile multi-user `/tmp` (or a world-writable corpus directory on a shared NFS mount), a rival uid can pre-plant a symlink at the temp path and have the `rename` replace an arbitrary file they own. Same threat class as 3.2, same fix shape.
+
+**Fix:** either (a) open with `OpenOptions::new().create_new(true).write(true)` (which is `O_CREAT|O_EXCL`) and fall back to `tmp.with_extension(format!("{}.kb~tmp", process::id()))` on `AlreadyExists`, or (b) use a per-pid suffix **identical to the editor-buffer recipe** (`.{name}.kb-{pid}-{seq}-{nanos}~tmp`) so the name is unguessable. (a) is the canonical mkostemp idiom; (b) reuses existing code.
+
+### 3.20 LOW — `tag-alias --export` writes the TSV without `atomic_write` (3.2 pattern in the *export* path) · **OPEN**
+
+Where: `kb/cli/tag.rs:170` (`--export`) and `do_import` at `kb/cli/tag.rs:270-284`.
+
+`do_import` reads an arbitrary file (or stdin) and parses it line-by-line; the file *path* is argv, not env, so the threat model already trusts argv. The *content* is parsed by `kbalias::parse_line` (`kb-core/src/aliases.rs:84`) and only accepted if non-empty and tab-separated. **Verified safe**: no injection, no exec, no `format!`-into-SQL in the import path. Recorded here because the export path writes the alias TSV to a user-controlled path **without** going through `atomic_write` (`std::fs::write` at `:170`) — same 3.19 class, and the file is TSV (the `M8 recovery pathway`, per the code comment at `:163`), so a hostile pre-planted symlink at that path on a shared host is the same race as 3.19.
+
+**Status: by design** (export/import is an *operator* flow with explicit argv), noted for completeness.
+
 ## 4. What is safe (verified non-issues)
 
 These were specifically checked so the team doesn't re-litigate them:
@@ -549,6 +621,63 @@ The `marker_file` exists because the CLI spawned the attacker-chosen program. To
 
 **Residual note after `edit` is disabled:** none of the other subcommands (`set`, `append`, `insert`, `replace`, `rm`, `patch`, `tag-alias import/export`, `add`, `search`, `links`, `resolve`, `refresh`, `full-rebuild`) call `std::process::Command` in non-test code. The single non-test spawn is the editor flow; the second spawn (`main.rs:2787`, `python3`) is `#[cfg(test)]`. Disabling `edit` removes the only exec vector.
 
+### 7.10 3.18 FTS5 `**` collision — reproduced
+
+Reproduced on 2026-11-01 against the release binary, with a 2-page corpus. The user-supplied term is bound as an FTS5 parameter — the only FTS5-level surface for `*` is therefore the *prefix-suffix* rule in `render_term` (see §3.18).
+
+```
+$ KB search 'abc*'        --db $DB
+kb: search rows: fts5: syntax error near "*"
+$ KB search 'watch*'      --db $DB
+kb: search rows: fts5: syntax error near "*"
+$ KB search 'žltá*'       --db $DB
+kb: search rows: fts5: syntax error near "*"
+$ KB search 'abc*' --json --db $DB | jq .   # JSON contract broken
+kb: search rows: fts5: syntax error near "*"   # (stderr; nothing on stdout)
+```
+
+The same `render_term`/`needs_quoting` is used by the TUI search mode (in-process, same binary), so the TUI's search box is affected identically: any `*` typed in a bare term produces a hard FTS5 error rather than a row-set. The header's own contract — *"escaping/quoting correct"* (`search_grammar.rs:7`) — is broken for tokens containing `*`.
+
+Confirming the fix shape works on the bundled engine (no code change yet):
+```
+$ sqlite3 :memory: "
+    CREATE VIRTUAL TABLE t USING fts5(x);
+    INSERT INTO t(x) VALUES ('abc star'), ('abcd star');
+    SELECT * FROM t WHERE t MATCH '\"abc*\"*';"
+abc star          # rows that start with `abc*` — the intended prefix query
+```
+i.e. once `needs_quoting` returns true for `contains('*')`, `render_term` emits `"abc*"*` and FTS5 accepts it.
+
+### 7.11 3.19 `atomic_write` temp — code-confirmed (not CLI-reproducible)
+
+Where: `kb main.rs:1229-1246` — `atomic_write`.
+```rust
+let tmp = dir.join(format!(".{name}.kb~tmp"));            // :1238 fixed name
+let mut f = std::fs::File::create(&tmp)?;                 // :1240 O_CREAT|O_TRUNC
+...
+std::fs::rename(&tmp, path)?;                             // :1244
+```
+`File::create` is the `open(O_CREAT|O_TRUNC)` path — not `O_EXCL`. In a hostile multi-user `/tmp` (or a world-writable corpus dir on a shared host), a rival uid can pre-plant `/path/to/./file.md.kb~tmp` (or a symlink at that path) and have the `rename` at `:1244` replace the symlink target's inode with our `tmp`. The editor-temp buffer already got the pid+seq+nanos hardening in F8 (`kb/cli/editor.rs:82-87`); the *file-write* temp did not.
+
+To fully close 3.19+3.20 in one sweep: extract a `unique_tmp_in(dir: &Path, base_name: &str) -> PathBuf` helper that uses the editor-buffer naming recipe, and call it from both `atomic_write` and the `--export` site. (Optionally, also `OpenOptions::create_new(true)` for the strict `O_EXCL` guarantee; `create_new` is portable to the FFI we already use.)
+
+### 7.12 3.20 `tag-alias --export` write — code-confirmed
+
+Where: `kb cli/tag.rs:170` (`do_import`'s sibling).
+```rust
+let n = aliases.len();
+match file {
+    Some(p) => {
+        std::fs::write(p, text)   // :170  create-or-truncate, no O_EXCL
+            .map_err(|e| (format!("write {}: {e}", p.display()), EXIT_ERR))?;
+        println!("exported {n} alias row(s) to {}", p.display());
+    }
+    ...
+```
+`std::fs::write` is the same `open(O_CREAT|O_TRUNC)` primitive as 3.19. The TSV path is the *M8 recovery pathway* (per the code comment at `:163`), so an operator might export to a shared directory; a hostile pre-planted symlink at the destination is the same race as 3.19. `--import` (the inverse) does not write, so it is not affected.
+
+**Fix:** route the export through the same `unique_tmp_in` + rename pattern as `atomic_write` (§7.11) — i.e. `export` becomes the write-side sibling of the import path, both under one helper.
+
 ---
 
 ## Appendix A — severity tally
@@ -572,5 +701,14 @@ The `marker_file` exists because the CLI spawned the attacker-chosen program. To
 | 3.15 | LOW | doc/behavior | kb-db/src/lib.rs:169 | `None` on missing table |
 | 3.16 | LOW(perf) | O(n²)/O(n·m) | tags.rs, links.rs, aliases.rs, resolve.rs, diff.rs | sets / hoisting / cap |
 | 3.17 | LOW(perf) | SQL prep | kb/src/main.rs:786-820, 1600-1626 | hoist out of loop |
+| 3.18 | MED      | FTS5 well-formed | kb-core/src/search_grammar.rs:210-241 | `needs_quoting` += `contains('*')` + test pin |
+| 3.19 | LOW      | temp-file TOCTOU | kb/main.rs:1229-1246 | `O_EXCL` or per-pid naming (3.2 pattern, write path) |
+| 3.20 | LOW      | temp-file TOCTOU | kb/cli/tag.rs:170 | route through `atomic_write` (3.2 pattern, export path) |
 
-**TOTALS:** 2 HIGH · 7 MED · 6 LOW · 2 LOW(perf) = 17 findings. 1 HIGH (RCE, 3.1) is neutralised by the design decision to drop `edit` (which also removes MED 3.2). The code fixes to land before public release: HIGH 3.3 (data-loss) and MEDs 3.4–3.9, plus the LOW hardening if budget allows.
+**TOTALS at 2026-11-01:** 2 HIGH · 8 MED · 8 LOW · 2 LOW(perf) = 20 findings.
+11.01 status: 17 original findings RESOLVED; 3 new (3.18, 3.19, 3.20) OPEN.
+3.18 is a one-line fix in `needs_quoting` that violates the header's own
+"escaping/quoting correct" contract (and breaks the TUI search box identically).
+3.19 and 3.20 are the 3.2 "predictable temp / no O_EXCL" pattern reappearing in
+the file-write and alias-export paths; closing 3.19+3.20 together via a
+shared `unique_tmp_in` helper removes both.
