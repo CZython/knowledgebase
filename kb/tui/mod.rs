@@ -2076,6 +2076,12 @@ impl App {
 
     /// Enter Search mode (armed by `s` in Browse). Starts with an empty
     /// query buffer; the user types to build a `search_grammar` query.
+    ///
+    /// The empty buffer is **immediately** run through the search bundle so
+    /// the results pane opens pre-populated with the un-gated corpus (the
+    /// same shape the CLI `kb search ""` returns) — rather than empty until
+    /// the first keystroke. `search_commit` forwards the empty query to
+    /// `search_rows` and materialises `results = Some(…)`.
     pub fn open_search(&mut self) -> KbResult<()> {
         self.mode = Mode::Search(SearchState {
             query: String::new(),
@@ -2084,6 +2090,7 @@ impl App {
             tag_sugs: Vec::new(),
             tag_sel: 0,
         });
+        self.search_commit();
         self.set_info("type a search query (tag: llm · type: wiki · quoted phrase) · ↑↓ results · Tab inject tag · Enter open · Esc back");
         Ok(())
     }
@@ -5283,6 +5290,45 @@ mod tests {
         let n = s.results.as_ref().unwrap().len();
         assert!(s.sel <= n, "`sel` must be clamped to the result count (was {0}, got {1})", n, s.sel);
         assert_eq!(s.tag_sel, 0);
+    }
+
+    /// Regression: entering Search mode with an **empty** buffer must open
+    /// with the results pane pre-populated (the whole un-gated corpus, the
+    /// same shape `kb search ""` returns) — not empty until the first
+    /// keystroke. `open_search` seeds `results: None` and then calls
+    /// `search_commit`, which forwards the empty query to `search_rows` and
+    /// materialises `results = Some(…)` for every ungated page.
+    #[test]
+    fn open_search_prepopulates_results_for_empty_buffer() {
+        let db = Db::open_in_memory_test().unwrap();
+        db.migrate().unwrap();
+        // One open (ungated) page and one gated page. The empty query must
+        // return the ungated page and exclude the gated one (matching the
+        // CLI `kb search ""` gate-exclusion contract).
+        let open_abs = insert_page(&db, "transformer", "Transformer", "the transformer architecture\n");
+        insert_page(&db, "gated", "Gated", "gated body\n");
+        db.conn
+            .execute(
+                "INSERT INTO page_gates (abs_path, term) VALUES (?1, 'secret')",
+                rusqlite::params!["/root/gated.md"],
+            )
+            .unwrap();
+
+        let mut app = App::new(db).unwrap();
+        app.open_search().unwrap();
+
+        let s = match &app.mode {
+            Mode::Search(s) => s,
+            _ => panic!("expected Search after open_search"),
+        };
+        let results = s.results.as_ref().expect("results materialised on entry, before any keystroke");
+        assert_eq!(
+            results.len(),
+            1,
+            "empty buffer returns the un-gated corpus (gated page excluded); got: {results:?}"
+        );
+        assert_eq!(results[0].abs_path, open_abs, "the un-gated page is the sole hit");
+        assert_eq!(s.sel, 0);
     }
 
     /// Regression: Search→Read→Esc must return to **Search** (query buffer,
