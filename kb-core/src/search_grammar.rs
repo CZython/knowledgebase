@@ -203,12 +203,15 @@ impl ParsedQuery {
 /// Is `s` ambiguous as a bare FTS5 token (so it *must* be quoted)?
 ///
 /// A term is ambiguous if it is empty, or contains whitespace, or contains a
-/// double-quote, or begins with an FTS5 structural operator character (a
-/// `^` prefix is FTS5's… actually FTS5 prefix is `*` — but a leading
-/// `(` / operator / quote would change meaning). For v1: whitespace or a
-/// double-quote forces quoting.
+/// double-quote, or contains an FTS5 **operator character** — `*` being the
+/// one that bites us: the bare-term path appends a prefix `*` to every
+/// non-phrase token, so a user-typed `*` would otherwise double up
+/// (`abc*` → `abc**`) and FTS5 rejects the double prefix at parse time
+/// (SECURITY_REPORT 3.18). Quoting a `*`-bearing token routes it through
+/// the phrase branch (which does not double-append), keeping the *rendered
+/// string a valid FTS5 query* for every input.
 pub fn needs_quoting(s: &str) -> bool {
-    s.is_empty() || s.contains(' ') || s.contains('"')
+    s.is_empty() || s.contains(' ') || s.contains('"') || s.contains('*')
 }
 
 /// Render a single content term as an FTS5 token:
@@ -644,6 +647,63 @@ mod tests {
     }
 
     #[test]
+    fn star_in_content_is_quoted() {
+        // SECURITY_REPORT 3.18: a user-typed `*` must not double up against
+        // the prefix-append rule (`abc*` → `abc**` is an FTS5 syntax error).
+        // Routing `*`-bearing tokens through the quoted branch keeps the
+        // rendered string a valid FTS5 query for every input.
+        let t = Term::Token {
+            text: String::from("abc*"),
+            phrase: false,
+        };
+        assert_eq!(render_term(&t), "\"abc*\"*");
+        let t = Term::Token {
+            text: String::from("žltá*"),
+            phrase: false,
+        };
+        assert_eq!(render_term(&t), "\"žltá*\"*");
+        // And the whole query still parses: `render_fts` composes render_term
+        // over every clause, so a `*`-bearing bare term is the regression case.
+        let q = parse("abc*");
+        assert_eq!(q.render_fts(), "\"abc*\"*");
+    }
+
+    /// F1 table-driven pin: `render_term` over the full token-class set,
+    /// asserting the *exact* rendered string. This turns the
+    /// "escaping/quoting correct" contract into an enforceable check on the
+    /// *composition* of the two rules (quoting gate + prefix-append) that
+    /// live in two fns — the gap that let 3.18 ship.
+    #[test]
+    fn render_term_composition_table() {
+        let bare = |s: &str| Term::Token {
+            text: s.into(),
+            phrase: false,
+        };
+        let phrase = |s: &str| Term::Token {
+            text: s.into(),
+            phrase: true,
+        };
+        let cases: &[(Term, &'static str)] = &[
+            // plain single token → prefix, unquoted
+            (bare("plain"), "plain*"),
+            // user-typed `*` → quoted, then prefix (3.18 regression)
+            (bare("abc*"), "\"abc*\"*"),
+            (bare("žltá*"), "\"žltá*\"*"),
+            // a quote in the body → doubled, then prefix
+            (bare("a\"b"), "\"a\"\"b\"*"),
+            // whitespace forces quoting — but a *single* bare token is
+            // still prefix-suffixed (it is not a phrase)
+            (bare("a b"), "\"a b\"*"),
+            // a phrase is exact: never prefix-suffixed, inner quote doubled
+            (phrase("exact phrase"), "\"exact phrase\""),
+            (phrase("a\"b"), "\"a\"\"b\""),
+        ];
+        for (t, want) in cases {
+            assert_eq!(render_term(t), *want, "render_term({t:?})");
+        }
+    }
+
+    #[test]
     fn bare_word_gets_prefix_suffix() {
         assert!(!needs_quoting("apple"));
         // Non-phrase bare word → FTS5 prefix query (`apple*`), so a user
@@ -677,12 +737,14 @@ mod tests {
     #[test]
     fn needs_quoting_partition() {
         // total + disjoint: a token is ambiguous or not, never both.
-        for s in ["", "has space", "a\"q", "plain", "token"] {
+        for s in ["", "has space", "a\"q", "plain", "token", "abc*"] {
             assert!(needs_quoting(s) || !needs_quoting(s));
         }
         assert!(needs_quoting("has space"));
         assert!(needs_quoting("a\"q"));
         assert!(needs_quoting(""));
+        // 3.18: a `*` in the content must trigger quoting
+        assert!(needs_quoting("abc*"));
         assert!(!needs_quoting("plain"));
     }
 }

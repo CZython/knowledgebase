@@ -586,43 +586,22 @@ Three findings from the 2026‑11‑01 re‑pentest
 (`SECURITY_REPORT.md` §3.18–§3.20) have code‑health / searchability
 consequences that belong here rather than in the security doc:
 
-### F1 · `needs_quoting` / `render_term` have no test pin for a `*` in the *content* — [M] **OPEN**
+### F1 · `needs_quoting` / `render_term` have no test pin for a `*` in the *content* — [M] **RESOLVED**
 
-`SECURITY_REPORT §3.18`. The `a"b` case is pinned
-(`search_grammar.rs:643`), but no test covers a content token that contains
-an FTS5 operator (`*`). That is exactly why the `**` collision shipped: the
-prefix‑append rule and the quoting rule live in two fns with no shared test
-for their *composition.*
+**Status: RESOLVED (2026-11-01).** A table-driven `render_term_composition_table` test now pins the *exact* rendered string over `plain` → `plain*`, `abc*` → `"abc*"*`, `žltá*` → `"žltá*"*`, `a"b` → `"a""b"*`, `a b` → `"a b"*`, and the phrase cases (`exact phrase` → `"exact phrase"`, `a"b` → `"a""b"`). The `*`-in-content case is a separate test (`star_in_content_is_quoted`) so it reads as the 3.18 regression, and a FTS5 engine probe (`kb-db/tests/fts5.rs` case 7) closes the string-vs-engine split (F3).
 
-**Code‑health ask (beyond the one‑line security fix):** add a small table‑driven
-test to the existing block that pins `render_term` over `["abc*", "žltá*",
-"a b", 'a"b', "plain"]` and asserts the *exact* rendered string. That turns
-the "escaping/quoting correct" contract into an enforceable check instead of
-a comment, and would have caught 3.18.
+### F2 · `atomic_write` and `tag-alias --export` re‑implement the temp‑file discipline a third time — [M] **RESOLVED**
 
-### F2 · `atomic_write` and `tag-alias --export` re‑implement the temp‑file discipline a third time — [M] **OPEN**
+**Status: RESOLVED (2026-11-01).** The single owner `kb/cli/writeops.rs::unique_tmp_in` now exists and all three sites call it:
+1. `kb/cli/editor.rs` — buffer name from `unique_tmp_in` (+ a `.md` extension so editors pick up Markdown syntax).
+2. `kb/main.rs::atomic_write` — `let tmp = unique_tmp_in(dir, &name);` (replaces the fixed `.{name}.kb~tmp`).
+3. `kb/cli/tag.rs` (alias `--export`) — `std::fs::write(p, text)` → `atomic_write(p, text.as_bytes())`.
 
-`SECURITY_REPORT §3.19` + `§3.20`. The repo now has **three** copies of
-"write to a temp file, then move to the real path":
-1. `kb/cli/editor.rs:82-87` — editor buffer, **hardened** (pid+seq+nanos, F8).
-2. `kb/main.rs:1229-1246` — `atomic_write`, **not hardened** (fixed name, `O_CREAT|O_TRUNC`).
-3. `kb/cli/tag.rs:170` — alias export, **not hardened** (`std::fs::write`).
+The duplicated-logic-with-divergent-hardening smell is gone; the same recipe propagates to every caller if it ever needs to change.
 
-That is the same "duplicated logic with divergent hardening" smell the B/A
-sections already flagged, and it is precisely why the editor path got fixed
-while the other two did not. **Code‑health ask:** extract one
-`unique_tmp_in(dir, base) -> PathBuf` (use the editor‑buffer naming recipe)
-and route all three through it. One owner, one TOCTOU answer — the same
-"c4 → `sql_quote_lower` single owner" pattern (C4) that already fixed §3.4.
+### F3 · `search_grammar` render‑order contract is load‑bearing but only partly pinned by the FTS5 probe — [L] **RESOLVED (by F1)**
 
-### F3 · `search_grammar` render‑order contract is load‑bearing but only partly pinned by the FTS5 probe — [L] **NOTED**
-
-`kb-db/tests/fts5.rs:312+` is the good part: it seeds real rows and asserts
-the *engine* returns the intended row set, so "the render string means what
-the grammar intends" is checked against the bundled build, not just a string
-equality. That is the right place for §3.18's regression to live (an FTS5
-probe for `MATCH '"abc*"*'`), in addition to the `render_term` unit pin
-(F1). Noted so the fix lands in *both* places and the two stay consistent.
+The FTS5 probe for `MATCH '"abc*"*'` now lives in `kb-db/tests/fts5.rs` (case 7) — the two pins (string-level in `search_grammar.rs` and engine-level in `fts5.rs`) stay consistent as the render-order contract says they should.
 
 ---
 
@@ -669,10 +648,10 @@ Confirmed‑conforming positive observations, no action: C6 (error‑shape
 consistency), E2 (`panic=abort`), E3 (`cargo user` alias), E4 (9‑line
 `main.rs` shells), E5 (`vstd` pin), E6 (`rusqlite` bundled)._
 
-**2026‑11‑01 re‑review:** three new items open — F1 (`render_term`/`needs_quoting`
-composition test gap · SEC §3.18), F2 (temp‑file discipline split across 3 sites
-· SEC §3.19/§3.20), F3 (note: FTS5 probe + unit pin both needed). The two
-code‑health asks (F1's table‑driven `render_term` pin and F2's single
-`unique_tmp_in` helper) are independent of the security‑doc fix and worth
-landing *before* the one‑line `needs_quoting` change, so the regression is
-tripped twice, not once. E7 confirms supply‑chain pins are current.
+**2026‑11‑01 re‑review:** the three new items — F1 (`render_term`/`needs_quoting`
+ composition test gap · SEC §3.18), F2 (temp‑file discipline split across 3 sites
+ · SEC §3.19/§3.20), F3 (note: FTS5 probe + unit pin both needed) — are all
+ **RESOLVED** in the same tree. The two code‑health asks (F1's table‑driven
+ `render_term` pin and F2's single `unique_tmp_in` helper) landed *beside* the
+ one‑line `needs_quoting` change, so the regression is tripped twice (string +
+ engine), not once. E7 confirms supply‑chain pins are current.

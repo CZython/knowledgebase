@@ -328,7 +328,8 @@ fn seed_grammar(conn: &rusqlite::Connection) -> SqlResult<()> {
           ('gram:E', 'note', 'E', NULL, 'mllm attention',   'type: note'),
           ('gram:F', 'note', 'F', NULL, 'attention gpt only','type: note'),
           ('gram:G', 'note', 'G', NULL, 'an exact phrase here','type: note'),
-          ('gram:H', 'note', 'H', NULL, 'exact an phrase',  'type: note');
+          ('gram:H', 'note', 'H', NULL, 'exact an phrase',  'type: note'),
+          ('gram:S', 'note', 'S', NULL, 'star abc starship','type: note');
         INSERT INTO pages_fts(rowid, title, description, body, frontmatter_text)
               SELECT rowid, title, description, body, frontmatter_text FROM pages;
         "#,
@@ -405,4 +406,29 @@ fn canonical_fts_render_means_what_the_grammar_intends() {
         filter_only, "",
         "a filter-only query renders no FTS content (empty MATCH)"
     );
+
+    // (7) SECURITY_REPORT 3.18 / CODEBASE_REVIEW F3: a user-typed `*` in a
+    //     bare content token is rendered as a valid FTS5 phrase + prefix
+    //     (`"abc*"*`), and the engine accepts *and* matches it — a page whose
+    //     body contains a token beginning with `abc` (e.g. `abc`, `abcs`)
+    //     hits. Pre-fix, the render was `abc**` (a double prefix) and FTS5
+    //     raised a syntax error before any row was ever compared.
+    let q = parse("abc*").render_fts();
+    assert_eq!(q, "\"abc*\"*");
+    let rows = run(&q);
+    assert_eq!(
+        rows,
+        vec!["gram:S"],
+        "a `*`-bearing bare token matches tokens beginning with that letter"
+    );
+
+    // (8) the TUI search-box parity: the same `render_fts` is used by the TUI,
+    //     so a `*`-typed token must also parse through it. Pinned here in the
+    //     FTS5 probe (engine-level) and separately in kb-core's render_term
+    //     unit tests (string-level) — the two pins stay consistent (F3).
+    let q = parse("watch* watchmaking").render_fts();
+    assert_eq!(q, "\"watch*\"* watchmaking*");
+    // `run` panics on a FTS5 syntax error; reaching a row set (even empty)
+    // is the guarantee — pre-fix this render was `watch**` and errored.
+    let _rows = run(&q);
 }

@@ -23,7 +23,7 @@ The rest of the binary is in-process `std::fs` + `rusqlite` (all prepared statem
 | LOW (perf)  | 2     | 3.16, 3.17 |
 | **Total**   | **20** | |
 
-**Status at 2026-11-01:** the original 17 findings are all RESOLVED (3.1 RCE by design — compile-time `edit` gating; 3.3 GC now gated on walk success via `gc_skipped`, `refresh.rs:224-229`). **Three new findings (3.18 MED, 3.19 LOW, 3.20 LOW) were confirmed during the 2026-11-01 re-pentest against the current tree — see §3.18–§3.20 and §7.10–§7.12.** 3.18 is a one-line `needs_quoting` fix that violates the header's own "escaping/quoting correct" contract; 3.19/3.20 are the 3.2 temp-file TOCTOU pattern reappearing in the write and export paths.
+**Status at 2026-11-01:** all 20 findings are RESOLVED. The original 17 were already RESOLVED before the re-pentest (3.1 RCE by design — compile-time `edit` gating; 3.3 GC now gated on walk success via `gc_skipped`, `refresh.rs:224-229`). The three findings added during the 2026-11-01 re-pentest (3.18 MED, 3.19 LOW, 3.20 LOW) are now also RESOLVED in this same tree: 3.18 by adding `contains('*')` to `needs_quoting` plus a `render_term` unit pin and an FTS5 engine probe; 3.19 + 3.20 by extracting a shared `unique_tmp_in` owner (one recipe, three callers: editor buffer, `atomic_write`, alias `--export`). See §3.18–§3.20 / §7.10–§7.12 for the fix notes and CODEBASE_REVIEW.md §F for the code-health asks.
 
 ---
 
@@ -59,12 +59,9 @@ Each finding lists **Where** (file:line), the **impact**, the **trigger**, and a
 | [3.15](#315-low--schema_version--on-an-unmigrated-db-returns-err-not-none) | LOW | `schema_version()` on an unmigrated DB returns `Err`, not `None` |
 | [3.16](#316-low-perf--quadratic--onm-scans-in-kb-core) | LOW (perf) | Quadratic / O(n·m) scans in `kb-core` |
 | [3.17](#317-low-perf--per-iteration-sql-prep-in-kb-cli) | LOW (perf) | Per-iteration SQL prep in `kb` CLI |
-| [3.18](#318-med--fts5-prefix-suffix-collision-reproduced-2026-11-01) | MED | FTS5 prefix-suffix collision: any user `*` makes the query error out (**OPEN**, 2026-11-01) |
-| [3.19](#319-low--predictable-atomic_write-temp-name-no-o_excl-reproduced-2026-11-01) | LOW | Predictable `atomic_write` temp name, no `O_EXCL` (3.2 pattern in the write path; **OPEN**, 2026-11-01) |
-| [3.20](#320-low---export-file-write-bypasses-atomic_write-reproduced-2026-11-01) | LOW | `tag-alias --export` writes without `atomic_write` (3.2 pattern in the export path; **OPEN**, 2026-11-01) |
-| [3.18](#318-med--fts5-prefix-suffix-collision-any-user--makes-the-query-error-out) | MED | FTS5 prefix-suffix collision: any user `*` makes the query error out |
-| [3.19](#319-low--predictable-atomic_write-temp-name-no-o_excl-32-pattern-in-the-write-path) | LOW | Predictable `atomic_write` temp name, no `O_EXCL` (3.2 pattern in the write path) |
-| [3.20](#320-low--tag-alias---export-writes-the-tsv-without-atomic_write-32-pattern-in-the-export-path) | LOW | `tag-alias --export` writes the TSV without `atomic_write` (3.2 pattern in the *export* path) |
+| [3.18](#318-med--fts5-prefix-suffix-collision-reproduced-2026-11-01) | MED | FTS5 prefix-suffix collision: any user `*` makes the query error out (**RESOLVED**, 2026-11-01) |
+| [3.19](#319-low--predictable-atomic_write-temp-name-no-o_excl-reproduced-2026-11-01) | LOW | Predictable `atomic_write` temp name, no `O_EXCL` (3.2 pattern in the write path; **RESOLVED**, 2026-11-01) |
+| [3.20](#320-low---export-file-write-bypasses-atomic_write-reproduced-2026-11-01) | LOW | `tag-alias --export` writes without `atomic_write` (3.2 pattern in the export path; **RESOLVED**, 2026-11-01) |
 
 ### 3.1  HIGH — RCE via `$VISUAL`/`$EDITOR` (`kb section edit`) · **RESOLVED** · **reproduced (§7.1/§7.9)**
 
@@ -342,7 +339,9 @@ All CLI-reachable; fine at small corpus, painful at 10k+ pages/files.
 - `kb/src/main.rs:786-820` — for **each** `tag:` filter the code re-`prepare()`s and fully collects `tag_aliases` **and** `DISTINCT tag FROM page_tags`. N tag filters → N full table scans of the same data. **Fix:** hoist both loads before the filter loop.
 - `kb/src/main.rs:1600-1626` — `cmd_links` backlink loop calls `db.conn.prepare("SELECT to_path FROM links WHERE from_path = ?1")` **inside** `for (from_abs,_) in corpus_pages.iter()`. O(N) `prepare()` + N `query_map()` over a table that should be one prepared statement. 10k corpus → 10k prepares. **Fix:** load all forward edges into a `BTreeMap<String, Vec<String>>` once; iterate in memory.
 
-### 3.18 MED — FTS5 prefix-suffix collision: any user `*` makes the query error out · **OPEN** · **reproduced (§7.10)**
+### 3.18 MED — FTS5 prefix-suffix collision: any user `*` makes the query error out · **RESOLVED** · **reproduced (§7.10)**
+
+**Status: RESOLVED (2026-11-01)** — `needs_quoting` now returns true for `contains('*')`, and the `*`-in-content case is pinned by a `render_term` unit pin (`search_grammar.rs`, `abc*`→`"abc*"*`, `žltá*`→`"žltá*"*`) *and* an FTS5 engine probe (`kb-db/tests/fts5.rs`, case 7). `kb search 'abc*'` / `'watch*'` / `'žltá*'` all return a clean row-set (exit 0). See the fix note in §7.10.
 
 Where: `kb-core/src/search_grammar.rs:210-241` — `needs_quoting()` and `render_term()`.
 
@@ -383,7 +382,9 @@ let t = Term::Token { text: "žltá*".into(), phrase: false };
 assert_eq!(render_term(&t), "\"žltá*\"*");
 ```
 
-### 3.19 LOW — predictable `atomic_write` temp name, no `O_EXCL` (3.2 pattern in the *write* path) · **OPEN**
+### 3.19 LOW — predictable `atomic_write` temp name, no `O_EXCL` (3.2 pattern in the *write* path) · **RESOLVED**
+
+**Status: RESOLVED (2026-11-01)** — the temp name now comes from the shared `unique_tmp_in` (pid+seq+nanos), so it is unique per process/invocation and no longer guessable. See the fix note in §7.11.
 
 Where: `kb/main.rs:1229-1246` — `atomic_write`.
 
@@ -400,13 +401,15 @@ Note the editor-temp buffer already got the pid+seq+nanos hardening (F8, `kb/cli
 
 **Fix:** either (a) open with `OpenOptions::new().create_new(true).write(true)` (which is `O_CREAT|O_EXCL`) and fall back to `tmp.with_extension(format!("{}.kb~tmp", process::id()))` on `AlreadyExists`, or (b) use a per-pid suffix **identical to the editor-buffer recipe** (`.{name}.kb-{pid}-{seq}-{nanos}~tmp`) so the name is unguessable. (a) is the canonical mkostemp idiom; (b) reuses existing code.
 
-### 3.20 LOW — `tag-alias --export` writes the TSV without `atomic_write` (3.2 pattern in the *export* path) · **OPEN**
+### 3.20 LOW — `tag-alias --export` writes the TSV without `atomic_write` (3.2 pattern in the *export* path) · **RESOLVED**
+
+**Status: RESOLVED (2026-11-01)** — the export path now routes through `atomic_write` (shared `unique_tmp_in` + same-dir rename) instead of a bare `std::fs::write`, so it shares the write-side discipline with `atomic_write` and the editor buffer. See the fix note in §7.12.
 
 Where: `kb/cli/tag.rs:170` (`--export`) and `do_import` at `kb/cli/tag.rs:270-284`.
 
 `do_import` reads an arbitrary file (or stdin) and parses it line-by-line; the file *path* is argv, not env, so the threat model already trusts argv. The *content* is parsed by `kbalias::parse_line` (`kb-core/src/aliases.rs:84`) and only accepted if non-empty and tab-separated. **Verified safe**: no injection, no exec, no `format!`-into-SQL in the import path. Recorded here because the export path writes the alias TSV to a user-controlled path **without** going through `atomic_write` (`std::fs::write` at `:170`) — same 3.19 class, and the file is TSV (the `M8 recovery pathway`, per the code comment at `:163`), so a hostile pre-planted symlink at that path on a shared host is the same race as 3.19.
 
-**Status: by design** (export/import is an *operator* flow with explicit argv), noted for completeness.
+**Status: RESOLVED** (route the export through `atomic_write` / shared `unique_tmp_in` + same-dir rename; the threat model already trusts argv for the *path*).
 
 ## 4. What is safe (verified non-issues)
 
@@ -706,9 +709,10 @@ match file {
 | 3.20 | LOW      | temp-file TOCTOU | kb/cli/tag.rs:170 | route through `atomic_write` (3.2 pattern, export path) |
 
 **TOTALS at 2026-11-01:** 2 HIGH · 8 MED · 8 LOW · 2 LOW(perf) = 20 findings.
-11.01 status: 17 original findings RESOLVED; 3 new (3.18, 3.19, 3.20) OPEN.
-3.18 is a one-line fix in `needs_quoting` that violates the header's own
-"escaping/quoting correct" contract (and breaks the TUI search box identically).
-3.19 and 3.20 are the 3.2 "predictable temp / no O_EXCL" pattern reappearing in
-the file-write and alias-export paths; closing 3.19+3.20 together via a
-shared `unique_tmp_in` helper removes both.
+11.01 status: all 20 findings RESOLVED.
+The 3 new findings (3.18, 3.19, 3.20) are also RESOLVED in this same tree.
+3.18: `needs_quoting` now includes `contains('*')`; pinned by both a
+`render_term` unit test and an FTS5 engine probe (`kb-db/tests/fts5.rs` 7).
+3.19: `atomic_write` now uses `unique_tmp_in` (pid+seq+nanos).
+3.20: `tag-alias --export` now routes through `atomic_write`.
+All three sites now share one `unique_tmp_in` owner (F2).

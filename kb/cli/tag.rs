@@ -167,7 +167,14 @@ pub(crate) fn cmd_tag_alias(dbpath: Option<&Path>, o: &TagAliasOpts, json: bool)
         let n = aliases.len();
         match file {
             Some(p) => {
-                std::fs::write(p, text)
+                // SECURITY_REPORT 3.20 / CODEBASE_REVIEW F2: the alias TSV is
+                // the M8 recovery pathway — an operator may export it to a
+                // shared directory, so a pre-planted symlink at the target was
+                // the same `O_CREAT|O_TRUNC` race as 3.19. Route it through
+                // `atomic_write` (unguessable temp + same-dir rename) instead
+                // of a bare `std::fs::write` — export/import now share one
+                // write-side discipline (the C4 / F2 single-owner pattern).
+                atomic_write(p, text.as_bytes())
                     .map_err(|e| (format!("write {}: {e}", p.display()), EXIT_ERR))?;
                 println!("exported {n} alias row(s) to {}", p.display());
             }

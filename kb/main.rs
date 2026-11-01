@@ -1226,6 +1226,13 @@ pub(crate) fn confirm(prompt: &str, assume_yes: bool) -> Result<(), (String, i32
 }
 
 /// Write `bytes` to `path` atomically: same-directory temp file + rename.
+///
+/// SECURITY_REPORT 3.19 / CODEBASE_REVIEW F2: the temp name now comes from
+/// `unique_tmp_in` (pid+seq+nanos) instead of a fixed, guessable
+/// `.{name}.kb~tmp` opened with `O_CREAT|O_TRUNC`. In a hostile multi-user
+/// directory a rival uid could pre-plant a symlink at the fixed name and
+/// have the `rename` replace that symlink's target inode with our temp —
+/// the classic `mktemp` race (the 3.2 editor pattern, now the write path).
 pub(crate) fn atomic_write(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
     let dir = path
         .parent()
@@ -1235,7 +1242,7 @@ pub(crate) fn atomic_write(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
         .file_name()
         .map(|f| f.to_string_lossy().into_owned())
         .unwrap_or_else(|| "kb.out".to_string());
-    let tmp = dir.join(format!(".{name}.kb~tmp"));
+    let tmp = unique_tmp_in(dir, &name);
     {
         let mut f = std::fs::File::create(&tmp)?;
         f.write_all(bytes)?;

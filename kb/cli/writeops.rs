@@ -1,5 +1,42 @@
 use crate::*;
 
+use std::time::SystemTime;
+
+/// SECURITY_REPORT 3.19 / CODEBASE_REVIEW F2: the single owner of the
+/// "unique, unguessable temp file name inside `dir`" recipe.
+///
+/// Pre-this the logic lived in **three** places with divergent hardening:
+/// the editor buffer (pid+seq+nanos, hardened in F8), `atomic_write` (a
+/// *fixed* `.{name}.kb~tmp` + `create`/`O_CREAT|O_TRUNC`), and the alias
+/// `--export` (bare `std::fs::write`). Because they were separate, the
+/// editor path got hardened while the other two did not. One owner, one
+/// answer, in the same "single-owner invariant" style as `sql_quote_lower`
+/// (3.4/C4): a fix to the naming discipline now propagates to every caller.
+///
+/// The name carries `pid` (process-unique), a per-process monotonic `seq`
+/// (in-process uniqueness), and the sub-second wall-clock `nanos`
+/// (cross-process + time uniqueness), so a hostile actor in a shared
+/// multi-user directory can't pre-plant a symlink at a *guessable* path in
+/// the window between the write and the subsequent `rename` (the 3.2 /
+/// 3.19 / 3.20 class).
+pub(crate) static KB_TMP_SEQ: std::sync::atomic::AtomicUsize =
+    std::sync::atomic::AtomicUsize::new(0);
+
+/// Build a same-`dir` temp path that is unique to this process/invocation.
+///
+/// `dir` is the target's parent (so the subsequent `rename` is guaranteed to
+/// be within one filesystem), and `base` is a human-readable stem (e.g. the
+/// target file name, or `kb-edit`). The returned path is *always* fresh —
+/// two callers, or the same caller twice, never share a name.
+pub(crate) fn unique_tmp_in(dir: &Path, base: &str) -> PathBuf {
+    let seq = KB_TMP_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let nanos = SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    dir.join(format!("{base}.kb-{}-{}-{nanos}~tmp", std::process::id(), seq))
+}
+
 /// Under `--json` an etag mismatch must still leave exactly one JSON object
 /// on stdout: the agent contract promises stdout is always a clean JSON
 /// document (success *or* failure) and `--json` suppresses the prose prompt.

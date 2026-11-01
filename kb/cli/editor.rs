@@ -1,9 +1,6 @@
 #[cfg(feature = "editor")]
 use crate::*;
 
-#[cfg(feature = "editor")]
-pub(crate) static EDITOR_BUFFER_SEQ: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
-
 
 /// Run the user's editor (`$VISUAL`, then `$EDITOR`, then a platform
 /// fallback) against a *temp buffer* seeded with `initial`, and return the
@@ -74,17 +71,15 @@ fn run_editor_in(
     let tmp: Option<PathBuf> = match in_place {
         Some(_) => None,
         None => {
-            let seq = EDITOR_BUFFER_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-            let nanos = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map(|d| d.as_nanos())
-                .unwrap_or(0);
-            let t = std::env::temp_dir().join(format!(
-                "kb-edit-{}-{}-{}.md",
-                std::process::id(),
-                seq,
-                nanos
-            ));
+            // SECURITY_REPORT 3.2 / CODEBASE_REVIEW F2: the buffer name now
+            // comes from the shared `unique_tmp_in` (pid+seq+nanos) — this
+            // was the F8 hardening (previously inline). All three temp-file
+            // writers (editor, atomic_write, alias export) now share one
+            // owner so the naming / TOCTOU recipe can't diverge again.
+            let t = unique_tmp_in(&std::env::temp_dir(), "kb-edit");
+            // `.md` suffix so editors pick up markdown syntax on the buffer
+            // (the editor is the one site where a visible extension matters).
+            let t = t.with_extension("md");
             std::fs::write(&t, initial)
                 .map_err(|e| (format!("write temp edit buffer: {e}"), EXIT_ERR))?;
             Some(t)
