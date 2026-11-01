@@ -2327,11 +2327,13 @@ pub fn suggestions_for(corpus: &[String], buffer: &str) -> Vec<String> {
 /// The whole "run the search bundle" step for the TUI: convert the FTS
 /// rows into `PageRow`s (with tags + gates for display) and compute the
 /// live tag suggestions. Pure over its inputs — `db` is the only state.
+///
+/// An **empty** or whitespace-only buffer is forwarded to `search_rows`
+/// as-is (matching the CLI `kb search ""` behavior): the engine returns
+/// the full un-gated corpus (subject to the 10-row TUI limit), so the
+/// panel is populated when the user first enters Search mode.
 fn run_search_bundle(db: &Db, query: &str) -> (Vec<PageRow>, Vec<TagSuggestion>) {
     let trimmed = query.trim();
-    if trimmed.is_empty() {
-        return (Vec::new(), Vec::new());
-    }
     let rows = match crate::cli::search::search_rows(db, trimmed, 100) {
         Ok((rows, _)) => rows,
         Err(_) => Vec::new(),
