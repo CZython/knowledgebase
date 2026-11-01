@@ -68,7 +68,13 @@ fn build_search_sql(
             // MATCH ?)` in an outer WHERE on a non-FTS5 main table is rejected
             // ("unable to use function MATCH in the requested context"). The
             // subquery satisfies the requirement: its FROM is the FTS5 table.
-            params_vec.push(search_term_text(t));
+            //
+            // Each NOT term is pushed as an FTS5 **prefix query** (via
+            // `render_term`'s `*` suffix for non-phrase tokens), matching the
+            // AND-side bare-word behavior: `-watch` excludes pages whose
+            // FTS5 tokens start with `watch` (e.g. `watchmaking`), while
+            // quoted phrases still take the exact phrase-semantic path.
+            params_vec.push(search_grammar::render_term(t));
             wheres.push(format!(
                 "NOT EXISTS (SELECT 1 FROM pages_fts WHERE rowid = pages.rowid \
                   AND pages_fts MATCH ?{})",

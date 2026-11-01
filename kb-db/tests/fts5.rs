@@ -357,27 +357,33 @@ fn canonical_fts_render_means_what_the_grammar_intends() {
     let run = |q: &str| matched_ids(conn, q).unwrap();
 
     // (1) space = implicit AND: "apple banana" → rows with BOTH → only A.
+    //     Both tokens are bare single-word content (non-phrase), so render_fts
+    //     emits them as FTS5 prefix queries (`apple*`, `banana*`) — the
+    //     substring *from the start* semantic that supports interactive-type
+    //     search. The AND (implicit whitespace) structure is unchanged.
     let q = parse("apple banana").render_fts();
-    assert_eq!(q, "apple banana");
+    assert_eq!(q, "apple* banana*");
     assert_eq!(run(&q), vec!["gram:A"]);
 
     // (2) one OR group: "(llm OR mllm)" → either → D (llm) and E (mllm).
+    //     `~` terms are non-phrase → prefix each (llm* / mllm*).
     let q = parse("~llm ~mllm").render_fts();
-    assert_eq!(q, "(llm OR mllm)");
+    assert_eq!(q, "(llm* OR mllm*)");
     assert_eq!(run(&q), vec!["gram:D", "gram:E"]);
 
     // (3) NOT after a bare AND term: "apple NOT pear" → apple AND not-pear →
     //     A (B has pear, so it is excluded; C lacks apple too).
+    //     Both tokens prefix (non-phrase single content).
     let q = parse("apple -pear").render_fts();
-    assert_eq!(q, "apple NOT pear");
+    assert_eq!(q, "apple* NOT pear*");
     assert_eq!(run(&q), vec!["gram:A"]);
 
     // (4) AND + OR + NOT — canonical order [OR] → [NOT] → [bare]:
-    //     "(llm OR mllm) NOT gpt attention" → rows with (llm OR mllm) AND NOT
-    //     gpt AND attention → only E (D has gpt; F lacks llm/mllm; A/B/C lack
-    //     attention and llm/mllm).
+    //     "(llm* OR mllm*) NOT gpt* attention*" → rows with (llm OR mllm) AND
+    //     NOT gpt AND attention → only E (D has gpt; F lacks llm/mllm; A/B/C
+    //     lack attention and llm/mllm).
     let q = parse("~llm ~mllm attention -gpt").render_fts();
-    assert_eq!(q, "(llm OR mllm) NOT gpt attention");
+    assert_eq!(q, "(llm* OR mllm*) NOT gpt* attention*");
     assert_eq!(run(&q), vec!["gram:E"]);
 
     // (5) phrase: only the *contiguous* sequence matches → G yes,
@@ -391,7 +397,7 @@ fn canonical_fts_render_means_what_the_grammar_intends() {
     //     part never leaks an FTS clause (empty MATCH ⇒ the M7 layer omits it).
     let q = parse("tag:llm attention").render_fts();
     assert_eq!(
-        q, "attention",
+        q, "attention*",
         "the `tag:llm` filter must not appear in the FTS string"
     );
     let filter_only = parse("tag:llm").render_fts();

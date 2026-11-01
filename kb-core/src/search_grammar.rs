@@ -211,20 +211,30 @@ pub fn needs_quoting(s: &str) -> bool {
     s.is_empty() || s.contains(' ') || s.contains('"')
 }
 
-/// Render a single content term as an FTS5 token: bare if unambiguous,
-/// double-quoted (inner `"` doubled) if ambiguous or a multi-word phrase.
+/// Render a single content term as an FTS5 token:
+/// - A **phrase** (`phrase: true`) is an exact FTS5 phrase — double-quoted,
+///   inner `"` doubled, no prefix. A phrase is a *contiguous sequence* by
+///   definition; prefixing any of its tokens would break phrase semantics.
+/// - A **single bare word** (`phrase: false`) renders as a **prefix
+///   match**: `apple` → `apple*`, so a bare `watch` hits `watchmaking`
+///   (the intended interactive-search behavior — the user is still typing
+///   out the word when they look for a match). FTS5 `unicode61` is
+///   full-token by default, so the suffix is the mechanism for substring
+///   *from the start* of a word.
 ///
 /// # Quoting rule (the "escaping/quoting correct" contract)
-/// - `apple` → `apple`
-/// - `"exact phrase"` → `"exact phrase"`
-/// - `a"b` → `"a""b"` (inner quote doubled)
+/// - `apple` → `apple*` (prefix; not a phrase, so it gets the suffix)
+/// - `"exact phrase"` → `"exact phrase"` (exact; phrases never prefix)
+/// - `a"b` → `"a""b"*` (inner quote doubled, still a bare word so it prefixes)
 pub fn render_term(t: &Term) -> String {
     match t {
         Term::Token { text, phrase } => {
-            if *phrase || needs_quoting(text) {
+            if *phrase {
                 format!("\"{}\"", text.replace('"', "\"\""))
+            } else if needs_quoting(text) {
+                format!("\"{}\"*", text.replace('"', "\"\""))
             } else {
-                text.clone()
+                format!("{text}*")
             }
         }
     }
@@ -556,14 +566,19 @@ mod tests {
         assert!(q.or_group.is_empty());
         assert!(q.not_terms.is_empty());
         assert_eq!(q.and_terms.len(), 2);
-        assert_eq!(q.render_fts(), "apple banana");
+        // Bare single-word content terms are non-phrases, so they render as
+        // FTS5 **prefix queries** (`apple` → `apple*`) to support substring
+        // *from the start* of a word (the interactive-search behavior).
+        // Whitespace between tokens is still implicit AND.
+        assert_eq!(q.render_fts(), "apple* banana*");
     }
 
     #[test]
     fn tilde_terms_form_one_or_group() {
         let q = parse("~llm ~mllm");
         assert_eq!(q.or_group.len(), 2);
-        assert_eq!(q.render_fts(), "(llm OR mllm)");
+        // `~` OR-group terms are non-phrase → prefix each.
+        assert_eq!(q.render_fts(), "(llm* OR mllm*)");
     }
 
     #[test]
@@ -574,7 +589,8 @@ mod tests {
         // doc). Here there's no OR group, so it's simply `apple NOT pear`.
         let q = parse("apple -pear");
         assert_eq!(q.not_terms.len(), 1);
-        assert_eq!(q.render_fts(), "apple NOT pear");
+        // Both AND- and NOT-clause bare words prefix; NOT stays infix.
+        assert_eq!(q.render_fts(), "apple* NOT pear*");
     }
 
     #[test]
@@ -584,7 +600,7 @@ mod tests {
         // kb-db/tests/fts5.rs empirical probe that LOCKS this against the
         // bundled SQLite 3.46.0 engine).
         let q = parse("~llm ~mllm attention -gpt");
-        assert_eq!(q.render_fts(), "(llm OR mllm) NOT gpt attention");
+        assert_eq!(q.render_fts(), "(llm* OR mllm*) NOT gpt* attention*");
     }
 
     #[test]
@@ -618,23 +634,26 @@ mod tests {
 
     #[test]
     fn inner_quote_is_doubled() {
-        // a token containing a double-quote is ambiguous → quoted, inner doubled.
+        // a token containing a double-quote is ambiguous → quoted, inner
+        // doubled, *and* (non-phrase single token) prefix-suffixed.
         let t = Term::Token {
             text: String::from("a\"b"),
             phrase: false,
         };
-        assert_eq!(render_term(&t), "\"a\"\"b\"");
+        assert_eq!(render_term(&t), "\"a\"\"b\"*");
     }
 
     #[test]
-    fn bare_word_stays_unquoted() {
+    fn bare_word_gets_prefix_suffix() {
         assert!(!needs_quoting("apple"));
+        // Non-phrase bare word → FTS5 prefix query (`apple*`), so a user
+        // typing `apple-pie` as a bare single token would hit `applepie`.
         assert_eq!(
             render_term(&Term::Token {
                 text: "apple".into(),
                 phrase: false
             }),
-            "apple"
+            "apple*"
         );
     }
 
