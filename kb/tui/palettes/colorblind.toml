@@ -50,8 +50,8 @@ fg = "white"
 bg = "dark-gray"
 
 [md_bold]
-fg   = "white"
-bold = true                # **bold** in the read pane
+fg   = "yellow"
+bold = true                # **bold** in the read pane (yellow, not red/green)
 
 [md_italic]
 fg     = "light-cyan"
@@ -60,3 +60,7 @@ italic = true              # *italic* / _italic_ in the read pane
 [md_strike]
 fg            = "dark-gray"
 strikethrough = true       # ~~strikethrough~~ in the read pane
+
+[md_code]
+fg = "white"               # `code` in the read pane
+bg = "dark-gray"           # the "code box" — makes code read as code, not prose

@@ -186,6 +186,7 @@ pub struct Palette {
     pub md_bold:     Style,
     pub md_italic:   Style,
     pub md_strike:   Style,
+    pub md_code:     Style,
 }
 
 impl Palette {
@@ -234,16 +235,21 @@ impl Palette {
             // `▶` current item (build_value_lines `arrow`): Green+BOLD.
             selection_ctx:   Style::default().fg(Color::Green).add_modifier(Modifier::BOLD),
             // Inline markdown emphasis, read pane only (render_markdown_text).
-            // Bold: White+BOLD — the body is already White, so bold *adds*
-            // weight; a distinct accent color would clash with the label/active
-            // families (magenta/cyan).
-            md_bold:         Style::default().fg(Color::White).add_modifier(Modifier::BOLD),
+            // Bold: LightYellow+BOLD — a warm, high-contrast emphasis that is
+            // distinct from the LightCyan italic, the Magenta labels, and the
+            // White body so a bolded phrase *pops* without clashing a family.
+            md_bold:         Style::default().fg(Color::LightYellow).add_modifier(Modifier::BOLD),
             // Italic: LightCyan+ITALIC — a soft, readable tilt that stays
-            // distinct from the White body and the Magenta labels.
+            // distinct from the body and the Magenta labels.
             md_italic:       Style::default().fg(Color::LightCyan).add_modifier(Modifier::ITALIC),
             // Strikethrough: DarkGray+CROSSED_OUT — a "greyed out" deleted
             // feel, the bar carried by the CROSSED_OUT modifier.
             md_strike:       Style::default().fg(Color::DarkGray).add_modifier(Modifier::CROSSED_OUT),
+            // Inline code (`…`): White on a DarkGray "code box". A neutral,
+            // high-contrast box that reads as *code* without competing with
+            // the yellow bold / cyan italic — a code span is monospaced
+            // content, so it stays un-bolded and un-tinted in the fg.
+            md_code:         Style::default().fg(Color::White).bg(Color::DarkGray),
         }
     }
 
@@ -271,9 +277,12 @@ impl Palette {
             selection:       Style::default().fg(Color::Black).bg(Color::White),
             selection_ctx:   Style::default().fg(Color::White).bg(Color::DarkGray),
             // No red/green pair in the markdown roles either.
-            md_bold:         style(Color::White, true),
+            md_bold:         style(Color::Yellow, true),
             md_italic:       Style::default().fg(Color::LightCyan).add_modifier(Modifier::ITALIC),
             md_strike:       Style::default().fg(Color::DarkGray).add_modifier(Modifier::CROSSED_OUT),
+            // Inline code: a neutral White-on-DarkGray code box (colorblind-
+            // safe, distinct from the Yellow bold and LightCyan italic).
+            md_code:         Style::default().fg(Color::White).bg(Color::DarkGray),
         }
     }
 
@@ -306,6 +315,7 @@ impl Palette {
             md_bold:     StyleSpec,
             md_italic:   StyleSpec,
             md_strike:   StyleSpec,
+            md_code:     StyleSpec,
         }
         let f: File = toml::from_str(s)
             .map_err(|e| format!("invalid palette TOML: {e}"))?;
@@ -317,7 +327,8 @@ impl Palette {
             ("gated", &f.gated), ("open", &f.open), ("info", &f.info),
             ("success", &f.success), ("error", &f.error),
             ("selection", &f.selection), ("selection_ctx", &f.selection_ctx),
-            ("md_bold", &f.md_bold), ("md_italic", &f.md_italic), ("md_strike", &f.md_strike),
+            ("md_bold", &f.md_bold), ("md_italic", &f.md_italic),
+            ("md_strike", &f.md_strike), ("md_code", &f.md_code),
         ] {
             if let Some(e) = sp.parse_error() {
                 return Err(format!("[{name}] {e}"));
@@ -340,6 +351,7 @@ impl Palette {
             md_bold:     f.md_bold.to_style(),
             md_italic:   f.md_italic.to_style(),
             md_strike:   f.md_strike.to_style(),
+            md_code:     f.md_code.to_style(),
         })
     }
 
@@ -455,6 +467,58 @@ impl Palette {
         Self::from_toml(&text)
             .map_err(|e| format!("palette file {spec:?}: {e}"))
     }
+
+    /// Override the `md_code` role's color(s) from a user-supplied *code
+    /// style* string. The value **fully specifies** the code span's color —
+    /// a single color name (foreground only, no box, e.g. `green`) or a
+    /// `foreground,background` pair (a code *box*, e.g. `green,dark-gray`).
+    /// This mirrors the `[md_code]` TOML role's color spec, so the accepted
+    /// syntax is identical to a palette file's.
+    ///
+    /// Any non-color component is a hard `Err` — never a silent fallback — so
+    /// a typo prints a clean message and the CLI exits non-zero *before* raw
+    /// mode (the same contract as `Palette::load`).
+    ///
+    /// This is what `--code-style <SPEC>` and the `KB_TUI_CODE_STYLE` env var
+    /// apply. A TUI cannot switch the *typeface* (a terminal renders a single
+    /// monospace font), so this swaps the code span's **color/box** — the only
+    /// thing the `md_code` role actually paints.
+    pub fn apply_code_style(mut self, spec: &str) -> Result<Self, String> {
+        // Trim + split on commas. At most two parts: [fg, bg]; whitespace and
+        // empty parts are dropped so " green , dark-gray " and "green" both work.
+        let parts: Vec<&str> = spec
+            .trim()
+            .split(',')
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .collect();
+        match parts.len() {
+            1 => {
+                let fg = parse_color_name(parts[0])
+                    .ok_or_else(|| format!("bad code-style color: {:?} (use a palette color name, or FG[,BG])", parts[0]))?;
+                self.md_code.fg = Some(fg);
+                // A single color fully specifies the span: no box.
+                self.md_code.bg = None;
+            }
+            2 => {
+                let fg = parse_color_name(parts[0])
+                    .ok_or_else(|| format!("bad code-style fg color: {:?} (use a palette color name)", parts[0]))?;
+                let bg = parse_color_name(parts[1])
+                    .ok_or_else(|| format!("bad code-style bg color: {:?} (use a palette color name)", parts[1]))?;
+                self.md_code.fg = Some(fg);
+                self.md_code.bg = Some(bg);
+            }
+            0 => {
+                return Err("empty code-style (use a color name or FG[,BG])".into())
+            }
+            n => {
+                return Err(format!(
+                    "code-style takes 1 or 2 colors, got {n} (use FG or FG,BG)"
+                ))
+            }
+        }
+        Ok(self)
+    }
 }
 
 #[cfg(test)]
@@ -490,11 +554,13 @@ mod tests {
         assert_eq!(p.selection_ctx,
             Style::default().fg(Color::Green).add_modifier(Modifier::BOLD));
         assert_eq!(p.md_bold,
-            Style::default().fg(Color::White).add_modifier(Modifier::BOLD));
+            Style::default().fg(Color::LightYellow).add_modifier(Modifier::BOLD));
         assert_eq!(p.md_italic,
             Style::default().fg(Color::LightCyan).add_modifier(Modifier::ITALIC));
         assert_eq!(p.md_strike,
             Style::default().fg(Color::DarkGray).add_modifier(Modifier::CROSSED_OUT));
+        assert_eq!(p.md_code,
+            Style::default().fg(Color::White).bg(Color::DarkGray));
     }
 
     /// The colorblind palette never uses pure Red or Green for a role that
@@ -504,7 +570,7 @@ mod tests {
         let p = Palette::colorblind();
         let roles = [
             p.label, p.active, p.caret, p.gated, p.info, p.success, p.error,
-            p.md_bold, p.md_italic, p.md_strike,
+            p.md_bold, p.md_italic, p.md_strike, p.md_code,
         ];
         for r in roles {
             assert_ne!(r.fg, Some(Color::Red),  "colorblind role fg must not be Red: {:?}", r);
@@ -567,7 +633,7 @@ mod tests {
   bold = true
 
   [md_bold]
-  fg   = "white"
+  fg   = "light-yellow"
   bold = true
 
   [md_italic]
@@ -577,6 +643,10 @@ mod tests {
   [md_strike]
   fg            = "dark-gray"
   strikethrough = true
+
+  [md_code]
+  fg = "white"
+  bg = "dark-gray"
   "#;
         let p = Palette::from_toml(toml).expect("parses");
         // Every role must equal the pinned default.
@@ -589,7 +659,7 @@ mod tests {
     #[test]
     fn missing_role_is_an_error() {
         let toml = r#"
-# Only two of the 16 required roles are present; the rest must be errors.
+# Only two of the 17 required roles are present; the rest must be errors.
 [label]
 fg = "gray"
 
@@ -633,7 +703,7 @@ fg = "definitely-not-a-color"
     }
 
     /// The two *shipped* palette files on disk are valid TOML and define
-    /// all 16 roles. These are the files a user can `--palette <name>` or
+    /// all 17 roles. These are the files a user can `--palette <name>` or
     /// copy as a starting point, so a typo in them is a release blocker.
     #[test]
     fn shipped_palette_files_parse() {
@@ -647,5 +717,42 @@ fg = "definitely-not-a-color"
             Palette::from_toml(&text)
                 .unwrap_or_else(|e| panic!("{name}.toml: {e}"));
         }
+    }
+
+    /// `apply_code_style` swaps the `md_code` role's color/box. A single
+    /// color name sets the foreground and clears any background; `fg,bg`
+    /// sets both (a code box). The rest of the palette is untouched.
+    #[test]
+    fn apply_code_style_single_color() {
+        let p = Palette::default_palette();
+        let before_default = p.default;
+        let overridden = p.apply_code_style("magenta").expect("applies");
+        assert_eq!(overridden.md_code.fg, Some(Color::Magenta));
+        // Single color = foreground only; the box background is dropped.
+        assert_eq!(overridden.md_code.bg, None);
+        // No other role is touched by a code-style override.
+        assert_eq!(overridden.default, before_default);
+    }
+
+    /// `fg,bg` produces a code *box* (both foreground and background set).
+    #[test]
+    fn apply_code_style_fg_bg_pair() {
+        let p = Palette::default_palette();
+        let overridden = p
+            .apply_code_style("light-cyan, blue")
+            .expect("applies a box");
+        assert_eq!(overridden.md_code.fg, Some(Color::LightCyan));
+        assert_eq!(overridden.md_code.bg, Some(Color::Blue));
+    }
+
+    /// A bad color name, the wrong number of colors, or an empty value is a
+    /// hard `Err` — never a silent fallback to the terminal default.
+    #[test]
+    fn apply_code_style_bad_input_is_an_error() {
+        let p = Palette::default_palette();
+        assert!(p.apply_code_style("not-a-color").is_err(), "bad color name errors");
+        assert!(p.apply_code_style("red,green,blue").is_err(), ">2 colors errors");
+        assert!(p.apply_code_style("").is_err(), "empty string errors");
+        assert!(p.apply_code_style("   ").is_err(), "whitespace-only errors");
     }
 }

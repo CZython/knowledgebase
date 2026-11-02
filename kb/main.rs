@@ -455,6 +455,15 @@ pub(crate) enum Cmd {
         /// missing file / bad TOML prints a clean error and exits non-zero.
         #[arg(long, value_name = "NAME_OR_PATH")]
         palette: Option<String>,
+        /// Swap the inline-code (`…`) span's color/box. A TUI can't change the
+        /// terminal's *typeface* (it renders one monospace font), so this
+        /// recolors the code role. Value syntax is the `[md_code]` TOML color
+        /// spec: a single color name (foreground, no box) or `FG,BG` (a code
+        /// box). E.g. `black,yellow` or `magenta`. Also settable via the
+        /// `KB_TUI_CODE_STYLE` env var (this flag wins when both are given).
+        /// A bad value prints a clean error and exits non-zero before raw mode.
+        #[arg(long, value_name = "COLOR_OR_FG,BG")]
+        code_style: Option<String>,
         /// List the built-in palettes (one per line: `<name>\t<description>`)
         /// and exit without entering the TUI or opening the DB.
         #[arg(long)]
@@ -720,8 +729,13 @@ pub(crate) fn run(cli: &Cli) -> i32 {
         // `tui` only exists when the `tui` feature is on (a hardened build
         // rejects the subcommand at parse time, so this arm is unreachable).
         #[cfg(feature = "tui")]
-        Cmd::Tui { palette, list_palettes } => {
-            let code = tui::run_tui(cli.db.as_deref(), palette.as_deref(), *list_palettes);
+        Cmd::Tui { palette, code_style, list_palettes } => {
+            let code = tui::run_tui(
+                cli.db.as_deref(),
+                palette.as_deref(),
+                code_style.as_deref(),
+                *list_palettes,
+            );
             match code {
                 EXIT_OK => Ok(EXIT_OK),
                 c => Err(("tui exited unsuccessfully".into(), c)),

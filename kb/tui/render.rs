@@ -1052,17 +1052,20 @@ fn is_heading(raw: &str) -> bool {
 }
 
 /// Render a Markdown body line into styled spans. Inline emphasis is
-/// recognized for **bold** (`**…**`), _italic_ (`*…*`/`_…_`), and
-/// ~~strikethrough~~ (`~~…~~`); unmatched delimiters pass through as
-/// literal text. Headings are the one exception — they render in the
-/// `label` role unmodified (the heading's own styling wins, so a `#`
-/// heading with `**bold**` inside stays a single `label` span).
+/// recognized for **bold** (`**…**`), _italic_ (`*…*`/`_…_`),
+/// ~~strikethrough~~ (`~~…~~`), and inline code (`` `…` ``); unmatched
+/// delimiters pass through as literal text. Headings are the one exception
+/// — they render in the `label` role unmodified (the heading's own styling
+/// wins, so a `#` heading with `**bold**` inside stays a single `label`
+/// span). The inner text of a code span is opaque: any `**bold**`, `*it*`,
+/// or `~~st~~` inside a `…` span is literal (standard markdown semantics).
 ///
-/// This is *not* a full Markdown engine: there is no HTML tag, no inline
-/// code, no URL, no bold-italic combination. Anything the scanner doesn't
-/// match verbatim falls back to the `default` role, which is what the
-/// pre-markdown renderer produced, so a plain-prose page renders byte-
-/// identically to before.
+/// This is *not* a full Markdown engine: there is no HTML tag, no URL,
+/// no bold-italic combination, and code is single-backtick only (no
+/// fenced triple-backtick blocks and no backticks inside a code span).
+/// Anything the scanner doesn't match verbatim falls back to the
+/// `default` role, which is what the pre-markdown renderer produced,
+/// so a plain-prose page renders byte-identically to before.
 fn render_markdown_text(p: &Palette, raw: &str) -> Line<'static> {
     if raw.is_empty() {
         return Line::from(vec![Span::styled(String::new(), p.default)]);
@@ -1126,6 +1129,36 @@ fn render_markdown_text(p: &Palette, raw: &str) -> Line<'static> {
                     i = close + 2;
                 } else {
                     buf.push('~');
+                    i += 1;
+                }
+            }
+            b'`' => {
+                // Inline code span (`code`). A single backtick delimits;
+                // the inner text is opaque — `**bold**` inside a code span
+                // is *literal*, so we scan to the closest backtick and
+                // render the whole inner span in `md_code`. Adjacent
+                // backticks (`` `` ` or ` ``` `) are *not* closers (that
+                // form is not part of this subset); an unmatched backtick
+                // is literal.
+                if i + 1 < bytes.len() && bytes[i + 1] == b'`' {
+                    // Adjacent to another backtick — render this one as
+                    // literal and let the next iteration handle the second.
+                    buf.push('`');
+                    i += 1;
+                    continue;
+                }
+                let close = find_close_delim(i + 1, 1, bytes);
+                if let Some(close) = close {
+                    if !buf.is_empty() {
+                        spans.push(Span::styled(std::mem::take(&mut buf), p.default));
+                    }
+                    let inner = &raw[i + 1..close];
+                    if !inner.is_empty() {
+                        spans.push(Span::styled(inner.to_string(), p.md_code));
+                    }
+                    i = close + 1;
+                } else {
+                    buf.push('`');
                     i += 1;
                 }
             }
@@ -1362,6 +1395,7 @@ fn browse_row_text(row: &PageRow, width: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use ratatui::style::Color;
 
     fn row(id: &str, rel: &str) -> PageRow {
         PageRow {
@@ -1480,9 +1514,9 @@ mod tests {
         }
     }
     /// `render_markdown_text` recognizes `**bold**`, `*ital*` / `_ital_`,
-    /// and `~~strike~~`, and passes through everything else as the `default`
-    /// role. This is the byte-identical guarantee: any line with no
-    /// recognized delimiters produces a single `default` span.
+    /// `~~strike~~`, and `` `code` ``; unmatched delimiters pass through as
+    /// the `default` role. This is the byte-identical guarantee: any line
+    /// with no recognized delimiters produces a single `default` span.
     #[test]
     fn markdown_bold_italic_strikethrough_render() {
         let p = Palette::default_palette();
@@ -1591,6 +1625,105 @@ mod tests {
         // The content is the CJK char itself (the delimiters are stripped).
         assert!(cjk.spans[0].content.chars().all(|c| c == '量'),
             "no half-width fragment: {:?}", cjk.spans[0].content);
+    }
+    /// `` `code` `` → one `md_code` span (the delimiters are stripped).
+    /// The `md_code` role carries a single style (no bold/italic by default)
+    /// so a code span stays visually distinct from the prose.
+    #[test]
+    fn markdown_inline_code_render() {
+        let p = Palette::default_palette();
+        let c = render_markdown_text(&p, "`code`");
+        assert_eq!(c.spans.len(), 1);
+        assert_eq!(c.spans[0].style, p.md_code);
+        assert_eq!(c.spans[0].content.as_ref(), "code");
+        // Mixed line: prose + code span + prose.
+        let m = render_markdown_text(&p, "use `foo()` to do it");
+        assert_eq!(m.spans.len(), 3);
+        assert_eq!(m.spans[0].style, p.default);
+        assert_eq!(m.spans[1].style, p.md_code);
+        assert_eq!(m.spans[2].style, p.default);
+        assert_eq!(m.spans[0].content.as_ref(), "use ");
+        assert_eq!(m.spans[1].content.as_ref(), "foo()");
+        assert_eq!(m.spans[2].content.as_ref(), " to do it");
+    }
+    /// The inner text of a code span is *opaque*: `**bold**`, `*it*`, and
+    /// `~~st~~` inside a `…` span are literal (not emphasis). This is a
+    /// strong test of the scanner's greedy closer: the scanner must match
+    /// the *first* backtick to close the span, not the last one in the line.
+    #[test]
+    fn markdown_code_span_is_opaque() {
+        let p = Palette::default_palette();
+        // `**bold**` inside a code span stays literal: one `md_code` span.
+        let c = render_markdown_text(&p, "`**bold**`");
+        assert_eq!(c.spans.len(), 1, "opaque code span: {:?}", c.spans.len());
+        assert_eq!(c.spans[0].style, p.md_code);
+        assert_eq!(c.spans[0].content.as_ref(), "**bold**");
+        // `*it*` and `~~st~~` inside a code span are literal too.
+        let ci = render_markdown_text(&p, "`*it*`");
+        assert_eq!(ci.spans.len(), 1);
+        assert_eq!(ci.spans[0].style, p.md_code);
+        assert_eq!(ci.spans[0].content.as_ref(), "*it*");
+        let cst = render_markdown_text(&p, "`~~st~~`");
+        assert_eq!(cst.spans.len(), 1);
+        assert_eq!(cst.spans[0].style, p.md_code);
+        assert_eq!(cst.spans[0].content.as_ref(), "~~st~~");
+    }
+    /// Unmatched backticks render literally. `` ``` ` ` ``` ` ` ` ``` are
+    /// all literal — the scanner does not match a 3-char run as a closer.
+    #[test]
+    fn markdown_unmatched_backticks_are_literal() {
+        let p = Palette::default_palette();
+        // A lone backtick with no closer.
+        let one = render_markdown_text(&p, "a ` b");
+        assert_eq!(one.spans.len(), 1, "lone backtick: {:?}", one.spans.len());
+        assert_eq!(one.spans[0].style, p.default);
+        assert_eq!(one.spans[0].content.as_ref(), "a ` b");
+        // Triple backticks — all three are literal, NOT the fenced-block
+        // opener this scanner doesn't support.
+        let three = render_markdown_text(&p, "```");
+        assert_eq!(three.spans.len(), 1, "``` all literal: {:?}", three.spans.len());
+        assert_eq!(three.spans[0].style, p.default);
+        assert_eq!(three.spans[0].content.as_ref(), "```");
+    }
+    /// A code span adjacent to prose that contains delimiters: the delimiters
+    /// in prose *outside* the code span still render as emphasis.
+    #[test]
+    fn markdown_code_span_preserves_surrounding_emphasis() {
+        let p = Palette::default_palette();
+        // `**bold**` *around* a code span is bold + code + bold.
+        let m = render_markdown_text(&p, "**bold** `code` **more**");
+        assert_eq!(m.spans.len(), 5);
+        assert_eq!(m.spans[0].style, p.md_bold);
+        assert_eq!(m.spans[1].style, p.default);
+        assert_eq!(m.spans[2].style, p.md_code);
+        assert_eq!(m.spans[3].style, p.default);
+        assert_eq!(m.spans[4].style, p.md_bold);
+        assert_eq!(m.spans[0].content.as_ref(), "bold");
+        assert_eq!(m.spans[1].content.as_ref(), " ");
+        assert_eq!(m.spans[2].content.as_ref(), "code");
+        assert_eq!(m.spans[3].content.as_ref(), " ");
+        assert_eq!(m.spans[4].content.as_ref(), "more");
+    }
+    /// The md_code role is distinct from md_bold / md_italic / md_strike /
+    /// default — a palette user who wants a visually-different code span can
+    /// pick one that differentiates (the default palette uses a Green-on-
+    /// DarkGray "code box").
+    #[test]
+    fn markdown_code_role_is_distinct() {
+        let p = Palette::default_palette();
+        assert_ne!(p.md_code, p.md_bold, "md_code != md_bold");
+        assert_ne!(p.md_code, p.md_italic, "md_code != md_italic");
+        assert_ne!(p.md_code, p.md_strike, "md_code != md_strike");
+        assert_ne!(p.md_code, p.default, "md_code != default");
+        // The default palette paints md_code as a White-on-DarkGray "code
+        // box" (no bold/italic), distinct from the LightYellow+BOLD md_bold
+        // and the LightCyan+ITALIC md_italic. The box is what makes it read
+        // as code.
+        assert_eq!(
+            p.md_code,
+            Style::default().fg(Color::White).bg(Color::DarkGray),
+            "default palette md_code is a White-on-DarkGray code box"
+        );
     }
     /// `label` role; body lines keep their default style. The check is
     /// visual: 0, 7+, or a `##` without a trailing space are *not* headings.

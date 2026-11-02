@@ -586,6 +586,15 @@ pub struct App {
     /// first frame, in which case the clamp falls back to the logical-line
     /// model (a window too narrow to matter).
     pub body_pane_width: usize,
+    /// One-shot "force a full clear before the next draw" flag. Set after an
+    /// external editor (the TUI's `$VISUAL`/`$EDITOR`/`vi`) returns: the
+    /// editor ran on the *same TTY* while we were in raw mode + alt-screen,
+    /// so on exit the real terminal buffer is left diverged from ratatui's
+    /// internal model of it — the next diff-based redraw would only patch
+    /// "changed" cells and leave stale "holes". `open_in_editor` sets this;
+    /// the event loop consumes it (one `terminal.clear()`, then reset) so
+    /// the next frame repaints the whole pane from scratch.
+    pub needs_clear: bool,
 }
 
 /// A `Result` over the `(message, exit-code)` tuple the rest of `kb`
@@ -620,9 +629,13 @@ impl App {
             // 80 columns is a reasonable *default* pane width: it matches
             // the conventional `COLUMNS=80` terminal and keeps the scroll
             // mutators total before the first render pass has written the
-            // real width. `draw_read` overwrites this every frame with the
+            //             real width. `draw_read` overwrites this every frame with the
             // real value computed from the live terminal size.
             body_pane_width: 80,
+            // A fresh App has just drawn its first frame in the loop, which
+            // already clears; only *post-editor* returns need the forced
+            // clear, so start off.
+            needs_clear: false,
         })
     }
 
@@ -838,6 +851,11 @@ impl App {
         // Also re-snapshot the row's file bytes (in Browse mode the row's
         // `abs_path` is already what we'd read next — no state to update).
         self.set_success(format!("opened {} — Esc back (the file is now source of truth; re-index with `kb refresh`)", row.abs_path));
+        // The editor held our TTY (raw mode + alt-screen) for its whole
+        // lifetime; on exit the real terminal buffer is diverged from
+        // ratatui's internal model, so a plain diff-redraw leaves "holes".
+        // Force a full clear on the next frame so it repaints from scratch.
+        self.needs_clear = true;
         Ok(())
     }
 
@@ -2912,7 +2930,12 @@ fn load_fm_meta(db: &Db, abs_path: &str) -> KbResult<FmMeta> {
 /// Run the TUI: open the DB, load the snapshot, hand off to the event
 /// loop, and restore the terminal on the way out (the `Drop` guard in
 /// `event_loop` is the safety net for the in-between returns).
-pub fn run_tui(dbpath: Option<&Path>, palette_spec: Option<&str>, list_palettes: bool) -> i32 {
+pub fn run_tui(
+    dbpath: Option<&Path>,
+    palette_spec: Option<&str>,
+    code_style: Option<&str>,
+    list_palettes: bool,
+) -> i32 {
     // `--list-palettes` is a purely informational flag: it lists the
     // built-ins and exits 0 without touching the DB or entering raw mode.
     // (It is accepted even without a reachable DB so the help works anywhere.)
@@ -2930,7 +2953,7 @@ pub fn run_tui(dbpath: Option<&Path>, palette_spec: Option<&str>, list_palettes:
     };
     // Resolve `--palette <name|path>` *before* entering raw mode so a typo /
     // missing file / bad TOML prints a clean message and exits non-zero.
-    let palette = match palette_spec {
+    let mut palette = match palette_spec {
         Some(spec) => match palette::Palette::load(spec) {
             Ok(p) => p,
             Err(msg) => {
@@ -2940,6 +2963,24 @@ pub fn run_tui(dbpath: Option<&Path>, palette_spec: Option<&str>, list_palettes:
         },
         None => palette::Palette::default_palette(),
     };
+    // Swap the `md_code` color/box. Source precedence: the explicit
+    // `--code-style` flag, else the `KB_TUI_CODE_STYLE` env var. Both resolve
+    // *before* raw mode so a bad value is a clean non-zero exit, never a
+    // silent fallback. A single color name = foreground (no box); `fg,bg`
+    // = a code box. A TUI can't switch the *typeface* (one terminal font), so
+    // this varies the code span's color — the only thing that role paints.
+    let code_style: Option<String> = code_style
+        .map(str::to_string)
+        .or_else(|| std::env::var("KB_TUI_CODE_STYLE").ok());
+    if let Some(spec) = code_style {
+        match palette.apply_code_style(&spec) {
+            Ok(p) => palette = p,
+            Err(msg) => {
+                eprintln!("{msg}");
+                return crate::EXIT_ERR;
+            }
+        }
+    }
     let app = match App::new(db) {
         Ok(a) => a.with_palette(palette),
         Err((msg, code)) => {
@@ -3031,6 +3072,16 @@ fn event_loop(mut app: App) -> i32 {
     let _cleanup = Cleanup;
 
     loop {
+        // Consume any "force clear" flag (set after an external editor
+        // returned). We must clear *then* draw in this iteration so the first
+        // post-editor frame is a full repaint — a diff-only redraw against
+        // ratatui's stale internal buffer leaves stale cells behind. `clear`
+        // resets ratatui's last-drawn state too, so the very next draw is a
+        // complete, from-scratch frame.
+        if app.needs_clear {
+            app.needs_clear = false;
+            let _ = terminal.clear();
+        }
         if let Err(e) = terminal.draw(|f| render::draw(f, &mut app)) {
             eprintln!("tui: draw failed: {e}");
             break;
