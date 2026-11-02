@@ -1029,23 +1029,177 @@ fn render_status_bar(f: &mut Frame, app: &App, area: ratatui::layout::Rect) {
 /// up the label style — an acceptable, deterministic false-positive rather
 /// than carrying a stateful parser through the render path.
 fn read_line(p: &Palette, raw: &str) -> Line<'static> {
-    let is_heading = || {
-        let cs = raw.as_bytes();
-        if cs.is_empty() || cs[0] != b'#' {
-            return false;
-        }
-        // Up to 6 `#`s, then *exactly* one space (or end-of-line).
-        let mut i = 0;
-        while i < cs.len() && cs[i] == b'#' {
-            i += 1;
-        }
-        (1..=6).contains(&i) && i < cs.len() && cs[i] == b' '
-    };
-    if is_heading() {
+    if is_heading(raw) {
         Line::from(vec![Span::styled(raw.to_string(), p.label)])
     } else {
-        Line::from(Span::styled(raw.to_string(), p.default))
+        render_markdown_text(p, raw)
     }
+}
+
+/// True when `raw` is an ATX heading: 1–6 `#`s followed by exactly one
+/// space (or end-of-line). `####### seven`, `##nospace`, `#Title` (no
+/// space), and the empty string are *not* headings.
+fn is_heading(raw: &str) -> bool {
+    let cs = raw.as_bytes();
+    if cs.is_empty() || cs[0] != b'#' {
+        return false;
+    }
+    let mut i = 0;
+    while i < cs.len() && cs[i] == b'#' {
+        i += 1;
+    }
+    (1..=6).contains(&i) && i < cs.len() && cs[i] == b' '
+}
+
+/// Render a Markdown body line into styled spans. Inline emphasis is
+/// recognized for **bold** (`**…**`), _italic_ (`*…*`/`_…_`), and
+/// ~~strikethrough~~ (`~~…~~`); unmatched delimiters pass through as
+/// literal text. Headings are the one exception — they render in the
+/// `label` role unmodified (the heading's own styling wins, so a `#`
+/// heading with `**bold**` inside stays a single `label` span).
+///
+/// This is *not* a full Markdown engine: there is no HTML tag, no inline
+/// code, no URL, no bold-italic combination. Anything the scanner doesn't
+/// match verbatim falls back to the `default` role, which is what the
+/// pre-markdown renderer produced, so a plain-prose page renders byte-
+/// identically to before.
+fn render_markdown_text(p: &Palette, raw: &str) -> Line<'static> {
+    if raw.is_empty() {
+        return Line::from(vec![Span::styled(String::new(), p.default)]);
+    }
+    let mut spans: Vec<Span<'static>> = Vec::new();
+    let mut buf = String::new();
+    let mut i = 0usize;
+    let bytes = raw.as_bytes();
+    while i < bytes.len() {
+        match bytes[i] {
+            b'*' | b'_' => {
+                if bytes[i] == b'_'
+                    && ((i > 0 && bytes[i - 1] == b'_')
+                        || (i + 1 < bytes.len() && bytes[i + 1] == b'_'))
+                {
+                    // Double underscore is literal in this subset. Render one
+                    // underscore and keep scanning from here (the next char is
+                    // also an underscore and will be handled in the next loop
+                    // iteration).
+                    buf.push('_');
+                    i += 1;
+                    continue;
+                }
+                let run = delimiter_run(bytes, i);
+                let matched = match run {
+                    2 if bytes[i] == b'*' => find_close_delim(i + 2, 2, bytes),
+                    1 if bytes[i] == b'*' => find_close_delim(i + 1, 1, bytes),
+                    1 if bytes[i] == b'_' => find_close_delim(i + 1, 1, bytes),
+                    _ => None,
+                };
+                if let Some(close) = matched {
+                    if !buf.is_empty() {
+                        spans.push(Span::styled(std::mem::take(&mut buf), p.default));
+                    }
+                    let inner = &raw[i + run..close];
+                    if !inner.is_empty() {
+                        let style = if run == 2 { p.md_bold } else { p.md_italic };
+                        spans.push(Span::styled(inner.to_string(), style));
+                    }
+                    i = close + run;
+                } else {
+                    // No closer — render as a literal delimiter.
+                    buf.push(bytes[i] as char);
+                    i += 1;
+                }
+            }
+            b'~' => {
+                let close = if i + 1 < bytes.len() && bytes[i + 1] == b'~' {
+                    find_close_delim(i + 2, 2, bytes)
+                } else {
+                    None
+                };
+                if let Some(close) = close {
+                    if !buf.is_empty() {
+                        spans.push(Span::styled(std::mem::take(&mut buf), p.default));
+                    }
+                    let inner = &raw[i + 2..close];
+                    if !inner.is_empty() {
+                        spans.push(Span::styled(inner.to_string(), p.md_strike));
+                    }
+                    i = close + 2;
+                } else {
+                    buf.push('~');
+                    i += 1;
+                }
+            }
+            _ => {
+                // Non-special byte. For a non-ASCII leading byte (e.g. a
+                // CJK leading byte), copy the full UTF-8 codepoint rather
+                // than one byte — `bytes[i] as char` would corrupt it.
+                // ASCII bytes are a single `char`; non-ASCII bytes start a
+                // multi-byte sequence we decode via `std::str::from_utf8`.
+                let (ch, n) = if bytes[i] < 0x80 {
+                    (bytes[i] as char, 1)
+                } else {
+                    match std::str::from_utf8(&bytes[i..]) {
+                        Ok(s) => {
+                            let mut it = s.chars();
+                            let c = it.next().unwrap();
+                            (c, c.len_utf8())
+                        }
+                        Err(_) => (bytes[i] as char, 1),
+                    }
+                };
+                buf.push(ch);
+                i += n;
+            }
+        }
+    }
+    if !buf.is_empty() {
+        spans.push(Span::styled(buf, p.default));
+    }
+    if spans.is_empty() {
+        spans.push(Span::styled(String::new(), p.default));
+    }
+    Line::from(spans)
+}
+
+/// Count consecutive ASCII `*` or `_` starting at `i`.
+fn delimiter_run(bytes: &[u8], i: usize) -> usize {
+    if i >= bytes.len() || (bytes[i] != b'*' && bytes[i] != b'_') {
+        return 0;
+    }
+    let mut n = 0usize;
+    while i + n < bytes.len() && bytes[i + n] == bytes[i] {
+        n += 1;
+    }
+    n
+}
+
+/// From `start`, find the *next* occurrence of `count` consecutive
+/// delimiters matching the byte at `start - 1`. Returns the index of the
+/// first `*` (or `_`) of the closer, or `None` if no closer exists.
+fn find_close_delim(
+    start: usize,
+    count: usize,
+    bytes: &[u8],
+) -> Option<usize> {
+    if start >= bytes.len() {
+        return None;
+    }
+    let target = bytes[start.saturating_sub(1)]; // the delimiter char
+    let mut i = start;
+    while i < bytes.len() {
+        if bytes[i] == target {
+            // Check for enough consecutive matches.
+            let mut j = 0;
+            while i + j < bytes.len() && bytes[i + j] == target {
+                j += 1;
+            }
+            if j >= count {
+                return Some(i);
+            }
+        }
+        i += 1;
+    }
+    None
 }
 
 /// Truncate to at most `max` **chars** (not bytes) so a multi-byte title
@@ -1324,6 +1478,119 @@ mod tests {
             assert_eq!(first.content.as_ref(), *m, "row {i} first span content");
             assert_eq!(first.style, *s, "row {i} first span style");
         }
+    }
+    /// `render_markdown_text` recognizes `**bold**`, `*ital*` / `_ital_`,
+    /// and `~~strike~~`, and passes through everything else as the `default`
+    /// role. This is the byte-identical guarantee: any line with no
+    /// recognized delimiters produces a single `default` span.
+    #[test]
+    fn markdown_bold_italic_strikethrough_render() {
+        let p = Palette::default_palette();
+        // A plain line (no delimiters) is a single `default` span — the
+        // byte-identical guarantee to the pre-markdown renderer.
+        let plain = render_markdown_text(&p, "just a line");
+        assert_eq!(plain.spans.len(), 1);
+        assert_eq!(plain.spans[0].style, p.default);
+        // **bold** → one `md_bold` span.
+        let b = render_markdown_text(&p, "**bold**");
+        assert_eq!(b.spans.len(), 1);
+        assert_eq!(b.spans[0].style, p.md_bold);
+        // *italic* → one `md_italic` span.
+        let it = render_markdown_text(&p, "*ital*");
+        assert_eq!(it.spans.len(), 1);
+        assert_eq!(it.spans[0].style, p.md_italic);
+        // _italic_ → one `md_italic` span.
+        let it2 = render_markdown_text(&p, "_ital_");
+        assert_eq!(it2.spans.len(), 1);
+        assert_eq!(it2.spans[0].style, p.md_italic);
+        // ~~strike~~ → one `md_strike` span.
+        let st = render_markdown_text(&p, "~~gone~~");
+        assert_eq!(st.spans.len(), 1);
+        assert_eq!(st.spans[0].style, p.md_strike);
+        // A mixed line preserves order and strips the delimiters from the
+        // spans; 7 spans: 4 default + bold + italic + strike.
+        let mixed = render_markdown_text(&p, "start **bold** mid *it* end ~~st~~ end");
+        assert_eq!(mixed.spans.len(), 7, "expected 7 spans, got {:?}", mixed.spans.len());
+        assert_eq!(mixed.spans[0].style, p.default);
+        assert_eq!(mixed.spans[1].style, p.md_bold);
+        assert_eq!(mixed.spans[2].style, p.default);
+        assert_eq!(mixed.spans[3].style, p.md_italic);
+        assert_eq!(mixed.spans[4].style, p.default);
+        assert_eq!(mixed.spans[5].style, p.md_strike);
+        assert_eq!(mixed.spans[6].style, p.default);
+        assert_eq!(mixed.spans[0].content.as_ref(), "start ");
+        assert_eq!(mixed.spans[1].content.as_ref(), "bold");
+        assert_eq!(mixed.spans[2].content.as_ref(), " mid ");
+        assert_eq!(mixed.spans[3].content.as_ref(), "it");
+        assert_eq!(mixed.spans[4].content.as_ref(), " end ");
+        assert_eq!(mixed.spans[5].content.as_ref(), "st");
+        assert_eq!(mixed.spans[6].content.as_ref(), " end");
+    }
+    /// A literal `*` not followed by text is rendered as-is (one `default`
+    /// span). This is the "pass through unrecognized" guarantee: no
+    /// delimiter, no crash, no silent drop.
+    #[test]
+    fn markdown_unmatched_delimiters_are_literal() {
+        let p = Palette::default_palette();
+        // A single `*` with no closer.
+        let one = render_markdown_text(&p, "5 * 3 = 15");
+        assert_eq!(one.spans.len(), 1, "no spurious spans: #{:?}", one.spans.len());
+        assert_eq!(one.spans[0].style, p.default);
+        assert_eq!(one.spans[0].content.as_ref(), "5 * 3 = 15");
+        // `a ** bold` (unmatched `**` with no closer) renders literally.
+        let two = render_markdown_text(&p, "a ** bold");
+        assert_eq!(two.spans.len(), 1);
+        assert_eq!(two.spans[0].style, p.default);
+        assert_eq!(two.spans[0].content.as_ref(), "a ** bold");
+        // A single `~` (not a pair) renders literally.
+        let one_t = render_markdown_text(&p, "a ~ b");
+        assert_eq!(one_t.spans.len(), 1);
+        assert_eq!(one_t.spans[0].style, p.default);
+        assert_eq!(one_t.spans[0].content.as_ref(), "a ~ b");
+    }
+    /// `***bold_italic***` falls through to literal (we don't match a 3-char
+    /// run). `**bold** *ital*` and `**bold**_ital_` are two spans each.
+    #[test]
+    fn markdown_bold_italic_adjacent() {
+        let p = Palette::default_palette();
+        // ***bold_italic*** — the scanner eats the first `*` as a literal,
+        // then recognises `**bold_italic**` as bold (the closer is found),
+        // then a trailing `*` remains literal.
+        let bi = render_markdown_text(&p, "***bold_italic***");
+        assert_eq!(bi.spans.len(), 3,
+            "*** renders as literal * + bold span + literal *: {:?}", bi.spans.len());
+        assert_eq!(bi.spans[0].style, p.default);
+        assert_eq!(bi.spans[0].content.as_ref(), "*");
+        assert_eq!(bi.spans[1].style, p.md_bold);
+        assert_eq!(bi.spans[1].content.as_ref(), "bold_italic");
+        assert_eq!(bi.spans[2].style, p.default);
+        assert_eq!(bi.spans[2].content.as_ref(), "*");
+        // `__ital__` (double underscore) is NOT bold — no match.
+        let du = render_markdown_text(&p, "__ital__");
+        assert_eq!(du.spans.len(), 1, "__ is literal, not bold: {:?}", du.spans.len());
+        assert_eq!(du.spans[0].style, p.default);
+        let ba = render_markdown_text(&p, "**bold** *ital*");
+        assert_eq!(ba.spans.len(), 3);
+        assert_eq!(ba.spans[0].style, p.md_bold);
+        assert_eq!(ba.spans[1].style, p.default);
+        assert_eq!(ba.spans[2].style, p.md_italic);
+        let bu = render_markdown_text(&p, "**bold**_ital_");
+        assert_eq!(bu.spans.len(), 2);
+        assert_eq!(bu.spans[0].style, p.md_bold);
+        assert_eq!(bu.spans[1].style, p.md_italic);
+    }
+    /// CJK inside a span: the CJK character (multibyte, no 0x2A byte inside)
+    /// is included in the bold span verbatim; the delimiters are stripped.
+    /// This guards against a byte-slice bug in the scanner.
+    #[test]
+    fn markdown_bold_with_cjk_inside() {
+        let p = Palette::default_palette();
+        let cjk = render_markdown_text(&p, "**量**");
+        assert_eq!(cjk.spans.len(), 1);
+        assert_eq!(cjk.spans[0].style, p.md_bold);
+        // The content is the CJK char itself (the delimiters are stripped).
+        assert!(cjk.spans[0].content.chars().all(|c| c == '量'),
+            "no half-width fragment: {:?}", cjk.spans[0].content);
     }
     /// `label` role; body lines keep their default style. The check is
     /// visual: 0, 7+, or a `##` without a trailing space are *not* headings.

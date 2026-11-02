@@ -67,6 +67,8 @@ pub struct StyleSpec {
     #[serde(default)]
     pub underline: bool,
     #[serde(default)]
+    pub strikethrough: bool,
+    #[serde(default)]
     pub reverse:   bool,
 }
 
@@ -83,11 +85,12 @@ impl StyleSpec {
             res.bg = Some(c);
         }
         let mut mods = Modifier::empty();
-        if self.bold      { mods |= Modifier::BOLD; }
-        if self.dim       { mods |= Modifier::DIM; }
-        if self.italic    { mods |= Modifier::ITALIC; }
-        if self.underline { mods |= Modifier::UNDERLINED; }
-        if self.reverse   { mods |= Modifier::REVERSED; }
+        if self.bold          { mods |= Modifier::BOLD; }
+        if self.dim           { mods |= Modifier::DIM; }
+        if self.italic        { mods |= Modifier::ITALIC; }
+        if self.underline     { mods |= Modifier::UNDERLINED; }
+        if self.strikethrough { mods |= Modifier::CROSSED_OUT; }
+        if self.reverse       { mods |= Modifier::REVERSED; }
         res = res.add_modifier(mods);
         res
     }
@@ -180,6 +183,9 @@ pub struct Palette {
     pub error:      Style,
     pub selection:      Style,
     pub selection_ctx:  Style,
+    pub md_bold:     Style,
+    pub md_italic:   Style,
+    pub md_strike:   Style,
 }
 
 impl Palette {
@@ -227,6 +233,17 @@ impl Palette {
             selection:       Style::default().fg(Color::Black).bg(Color::Blue),
             // `▶` current item (build_value_lines `arrow`): Green+BOLD.
             selection_ctx:   Style::default().fg(Color::Green).add_modifier(Modifier::BOLD),
+            // Inline markdown emphasis, read pane only (render_markdown_text).
+            // Bold: White+BOLD — the body is already White, so bold *adds*
+            // weight; a distinct accent color would clash with the label/active
+            // families (magenta/cyan).
+            md_bold:         Style::default().fg(Color::White).add_modifier(Modifier::BOLD),
+            // Italic: LightCyan+ITALIC — a soft, readable tilt that stays
+            // distinct from the White body and the Magenta labels.
+            md_italic:       Style::default().fg(Color::LightCyan).add_modifier(Modifier::ITALIC),
+            // Strikethrough: DarkGray+CROSSED_OUT — a "greyed out" deleted
+            // feel, the bar carried by the CROSSED_OUT modifier.
+            md_strike:       Style::default().fg(Color::DarkGray).add_modifier(Modifier::CROSSED_OUT),
         }
     }
 
@@ -253,6 +270,10 @@ impl Palette {
             error:           style(Color::Magenta, true),
             selection:       Style::default().fg(Color::Black).bg(Color::White),
             selection_ctx:   Style::default().fg(Color::White).bg(Color::DarkGray),
+            // No red/green pair in the markdown roles either.
+            md_bold:         style(Color::White, true),
+            md_italic:       Style::default().fg(Color::LightCyan).add_modifier(Modifier::ITALIC),
+            md_strike:       Style::default().fg(Color::DarkGray).add_modifier(Modifier::CROSSED_OUT),
         }
     }
 
@@ -282,6 +303,9 @@ impl Palette {
             error:      StyleSpec,
             selection:      StyleSpec,
             selection_ctx:  StyleSpec,
+            md_bold:     StyleSpec,
+            md_italic:   StyleSpec,
+            md_strike:   StyleSpec,
         }
         let f: File = toml::from_str(s)
             .map_err(|e| format!("invalid palette TOML: {e}"))?;
@@ -293,6 +317,7 @@ impl Palette {
             ("gated", &f.gated), ("open", &f.open), ("info", &f.info),
             ("success", &f.success), ("error", &f.error),
             ("selection", &f.selection), ("selection_ctx", &f.selection_ctx),
+            ("md_bold", &f.md_bold), ("md_italic", &f.md_italic), ("md_strike", &f.md_strike),
         ] {
             if let Some(e) = sp.parse_error() {
                 return Err(format!("[{name}] {e}"));
@@ -310,8 +335,11 @@ impl Palette {
             info:            f.info.to_style(),
             success:         f.success.to_style(),
             error:           f.error.to_style(),
-            selection:       f.selection.to_style(),
-            selection_ctx:   f.selection_ctx.to_style(),
+            selection:      f.selection.to_style(),
+            selection_ctx:  f.selection_ctx.to_style(),
+            md_bold:     f.md_bold.to_style(),
+            md_italic:   f.md_italic.to_style(),
+            md_strike:   f.md_strike.to_style(),
         })
     }
 
@@ -461,6 +489,12 @@ mod tests {
             Style::default().fg(Color::Black).bg(Color::Blue));
         assert_eq!(p.selection_ctx,
             Style::default().fg(Color::Green).add_modifier(Modifier::BOLD));
+        assert_eq!(p.md_bold,
+            Style::default().fg(Color::White).add_modifier(Modifier::BOLD));
+        assert_eq!(p.md_italic,
+            Style::default().fg(Color::LightCyan).add_modifier(Modifier::ITALIC));
+        assert_eq!(p.md_strike,
+            Style::default().fg(Color::DarkGray).add_modifier(Modifier::CROSSED_OUT));
     }
 
     /// The colorblind palette never uses pure Red or Green for a role that
@@ -468,7 +502,10 @@ mod tests {
     #[test]
     fn colorblind_has_no_red_or_green() {
         let p = Palette::colorblind();
-        let roles = [p.label, p.active, p.caret, p.gated, p.info, p.success, p.error];
+        let roles = [
+            p.label, p.active, p.caret, p.gated, p.info, p.success, p.error,
+            p.md_bold, p.md_italic, p.md_strike,
+        ];
         for r in roles {
             assert_ne!(r.fg, Some(Color::Red),  "colorblind role fg must not be Red: {:?}", r);
             assert_ne!(r.fg, Some(Color::Green),"colorblind role fg must not be Green: {:?}", r);
@@ -528,6 +565,18 @@ mod tests {
   [selection_ctx]
   fg   = "green"
   bold = true
+
+  [md_bold]
+  fg   = "white"
+  bold = true
+
+  [md_italic]
+  fg     = "light-cyan"
+  italic = true
+
+  [md_strike]
+  fg            = "dark-gray"
+  strikethrough = true
   "#;
         let p = Palette::from_toml(toml).expect("parses");
         // Every role must equal the pinned default.
@@ -540,7 +589,7 @@ mod tests {
     #[test]
     fn missing_role_is_an_error() {
         let toml = r#"
-# Only two of the 13 required roles are present; the rest must be errors.
+# Only two of the 16 required roles are present; the rest must be errors.
 [label]
 fg = "gray"
 
@@ -556,7 +605,7 @@ fg = "white"
     fn bad_color_name_is_an_error() {
         let s = StyleSpec {
             fg: Some("not-a-color".into()), bg: None,
-            bold: false, dim: false, italic: false, underline: false, reverse: false,
+            bold: false, dim: false, italic: false, underline: false, strikethrough: false, reverse: false,
         };
         assert!(s.parse_error().is_some(), "bad color name must produce parse_error");
         // Also verify the full TOML path surfaces this as an `Err`, not a
@@ -584,7 +633,7 @@ fg = "definitely-not-a-color"
     }
 
     /// The two *shipped* palette files on disk are valid TOML and define
-    /// all 13 roles. These are the files a user can `--palette <name>` or
+    /// all 16 roles. These are the files a user can `--palette <name>` or
     /// copy as a starting point, so a typo in them is a release blocker.
     #[test]
     fn shipped_palette_files_parse() {
