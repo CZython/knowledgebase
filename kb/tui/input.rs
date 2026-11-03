@@ -272,8 +272,9 @@ fn handle_read(app: &mut App, ev: KeyEvent) -> bool {
             false
         }
         // `f` arms the reader-find (the `/` filter idiom, scoped to Read):
-        // type a string to highlight all occurrences; ↑/↓/j/k to navigate;
-        // Esc to close.
+        // type a string to highlight all occurrences; ↑/↓ to navigate;
+        // Esc to close. (j/k/n are typed, not navigation — they're letters
+        // the needle may contain.)
         KeyCode::Char('f') => {
             app.find_activate();
             app.find_center_scroll();
@@ -290,12 +291,14 @@ fn handle_read(app: &mut App, ev: KeyEvent) -> bool {
 
 /// Live-input handler for the reader-find (the `f` key in Read mode, the
 /// `/` filter idiom scoped to Read). All keys are captured here: printable
-/// chars append to the needle, `Backspace` pops, `↑`/`↓`/`j`/`k`/`n`/`N`
-/// walk the hit list (each move recenters the viewport), `Esc` closes find
-/// (keeps the scroll position), `q`/`C-c` quit the TUI.
+/// chars (including `j`/`k`/`n`) append to the needle, `Backspace` pops,
+/// `↑`/`↓` walk the hit list (each move recenters the viewport), `Esc`
+/// closes find (keeps the scroll position), `q`/`C-c` quit the TUI.
 ///
 /// Mirrors the `handle_filter_input` structure: the match arms return
 /// `bool` (quit?) and the arms that mutate state set the status note.
+/// Navigation is arrows-only so that any letter the search term contains
+/// can be typed verbatim.
 fn handle_find_input(app: &mut App, ev: KeyEvent) -> bool {
     match ev.code {
         KeyCode::Char('q') => true,
@@ -308,14 +311,18 @@ fn handle_find_input(app: &mut App, ev: KeyEvent) -> bool {
             false
         }
 
-        // Navigate the hit list (each move recenters the viewport).
-        KeyCode::Up | KeyCode::Char('k') | KeyCode::Char('N') => {
+        // Navigate the hit list (each move recenters the viewport). Arrows
+        // only: `j`/`k`/`n`/`N` are *also* letters the user may want to TYPE
+        // into the needle, so they fall through to the generic `Char(c)` arm
+        // below (mirrors the `/` filter idiom — navigation never captures a
+        // printable that the search term might contain).
+        KeyCode::Up => {
             app.find_prev();
             let note = app.find_note().unwrap_or_default();
             app.set_info(note);
             false
         }
-        KeyCode::Down | KeyCode::Char('j') | KeyCode::Char('n') => {
+        KeyCode::Down => {
             app.find_next();
             let note = app.find_note().unwrap_or_default();
             app.set_info(note);
@@ -969,6 +976,86 @@ mod tests {
             matches!(&app.mode, crate::tui::Mode::Read(_)),
             "Enter opens the selected page for reading"
         );
+    }
+
+    /// While the reader-find is armed, `j`/`k`/`n`/`N` are *typed* into the
+    /// needle (they're letters a search term may contain), whereas only
+    /// `↑`/`↓` navigate the hit list. Regression: `j`, `k`, and `n` used to
+    /// be captured for prev/next navigation *before* the generic typing arm,
+    /// so a needle like "jkn" could never be typed — the very bug reported.
+    #[test]
+    fn find_armed_jkn_are_typed_and_arrows_navigate() {
+        let db = crate::tui::Db::open_in_memory_test().unwrap();
+        db.migrate().unwrap();
+        // A body with the needle "jkn" appearing on two lines, so that
+        // navigation has ≥2 hits to walk between.
+        let body = "intro\njkn on line one\nmiddle\njkn on line two\ntail";
+        db.conn
+            .execute(
+                "INSERT INTO pages (abs_path, id, type, title, root, rel_path, search_required_phrase, mtime_ns, content_hash)
+                 VALUES ('/root/f.md', 'note:jknav', 'note', 'JK Nav', '/root', 'f.md', NULL, 0, 'x')",
+                rusqlite::params![],
+            )
+            .unwrap();
+        let mut app = App::new(db).unwrap();
+        app.selected = app.view.iter().position(|r| r.id == "note:jknav").unwrap();
+        app.open_read().unwrap();
+        let rs = match &mut app.mode {
+            crate::tui::Mode::Read(r) => r,
+            _ => panic!(),
+        };
+        rs.body = body.to_string();
+        rs.scroll_top = 0;
+
+        // Arm find.
+        app.find_activate();
+        assert!(app.find_armed(), "find armed");
+
+        // Type the whole needle "jkn": every char (incl. j/k/n) must be
+        // appended verbatim, NOT consumed as navigation.
+        for c in "jkn".chars() {
+            assert!(!handle_event(&mut app, key(c)));
+        }
+        {
+            let fs = match &app.mode {
+                crate::tui::Mode::Read(r) => r.find.as_ref().expect("find state"),
+                _ => panic!(),
+            };
+            assert_eq!(fs.needle, "jkn", "'jkn' typed verbatim (j/k/n not eaten for nav)");
+            assert_eq!(fs.matches.len(), 2, "two 'jkn' occurrences");
+            assert_eq!(fs.cursor, 0, "cursor on the first hit");
+        }
+
+        // Arrows are the *only* navigation: Down advances the hit, and the
+        // needle is left untouched.
+        assert!(!handle_event(&mut app, key_code_down()));
+        {
+            let fs = match &app.mode {
+                crate::tui::Mode::Read(r) => r.find.as_ref().unwrap(),
+                _ => panic!(),
+            };
+            assert_eq!(fs.cursor, 1, "Down advances to hit 2");
+            assert_eq!(fs.needle, "jkn", "arrow did not append to the needle");
+        }
+        assert!(!handle_event(&mut app, key_code_up()));
+        {
+            let fs = match &app.mode {
+                crate::tui::Mode::Read(r) => r.find.as_ref().unwrap(),
+                _ => panic!(),
+            };
+            assert_eq!(fs.cursor, 0, "Up wraps back to hit 1");
+            assert_eq!(fs.needle, "jkn", "arrow did not append to the needle");
+        }
+
+        // n is typed (not navigation): appends to the needle.
+        assert!(!handle_event(&mut app, key('n')));
+        {
+            let fs = match &app.mode {
+                crate::tui::Mode::Read(r) => r.find.as_ref().unwrap(),
+                _ => panic!(),
+            };
+            assert_eq!(fs.needle, "jknn", "'n' is typed verbatim -> 'jknn'");
+        }
     }
 
     fn key_code_down() -> KeyEvent {
