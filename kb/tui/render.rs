@@ -1219,15 +1219,6 @@ fn is_heading(raw: &str) -> bool {
     (1..=6).contains(&i) && i < cs.len() && cs[i] == b' '
 }
 
-/// The heading predicate (`#`…`######` + a single space), exposed so the
-/// find matcher in `mod.rs` can skip headings — the same single source of
-/// truth `read_line` uses to decide the `label` role. (Readings of a
-/// heading are verbatim in the rendered stream, so the test is identical
-/// on raw vs rendered text.)
-pub fn is_heading_line(raw: &str) -> bool {
-    is_heading(raw)
-}
-
 /// Render a Markdown body line into styled spans. Inline emphasis is
 /// recognized for **bold** (`**…**`), _italic_ (`*…*`/`_…_`),
 /// ~~strikethrough~~ (`~~…~~`), and inline code (`` `…` ``); unmatched
