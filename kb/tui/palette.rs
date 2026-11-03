@@ -187,6 +187,8 @@ pub struct Palette {
     pub md_italic:   Style,
     pub md_strike:   Style,
     pub md_code:     Style,
+    pub find_match:  Style,
+    pub find_current: Style,
 }
 
 impl Palette {
@@ -250,6 +252,14 @@ impl Palette {
             // the yellow bold / cyan italic — a code span is monospaced
             // content, so it stays un-bolded and un-tinted in the fg.
             md_code:         Style::default().fg(Color::White).bg(Color::DarkGray),
+            // Reader find (`f` in Read): every occurrence of the needle is a
+            // box. `find_match` is the *softer* box (all hits) — black on
+            // LightCyan, readable against the White body; `find_current` is
+            // the *strong* box (the cursor's selected hit) — black on
+            // Yellow, the one the viewport centers on. The two are distinct
+            // in hue (cyan vs yellow) so a hit list is scannable.
+            find_match:      Style::default().fg(Color::Black).bg(Color::LightCyan),
+            find_current:    Style::default().fg(Color::Black).bg(Color::Yellow),
         }
     }
 
@@ -283,6 +293,11 @@ impl Palette {
             // Inline code: a neutral White-on-DarkGray code box (colorblind-
             // safe, distinct from the Yellow bold and LightCyan italic).
             md_code:         Style::default().fg(Color::White).bg(Color::DarkGray),
+            // Reader find: cyan (matches) vs magenta (the current/selected
+            // hit). Both are distinct from the red/green families and from
+            // each other in hue, so a hit list stays scannable under CVD.
+            find_match:      Style::default().fg(Color::Black).bg(Color::LightCyan),
+            find_current:    Style::default().fg(Color::Black).bg(Color::LightMagenta),
         }
     }
 
@@ -316,6 +331,8 @@ impl Palette {
             md_italic:   StyleSpec,
             md_strike:   StyleSpec,
             md_code:     StyleSpec,
+            find_match:  StyleSpec,
+            find_current: StyleSpec,
         }
         let f: File = toml::from_str(s)
             .map_err(|e| format!("invalid palette TOML: {e}"))?;
@@ -329,6 +346,7 @@ impl Palette {
             ("selection", &f.selection), ("selection_ctx", &f.selection_ctx),
             ("md_bold", &f.md_bold), ("md_italic", &f.md_italic),
             ("md_strike", &f.md_strike), ("md_code", &f.md_code),
+            ("find_match", &f.find_match), ("find_current", &f.find_current),
         ] {
             if let Some(e) = sp.parse_error() {
                 return Err(format!("[{name}] {e}"));
@@ -352,6 +370,8 @@ impl Palette {
             md_italic:   f.md_italic.to_style(),
             md_strike:   f.md_strike.to_style(),
             md_code:     f.md_code.to_style(),
+            find_match:  f.find_match.to_style(),
+            find_current: f.find_current.to_style(),
         })
     }
 
@@ -561,6 +581,10 @@ mod tests {
             Style::default().fg(Color::DarkGray).add_modifier(Modifier::CROSSED_OUT));
         assert_eq!(p.md_code,
             Style::default().fg(Color::White).bg(Color::DarkGray));
+        assert_eq!(p.find_match,
+            Style::default().fg(Color::Black).bg(Color::LightCyan));
+        assert_eq!(p.find_current,
+            Style::default().fg(Color::Black).bg(Color::Yellow));
     }
 
     /// The colorblind palette never uses pure Red or Green for a role that
@@ -571,6 +595,7 @@ mod tests {
         let roles = [
             p.label, p.active, p.caret, p.gated, p.info, p.success, p.error,
             p.md_bold, p.md_italic, p.md_strike, p.md_code,
+            p.find_match, p.find_current,
         ];
         for r in roles {
             assert_ne!(r.fg, Some(Color::Red),  "colorblind role fg must not be Red: {:?}", r);
@@ -647,6 +672,14 @@ mod tests {
   [md_code]
   fg = "white"
   bg = "dark-gray"
+
+  [find_match]
+  fg = "black"
+  bg = "light-cyan"
+
+  [find_current]
+  fg = "black"
+  bg = "yellow"
   "#;
         let p = Palette::from_toml(toml).expect("parses");
         // Every role must equal the pinned default.
@@ -659,7 +692,7 @@ mod tests {
     #[test]
     fn missing_role_is_an_error() {
         let toml = r#"
-# Only two of the 17 required roles are present; the rest must be errors.
+# Only two of the 19 required roles are present; the rest must be errors.
 [label]
 fg = "gray"
 
@@ -685,7 +718,7 @@ fg = "white"
 fg = "definitely-not-a-color"
 "#;
         // Every role is required in the `File` struct, so even if the color
-        // parse passed, the 11 missing role tables would fail. To isolate
+        // parse passed, the 17 missing role tables would fail. To isolate
         // the color-name error, call `parse_error` directly (above).
         assert!(Palette::from_toml(toml).is_err(), "bad color must fail (role tables missing too)");
     }
@@ -703,7 +736,7 @@ fg = "definitely-not-a-color"
     }
 
     /// The two *shipped* palette files on disk are valid TOML and define
-    /// all 17 roles. These are the files a user can `--palette <name>` or
+    /// all 19 roles. These are the files a user can `--palette <name>` or
     /// copy as a starting point, so a typo in them is a release blocker.
     #[test]
     fn shipped_palette_files_parse() {

@@ -183,6 +183,12 @@ fn handle_browse(app: &mut App, ev: KeyEvent) -> bool {
 }
 
 fn handle_read(app: &mut App, ev: KeyEvent) -> bool {
+    // If find is armed, all keys go to the live-input handler (the same
+    // idiom as `filter_active` at the `handle_event` level, but scoped to
+    // Read mode so other modes' keybinds are unaffected).
+    if app.find_armed() {
+        return handle_find_input(app, ev);
+    }
     match ev.code {
         KeyCode::Char('q') => true,
         KeyCode::Char('c') if ev.modifiers.contains(KeyModifiers::CONTROL) => true,
@@ -263,6 +269,70 @@ fn handle_read(app: &mut App, ev: KeyEvent) -> bool {
             if let Err((msg, _)) = app.open_in_editor() {
                 app.set_error(msg);
             }
+            false
+        }
+        // `f` arms the reader-find (the `/` filter idiom, scoped to Read):
+        // type a string to highlight all occurrences; ↑/↓/j/k to navigate;
+        // Esc to close.
+        KeyCode::Char('f') => {
+            app.find_activate();
+            app.find_center_scroll();
+            let note = app
+                .find_note()
+                .unwrap_or_else(|| "find — type a needle · Esc close".to_owned());
+            app.set_info(note);
+            false
+        }
+
+        _ => false,
+    }
+}
+
+/// Live-input handler for the reader-find (the `f` key in Read mode, the
+/// `/` filter idiom scoped to Read). All keys are captured here: printable
+/// chars append to the needle, `Backspace` pops, `↑`/`↓`/`j`/`k`/`n`/`N`
+/// walk the hit list (each move recenters the viewport), `Esc` closes find
+/// (keeps the scroll position), `q`/`C-c` quit the TUI.
+///
+/// Mirrors the `handle_filter_input` structure: the match arms return
+/// `bool` (quit?) and the arms that mutate state set the status note.
+fn handle_find_input(app: &mut App, ev: KeyEvent) -> bool {
+    match ev.code {
+        KeyCode::Char('q') => true,
+        KeyCode::Char('c') if ev.modifiers.contains(KeyModifiers::CONTROL) => true,
+
+        // Close the find session (drop the highlight; keep scroll).
+        KeyCode::Esc => {
+            app.find_close();
+            app.set_info("find closed — scroll position kept");
+            false
+        }
+
+        // Navigate the hit list (each move recenters the viewport).
+        KeyCode::Up | KeyCode::Char('k') | KeyCode::Char('N') => {
+            app.find_prev();
+            let note = app.find_note().unwrap_or_default();
+            app.set_info(note);
+            false
+        }
+        KeyCode::Down | KeyCode::Char('j') | KeyCode::Char('n') => {
+            app.find_next();
+            let note = app.find_note().unwrap_or_default();
+            app.set_info(note);
+            false
+        }
+
+        // Type / delete the needle.
+        KeyCode::Backspace => {
+            app.find_backspace();
+            let note = app.find_note().unwrap_or_default();
+            app.set_info(note);
+            false
+        }
+        KeyCode::Char(c) => {
+            app.find_input(c);
+            let note = app.find_note().unwrap_or_default();
+            app.set_info(note);
             false
         }
 
@@ -442,9 +512,9 @@ fn handle_edit(app: &mut App, ev: KeyEvent) -> bool {
                 app.edit_type(c);
                 false
             }
-            _ => false,
-        }
+        _ => false,
     }
+}
 }
 
 /// A "line X of Y — <id>" status note for the Read mode. (The *first

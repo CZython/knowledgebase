@@ -65,3 +65,15 @@ strikethrough = true       # ~~strikethrough~~ in the read pane
 [md_code]
 fg = "white"               # `code` in the read pane
 bg = "dark-gray"           # the "code box" — makes code read as code, not prose
+
+# Reader find (the `f` key in Read mode): the needle's occurrences are boxed.
+# `find_match` is the softer box (every hit); `find_current` is the strong
+# box (the selected hit the viewport centers on). Distinct hues (cyan vs
+# yellow) so a hit list is scannable.
+[find_match]
+fg = "black"
+bg = "light-cyan"
+
+[find_current]
+fg = "black"
+bg = "yellow"

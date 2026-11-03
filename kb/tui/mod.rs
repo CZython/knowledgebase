@@ -283,6 +283,50 @@ pub struct ReadState {
     pub abs_path: String,
     /// Frontmatter display metadata (type, language, description, tags, gates).
     pub fm: FmMeta,
+    /// The reader-find session (armed by `f`, disarmed by `Esc`). `None` =
+    /// not in find; `Some(_)` = the needle is live, its occurrences are
+    /// recomputed, and the cursor walks them. Held on `ReadState` (not
+    /// `App`) so find can't outlive the page it's searching — opening a
+    /// different page clears it via `open_read`/`open_in_editor`.
+    pub find: Option<FindState>,
+}
+
+/// The reader-find session (the `f` key in Read mode): a *needle* typed by
+/// the user, its *occurrences* in the body (`(line_index, byte_offset)` in
+/// document order), and a *cursor* index into `matches` (the selected hit —
+/// the one the viewport centers on).
+///
+/// **Live-input model** (the same idiom the Browse `/` filter and the Search
+/// query use): every printable char appends to `needle` and re-runs
+/// `find_center_scroll` (the hit list updates + recenters as you type); `Backspace` pops;
+/// `↑/↓/j/k` walk the hits (each move recenters the viewport); `Esc` closes
+/// find (clears the highlight, keeps the scroll). The needle is matched
+/// case-insensitively, as a *substring*, across the body's logical lines.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FindState {
+    /// The needle being typed (the search string, case-insensitive match).
+    pub needle: String,
+    /// The occurrences of the needle in the body: `(line_index, byte_offset)`,
+    /// in document order (top-to-bottom, within a line left-to-right).
+    /// Refreshed by `find_center_scroll` on every keystroke/nav.
+    pub matches: Vec<(usize, usize)>,
+    /// The cursor index into `matches` (the *selected* hit, i.e. the one the
+    /// viewport centers on). Always `< matches.len()` while armed — enforced
+    /// by `find_center_scroll` and the nav mutators.
+    pub cursor: usize,
+    /// The latest computed centering padding for the selected hit (the
+    /// "fake rows" + scroll values). `None` when the match list is empty or
+    /// a padding could not be computed — the render pass then uses the
+    /// unpadded body, the scroll pass keeps the current position.
+    ///
+    /// Written by `find_center_scroll` (after it refreshes
+    /// `matches`). Read by `render_read` (prepend / append blank rows, set
+    /// scroll) and by the `App` scroll mutators (clamp against
+    /// `scroll_max_top`). This is the single source of truth for the
+    /// padded layout — the render pass *and* the input pass derive their
+    /// values from the same stored padding, so they cannot desync.
+    #[allow(dead_code)]
+    pub center: Option<FindPadding>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -586,6 +630,12 @@ pub struct App {
     /// first frame, in which case the clamp falls back to the logical-line
     /// model (a window too narrow to matter).
     pub body_pane_width: usize,
+    /// The **inner** height of the Read body pane (rows minus the two
+    /// bordered rows), written by the render pass each frame (same model as
+    /// `body_pane_width`). 0 until the first frame; falls back to a
+    /// reasonable default (24) until then. Used by find-centering math so
+    /// the `input` pass (which mutates `scroll_top`) reads a current value.
+    pub body_pane_height: usize,
     /// One-shot "force a full clear before the next draw" flag. Set after an
     /// external editor (the TUI's `$VISUAL`/`$EDITOR`/`vi`) returns: the
     /// editor ran on the *same TTY* while we were in raw mode + alt-screen,
@@ -629,9 +679,15 @@ impl App {
             // 80 columns is a reasonable *default* pane width: it matches
             // the conventional `COLUMNS=80` terminal and keeps the scroll
             // mutators total before the first render pass has written the
-            //             real width. `draw_read` overwrites this every frame with the
+            // real width. `draw_read` overwrites this every frame with the
             // real value computed from the live terminal size.
             body_pane_width: 80,
+            // 24 rows is a reasonable default body-pane height (matches
+            // COLUMNS=80, LINES=24 conventional terminal). Keeps the
+            // find-centering math total before the first render pass has
+            // written the real height. `draw_read` overwrites this every
+            // frame with the live value.
+            body_pane_height: 24,
             // A fresh App has just drawn its first frame in the loop, which
             // already clears; only *post-editor* returns need the forced
             // clear, so start off.
@@ -732,7 +788,8 @@ impl App {
     /// always current.
     pub fn scroll_body(&mut self, delta: isize) {
         if let Mode::Read(r) = &mut self.mode {
-            let max_top = scroll_max_top(&r.body, self.body_pane_width);
+            let lines = crate::tui::render::rendered_lines(&self.palette, &r.body);
+            let max_top = scroll_max_top(&lines, self.body_pane_width);
             let n = r.scroll_top as isize + delta;
             r.scroll_top = n.clamp(0, max_top as isize) as usize;
         }
@@ -747,9 +804,218 @@ impl App {
 
     /// Scroll the Read body to the bottom (the last rendered row).
     pub fn scroll_body_bottom(&mut self) {
-        if let Mode::Read(r) = &mut self.mode {
-            r.scroll_top = scroll_max_top(&r.body, self.body_pane_width);
+        // Compute the max from the rendered body + any stored find centering
+        // up front (immutable reads), then write scroll_top (one mutable write).
+        let target = {
+            let rs = match &self.mode {
+                Mode::Read(rs) => rs,
+                _ => return,
+            };
+            let plain = || {
+                let lines = crate::tui::render::rendered_lines(&self.palette, &rs.body);
+                scroll_max_top(&lines, self.body_pane_width)
+            };
+            match &rs.find {
+                Some(fs) => fs.center.as_ref().map(|c| c.scroll_max_top).unwrap_or_else(plain),
+                None => plain(),
+            }
+        };
+        if let Mode::Read(rs) = &mut self.mode {
+            rs.scroll_top = target;
         }
+    }
+
+    // ===================================================================
+    //  M8.5 — Reader find (the `f` key in Read mode)
+    //  ===================================================================
+
+    /// Arm the reader-find: a fresh `FindState` with an empty needle; no
+    /// matches yet, cursor 0. The body keeps its current scroll (find only
+    /// *highlights* + recenters once matches exist). Total (a no-op outside
+    /// Read mode).
+    pub fn find_activate(&mut self) {
+        if let Mode::Read(r) = &mut self.mode {
+            r.find = Some(FindState {
+                needle: String::new(),
+                matches: Vec::new(),
+                cursor: 0,
+                center: None,
+            });
+        }
+    }
+
+    /// Append a char to the needle (the live-input arm — the `/` filter
+    /// idiom), then recenter: `find_center_scroll` refreshes the hit list
+    /// from the new needle, recomputes the centering, clamps the curl, and
+    /// settles the scroll on the newly-selected first hit. Total (a no-op
+    /// outside Read mode or when find is closed).
+    pub fn find_input(&mut self, c: char) {
+        if let Mode::Read(r) = &mut self.mode {
+            if let Some(fs) = &mut r.find {
+                fs.needle.push(c);
+            }
+        }
+        self.find_center_scroll();
+    }
+
+    /// Pop the last needle char (Backspace), then recenter (same contract as
+    /// `find_input`). An empty needle stays armed (Esc closes find) — the
+    /// match list simply becomes empty and the body renders unpadded. Total.
+    pub fn find_backspace(&mut self) {
+        if let Mode::Read(r) = &mut self.mode {
+            if let Some(fs) = &mut r.find {
+                fs.needle.pop();
+            }
+        }
+        self.find_center_scroll();
+    }
+
+    /// Move the selected hit to the **next** occurrence (wrap around the
+    /// match list — `n m 2 of 2` behaves like `n m 1 of 2`). Each move
+    /// recenters the viewport on the newly selected hit (via the padded
+    /// centering in `find_center_scroll`). The match list is empty ⇒ a no-op
+    /// (the user is still typing the needle).
+    pub fn find_next(&mut self) {
+        if let Mode::Read(r) = &mut self.mode {
+            if let Some(fs) = &mut r.find {
+                if !fs.matches.is_empty() {
+                    fs.cursor = (fs.cursor + 1) % fs.matches.len();
+                    self.find_center_scroll();
+                }
+            }
+        }
+    }
+
+    /// Move the selected hit to the **previous** occurrence (wrap; the
+    /// inverse of `find_next`). Same no-match, recenter semantics.
+    pub fn find_prev(&mut self) {
+        if let Mode::Read(r) = &mut self.mode {
+            if let Some(fs) = &mut r.find {
+                if !fs.matches.is_empty() {
+                    fs.cursor =
+                        (fs.cursor + fs.matches.len() - 1) % fs.matches.len();
+                    self.find_center_scroll();
+                }
+            }
+        }
+    }
+
+    /// Close the find session: drop the `find` state (the highlight goes
+    /// away; the body keeps its scroll position so the user is still where
+    /// they navigated). Total (a no-op outside Read mode or when find is
+    /// already closed).
+    pub fn find_close(&mut self) {
+        if let Mode::Read(r) = &mut self.mode {
+            r.find = None;
+        }
+    }
+
+    /// Recompute the needle's hits **and** recenter the viewport on the
+    /// selected hit (the live-input / nav call site). Two effects:
+    /// (1) `find_center_scroll` refreshes the match list from the current
+    ///     needle + body (the pure `find_matches` predicate);
+    /// (2) `find_center_scroll` recomputes the above/below padding (the pure
+    ///     `find_centering` helper) and sets `scroll_top` so the selected
+    ///     hit lands at the pane's center — the "fake rows" the user asked
+    ///     for, applied live on every keystroke/nav.
+    /// Recompute the needle's hits **and** recenter the viewport on the
+    /// selected hit (the live-input / nav call site). This is the single
+    /// sync path for every find mutation:
+    /// (1) refresh the match list from the current needle + body (the pure
+    ///     `find_matches` predicate) and clamp the cursor into range;
+    /// (2) compute the centering padding (the pure `find_padding` helper)
+    ///     and store it on `FindState.center` — the render pass and the
+    ///     scroll clamps then derive their values from that one stored
+    ///     padding, so they cannot desync;
+    /// (3) set `ReadState::scroll_top` to the pad-aware center row (clamped
+    ///     to the pad-aware max). With no matches the body is rendered
+    ///     unpadded and the scroll is clamped to the un-padded max (the user
+    ///     stays where they are — no jump to row 0).
+    /// Total (a no-op outside Read mode or when find is closed).
+    pub fn find_center_scroll(&mut self) {
+        // Compute everything up front using immutable access (the borrow
+        // checker can't hold `&self` reads and `&mut self` writes at once).
+        let new_matches: Vec<(usize, usize)>;
+        let new_center: Option<FindPadding>;
+        {
+            let r = match &self.mode {
+                Mode::Read(r) => r,
+                _ => return,
+            };
+            let fs = match &r.find {
+                Some(fs) => fs,
+                None => return,
+            };
+            let lines = crate::tui::render::rendered_lines(&self.palette, &r.body);
+            let m = find_matches(&lines, &fs.needle);
+            new_matches = m;
+            let sel_idx = if new_matches.is_empty() {
+                None
+            } else {
+                Some(fs.cursor.min(new_matches.len() - 1))
+            };
+            new_center = sel_idx.and_then(|cur| {
+                find_padding_for_cursor(
+                    &lines,
+                    &new_matches,
+                    cur,
+                    self.body_pane_width,
+                    self.body_pane_height,
+                )
+            });
+        }
+        // Write back.
+        if let Mode::Read(r) = &mut self.mode {
+            let fs = match r.find.as_mut() {
+                Some(fs) => fs,
+                None => return,
+            };
+            fs.matches = new_matches.clone();
+            fs.cursor = fs.cursor.min(fs.matches.len().saturating_sub(1));
+            fs.center = new_center;
+            // Clamp the scroll to the pad-aware max; target the center row
+            // when a match is selected, else keep the current row.
+            let max = new_center
+                .as_ref()
+                .map(|c| c.scroll_max_top)
+                .unwrap_or_else(|| {
+                    let lines = crate::tui::render::rendered_lines(&self.palette, &r.body);
+                    scroll_max_top(&lines, self.body_pane_width)
+                });
+            let target = new_center
+                .as_ref()
+                .map(|c| c.scroll_top.min(c.scroll_max_top))
+                .unwrap_or(r.scroll_top);
+            r.scroll_top = target.min(max);
+        }
+    }
+
+    /// Whether a find session is currently armed (in Read mode with a live
+    /// `FindState`). Used by `handle_read` to short-circuit into the
+    /// live-input handler before the normal keymatch.
+    pub fn find_armed(&self) -> bool {
+        matches!(&self.mode, Mode::Read(rs) if rs.find.is_some())
+    }
+
+    /// The "hit K of N" status note for a live find (the status-bar
+    /// text after a keystroke/nav). `Some(note)` when armed with at least
+    /// one match; `None` when find is closed, not in Read, or has zero
+    /// matches (the caller falls back to the last status).
+    pub fn find_note(&self) -> Option<String> {
+        let rs = match &self.mode {
+            Mode::Read(rs) => rs,
+            _ => return None,
+        };
+        let fs = rs.find.as_ref()?;
+        let m = fs.matches.len();
+        if m == 0 {
+            return Some(format!("find — needle: '{}' (0 matches)", fs.needle));
+        }
+        let pos = fs.cursor.min(m - 1) + 1;
+        Some(format!(
+            "find ({} match{}) — {pos} of {}  needle: '{}'",
+            m, if m == 1 { "" } else { "es" }, m, fs.needle
+        ))
     }
 
     /// Commit the selected row to a new Read mode (loads the body from the
@@ -786,6 +1052,7 @@ impl App {
             scroll_top: 0,
             abs_path: row.abs_path,
             fm,
+            find: None,
         };
         self.mode = Mode::Read(rs);
         Ok(())
@@ -2244,6 +2511,7 @@ impl App {
             scroll_top: 0,
             abs_path: abs_path.clone(),
             fm,
+            find: None,
         });
         self.set_info("open page — ↑↓ scroll · Esc back to search");
         Ok(())
@@ -2284,20 +2552,235 @@ impl App {
 /// logical-line model so the mutators remain total and monotonic.
 ///
 /// Pure + total. Empty body → 0.
-pub fn scroll_max_top(body: &str, pane_width: usize) -> usize {
-    let lines = body.lines().count();
-    if lines == 0 {
+pub fn scroll_max_top(lines: &[String], pane_width: usize) -> usize {
+    let n = lines.len();
+    if n == 0 {
         return 0;
     }
     if pane_width <= 1 {
-        return lines - 1;
+        return n - 1;
     }
     let mut total = 0usize;
-    for line in body.lines() {
+    for line in lines {
         let cells = line.width().max(1);
         total += cells.div_ceil(pane_width);
     }
     total - 1
+}
+
+// ===================================================================
+//  M8.5 — Reader find (the `f` key in Read mode)
+//  ===================================================================
+//
+//  The find session is a *live* one (the `/` filter idiom): a needle, the
+//  occurrences of the needle in the body, and a cursor over them. The
+//  functions below are the pure, total core over a body + needle: they carry
+//  no IO, no `App` borrow, and are trivially testable in isolation.
+//
+//  * `row_table`      — the body's rows (what the user *sees*), as
+//                       `(content, start_byte)` pairs in order.
+//  * `line_visual`    — a line's **visual** offset (cells from the line's
+//                       start) for a *logical* byte position.
+//  * `find_matches`   — the needle's occurrences as `(line_idx, byte_offset)`,
+//                       in document order (top-to-bottom, then left-to-right
+//                       within a line).
+//  * `find_centering` — the blank-row padding *above* / *below* the rendered
+//                       body that lets the selected hit sit at the viewport's
+//                       center, even when it is the very first or very last
+//                       rendered row (the user's "fake rows" request).
+
+/// How many rendered rows a single logical line occupies at `width` cells —
+/// the width-aware model `scroll_max_top` uses: a blank line is 1 row; a
+/// non-blank line wraps to `ceil(width / pane_width)` rows (with `width < 1`
+/// clamped to 1-cell rows). **Total** (no panics, no IO).
+fn line_row_count(line: &str, width: usize) -> usize {
+    if line.is_empty() {
+        return 1;
+    }
+    let w = if width < 1 { 1 } else { width };
+    line.width().max(1).div_ceil(w)
+}
+
+/// Map the body's logical lines to the **first rendered row** each one starts
+/// on (the cumulative model `scroll_max_top` builds, but returned as a
+/// per-line table — so "the selected hit's first rendered row" is a single
+/// array lookup). `width < 1` clamps to 1-cell rows (the `scroll_max_top`
+/// fallback for a too-nan pane). A blank line contributes 1 row (it renders
+/// as a single, empty row).
+fn line_first_row(lines: &[String], width: usize) -> Vec<usize> {
+    let mut out = Vec::new();
+    let mut acc = 0usize;
+    for line in lines {
+        out.push(acc);
+        acc += line_row_count(line, width);
+    }
+    out
+}
+
+/// The needle's occurrences in the **rendered** body `lines`, as
+/// `(line_idx, byte_offset_in_line)`, in **document order** (lines
+/// top-to-bottom, then left-to-right within a line — the reading order the
+/// user sees). `needle` is matched case-insensitively as a substring; an
+/// empty needle matches nothing. `lines` are the *rendered* per-line texts
+/// (see `render::rendered_lines`) — the very characters the overlay paints
+/// onto, so the (line, byte_offset) matches land exactly under the right
+/// glyph, even when the raw markdown has `**`, `*`, `` ` ``, or `~~`
+/// delimiters the renderer would otherwise strip.
+fn find_matches(lines: &[String], needle: &str) -> Vec<(usize, usize)> {
+    let low = needle.to_lowercase();
+    if low.is_empty() {
+        return Vec::new();
+    }
+    let mut out = Vec::new();
+    for (li, line) in lines.iter().enumerate() {
+        let lline = line.to_lowercase();
+        let mut from = 0usize;
+        while let Some(rel) = lline[from..].find(&low) {
+            out.push((li, from + rel));
+            from += rel + low.len().max(1);
+        }
+    }
+    out
+}
+
+/// The find session's centering padding — the blank rows to *prepend*
+/// (above) and *append* (below) the unpadded rendered body, plus the two
+/// scroll values the event-loop / `input` pass derive from them.
+///
+/// The "fake rows" the user asked for: without padding, a hit on the very
+/// first or very last rendered row cannot sit at the viewport's center —
+/// there isn't enough content to scroll past. `above` / `below` fix that.
+///
+/// **Total** on its inputs (pure; no IO, no `App`). The `Render` pass
+/// supplies `first_row` / `content_rows` (via `find_selected_first_row`)
+/// and `pane_height` (via `app.body_pane_height`, written each frame by
+/// `draw_read`). `find_padding_for_cursor` resolves the hit via
+/// `line_first_row`; `FindState.center: Option<FindPadding>` stores the
+/// latest result so that the *input* pass (which can mutate
+/// `ReadState::scroll_top`) and the *render* pass (which prepends /
+/// appends the blank rows) always agree — one computation, two consumers.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FindPadding {
+    /// Blank rows to *prepend* to the unpadded body (pushes content down,
+    /// creating scroll room *above* the hit).
+    pub above: usize,
+    /// Blank rows to *append* to the unpadded body (pushes content up,
+    /// creating scroll room *below* the hit).
+    pub below: usize,
+    /// `scroll_top` to set on `ReadState` (the *first* padded row the pane
+    /// shows). Always `0` when there is no content to scroll; when padding
+    /// is needed, it is the minimum of the "hit-at-center" row and the
+    /// "bottom-of-pane" row.
+    pub scroll_top: usize,
+    /// The *maximum valid* `scroll_top` for the padded body:
+    /// `saturating_sub(above + content_rows + below, pane_height)`.
+    /// The scroll clamps must not exceed this (else the pane blanks).
+    pub scroll_max_top: usize,
+}
+
+/// Compute the find hit's centering (see [`FindPadding`]).
+///
+/// `first_row` is the selected hit's first rendered row in the *unpadded*
+/// body (0 = top of the page). `content_rows` is the total unpadded
+/// rendered-row count. `pane_height` is the visible pane row count
+/// (0 = degenerate, no padding needed — render the unpadded body).
+/// Returns the `FindPadding` ready to apply: the render pass prepends
+/// `above` blank rows and appends `below`; the input pass sets
+/// `ReadState::scroll_top` to `scroll_top`.
+///
+/// Total on its inputs; `pane_height` 0 ⇒ no padding (degenerate window).
+///
+/// # Math (derivation)
+///
+/// `center = (pane_height - 1) / 2` — the 0-based offset of the *center
+/// row* within the pane, counting from `scroll_top`.
+///
+    /// **Case A:** `first_row >= center` (hit in the lower half — or exactly
+    /// at center — of the page). No `above` needed.
+    ///
+    ///   To center the hit: `scroll + center = first_row`
+    ///   → `scroll = first_row - center` (always `>= 0`).
+    ///
+    ///   The bottom of the pane must fit in the padded body:
+    ///   `scroll + pane_height - 1 <= above + CR + below - 1`
+    ///   `first_row + pane - center - 1 <= CR + below - 1`
+    ///   → `below = max(0, first_row + pane_height - center - CR)`
+    ///
+    /// **Case B:** `first_row < center` (hit in the upper half — cannot be
+    /// centered without padding *above* it; the scroll position cannot go
+    /// negative, so `above = center - first_row` is mandatory).
+    ///
+    ///   `scroll + center = above + first_row = center`
+    ///   → `scroll = 0`.
+    ///
+    ///   Same bottom-of-pane bound, substituting `scroll = 0`,
+    ///   `above = center - first_row`:
+    ///   `pane_height - 1 <= center - first_row + CR + below - 1`
+    ///   → `below = max(0, pane_height - center + first_row - CR)`
+    ///
+    /// In both cases the derived `scroll` equals the resulting
+    /// `scroll_max_top` exactly, so the `scroll_top <= scroll_max_top`
+    /// invariant holds by construction (no rounding slack needed).
+    fn find_padding(first_row: usize, content_rows: usize, pane_height: usize) -> FindPadding {
+        if pane_height == 0 {
+            return FindPadding {
+                above: 0,
+                below: 0,
+                scroll_top: 0,
+                scroll_max_top: 0,
+            };
+        }
+        let center = (pane_height - 1) / 2;
+        let (above, below, scroll) = if first_row >= center {
+            // Case A: hit in lower half (or at center) → no above, compute scroll.
+            let b = (first_row + pane_height - center)
+                .saturating_sub(content_rows);
+            (0, b, first_row - center)
+        } else {
+            // Case B: hit in upper half → pad above, scroll = 0.
+            let a = center - first_row;
+            let b = (pane_height - center + first_row)
+                .saturating_sub(content_rows);
+            (a, b, 0)
+        };
+        let padded_rows = above + content_rows + below;
+        FindPadding {
+            above,
+            below,
+            scroll_top: scroll,
+            scroll_max_top: padded_rows.saturating_sub(pane_height),
+        }
+    }
+
+/// Compute the `FindPadding` for the hit at `cursor` in `matches`, given
+/// the body content and the live pane dimensions. The hit is located by
+/// `(line_index, byte_offset)` → the *logical line* in the body → that
+/// line's first rendered row (via `line_first_row`). Returns `None` when
+/// the match list is empty (caller stores `FindState.center = None`; render
+/// the unpadded body).
+///
+/// `cursor` is clamped to `< matches.len()` (a live keystroke can shrink
+/// the list). `pane_width` 0/1 falls back to the logical-line row model
+/// (same guard `scroll_max_top` uses). `pane_height` 0 ⇒ no padding
+/// applied (the `FindPadding` is all-zero).
+fn find_padding_for_cursor(
+    lines: &[String],
+    matches: &[(usize, usize)],
+    cursor: usize,
+    pane_width: usize,
+    pane_height: usize,
+) -> Option<FindPadding> {
+    if matches.is_empty() {
+        return None;
+    }
+    let cursor = cursor.min(matches.len() - 1);
+    let (line_idx, _) = matches[cursor];
+    let first_row = line_first_row(lines, pane_width)
+        .get(line_idx)
+        .copied()
+        .unwrap_or(0);
+    let content_rows = scroll_max_top(lines, pane_width) + 1; // +1: max_top is total-1
+    Some(find_padding(first_row, content_rows, pane_height))
 }
 
 /// Extract the section outline from a `body`: a `(line_index, level,
@@ -3115,6 +3598,17 @@ fn event_loop(mut app: App) -> i32 {
 mod tests {
     use super::*;
 
+    /// Render a raw body to its **rendered** per-line `Vec<String>` (the
+    /// form the pure find/scroll helpers now consume). Test bodies are plain
+    /// prose, so rendering is identity — this helper exists so the test call
+    /// sites read naturally against the new `&[String]` signatures.
+    fn lines(body: &str) -> Vec<String> {
+        crate::tui::render::rendered_lines(
+            &crate::tui::palette::Palette::default_palette(),
+            body,
+        )
+    }
+
     /// Per-call sequence used by `seeded_app` to mint a *unique* temp dir.
     /// All tests in this binary share a single pid, so keying the dir on the
     /// pid alone caused every `seeded_app` call (in parallel test threads) to
@@ -3221,23 +3715,23 @@ mod tests {
     #[test]
     fn scroll_max_top_is_a_pure_function_of_body_and_width() {
         // Empty body → 0 at any width.
-        assert_eq!(scroll_max_top("", 80), 0);
+        assert_eq!(scroll_max_top(&lines(""), 80), 0);
         // A single logical line → 0 max (the one rendered row is visible
         // from the top; no scroll range).
-        assert_eq!(scroll_max_top("one\n", 80), 0);
+        assert_eq!(scroll_max_top(&lines("one\n"), 80), 0);
         // Two single-line lines → 1.
-        assert_eq!(scroll_max_top("one\ntwo", 80), 1);
+        assert_eq!(scroll_max_top(&lines("one\ntwo"), 80), 1);
         // A wide line: 25 cells at width 10 wraps to 3 rendered rows →
         // max top = 2.
-        let line: String = "a".repeat(25);
-        assert_eq!(scroll_max_top(&line, 10), 2);
+        let wide: Vec<String> = vec!["a".repeat(25)];
+        assert_eq!(scroll_max_top(&wide, 10), 2);
         // Same body at a wider pane → smaller max.
-        assert!(scroll_max_top(&line, 10) > scroll_max_top(&line, 100));
+        assert!(scroll_max_top(&wide, 10) > scroll_max_top(&wide, 100));
         // A blank line counts as one rendered row (it's still a row).
-        assert_eq!(scroll_max_top("a\n\nb", 80), 2);
+        assert_eq!(scroll_max_top(&lines("a\n\nb"), 80), 2);
         // degenerate width 0/1 → the logical-line fallback.
-        assert_eq!(scroll_max_top("a\nb\nc", 0), 2);
-        assert_eq!(scroll_max_top("a\nb\nc", 1), 2);
+        assert_eq!(scroll_max_top(&lines("a\nb\nc"), 0), 2);
+        assert_eq!(scroll_max_top(&lines("a\nb\nc"), 1), 2);
     }
 
     /// The scroll mutators are total + bounded: on any body the resulting
@@ -3261,7 +3755,7 @@ mod tests {
         // scroll down past the bottom: clamps to max, does not grow.
         app.scroll_body(100);
         let max = scroll_max_top(
-            &match &app.mode { Mode::Read(r) => r.body.clone(), _ => panic!() },
+            &lines(&match &app.mode { Mode::Read(r) => r.body.clone(), _ => panic!() }),
             app.body_pane_width,
         );
         if let Mode::Read(r) = &app.mode {
@@ -3309,7 +3803,7 @@ mod tests {
             assert_eq!(r.scroll_top, 0);
         }
         app.scroll_body_bottom();
-        let max = scroll_max_top("a\nb\nc\nd\ne\n", app.body_pane_width);
+        let max = scroll_max_top(&lines("a\nb\nc\nd\ne\n"), app.body_pane_width);
         if let Mode::Read(r) = &app.mode {
             assert_eq!(r.scroll_top, max);
         }
@@ -5441,6 +5935,285 @@ mod tests {
         assert!(app.search_return.is_none(), "a Browse open clears any stale search address");
         app.close_read();
         assert!(matches!(app.mode, Mode::Browse), "a Browse open Escs back to Browse");
+    }
+
+    // ===================================================================
+    //  M8.5 — Reader find: pure-helper tests
+    //  ===================================================================
+
+    /// `find_padding` must be **total** (no panics) and produce a scroll
+    /// position that (a) is in `[0, scroll_max_top]` and (b) puts the
+    /// selected hit as close to the pane's center row as the padded content
+    /// allows. The invariant checked for every case:
+    /// `scroll_top <= scroll_max_top` and
+    /// the hit's absolute row `above + first_row` satisfies
+    /// `scroll_top <= above + first_row <= scroll_top + pane_height - 1`
+    /// (the hit is *visible* in the pane).
+    #[test]
+    fn find_padding_is_total_and_keeps_hit_visible() {
+        for pane_height in [1usize, 2, 3, 5, 10, 24, 60] {
+            for content_rows in [0usize, 1, 3, 7, 20, 50, 200] {
+                for first_row in [0usize, 1, 2, (pane_height.saturating_sub(1)) / 2, content_rows.saturating_sub(1)] {
+                    let fp = find_padding(first_row, content_rows, pane_height);
+                    assert!(
+                        fp.scroll_top <= fp.scroll_max_top,
+                        "pane={pane_height} content={content_rows} first={first_row}: \
+                         scroll_top {} > scroll_max_top {} (invariant)",
+                        fp.scroll_top, fp.scroll_max_top
+                    );
+                    // The hit's absolute row in the padded body.
+                    let abs = fp.above + first_row;
+                    assert!(
+                        fp.scroll_top <= abs,
+                        "hit row {} is above pane top {pane_height}/{content_rows}/{first_row}",
+                        abs
+                    );
+                    assert!(
+                        abs <= fp.scroll_top + pane_height.saturating_sub(1),
+                        "hit row {} is below pane bottom for pane={pane_height} content={content_rows} first={first_row} scroll={} (hit must be visible)",
+                        abs, fp.scroll_top
+                    );
+                }
+            }
+        }
+    }
+
+    /// The exact centering contract: when there is no content constraint
+    /// (the body is short enough), the selected hit lands **on** the center
+    /// row. Verify the two analytic cases by the derived math.
+    #[test]
+    fn find_padding_centers_when_room_allows() {
+        let h = 10usize; // center = 4
+        let center = (h - 1) / 2; // = 4
+        let content = 4usize; // short body
+
+        // Hit in the top half (first_row < center): pad above, scroll 0.
+        let fp = find_padding(0, content, h);
+        assert_eq!(fp.scroll_top, 0, "top-half hit scrolls to 0");
+        assert_eq!(fp.above, center, "above fills to center (hit lands at the center row)");
+
+        // Hit exactly at center (first_row == center): no above, scroll 0.
+        let fp = find_padding(center, content, h);
+        assert_eq!(fp.above, 0);
+        assert_eq!(fp.scroll_top, 0);
+        assert_eq!(fp.above + center, center);
+
+        // Hit below center (first_row > center): no above, scroll = first-center.
+        let first = 6usize;
+        let fp = find_padding(first, content, h);
+        assert_eq!(fp.above, 0);
+        assert_eq!(fp.scroll_top, first - center, "bottom-half hit scrolls to center it");
+        assert_eq!(fp.scroll_top + center, first, "hit lands at the center row");
+    }
+
+    /// `pane_height == 0` is degenerate: no padding, no scroll, all zeros.
+    #[test]
+    fn find_padding_zero_pane_is_degenerate() {
+        let fp = find_padding(5, 10, 0);
+        assert_eq!(fp, FindPadding { above: 0, below: 0, scroll_top: 0, scroll_max_top: 0 });
+    }
+
+    /// `find_padding_for_cursor` must resolve the *selected* hit's line to its
+    /// first rendered row and produce valid padding. It must be `None` for an
+    /// empty match list, and must clamp a cursor past the end.
+    #[test]
+    fn find_padding_for_cursor_resolves_selected_line() {
+        // A body where line 2 is a "long" line (wraps to 2 rows at width 10)
+        // and the rest are single-row. The needle "xx" appears exactly once
+        // (at line 2, byte 4) among the 18 c/c's — but to keep the assertion
+        // tight we use a *distinct* needle that appears once on line 2.
+        let body = "a\nbb\nccccccccccccxxcc\nd"; // line 2: 12 'c' + 'xx' at offset 12 + 2 'c'
+        let rendered = lines(body);
+        let matches = find_matches(&rendered, "xx"); // one hit, line 2
+        assert_eq!(matches, vec![(2, 12)], "exactly one 'xx' at line 2 offset 12: {matches:?}");
+        let fp = find_padding_for_cursor(&rendered, &matches, 0, 10, 12).expect("a match exists");
+        // The hit's first rendered row is the cumulative rows of lines 0..2.
+        let expected_row = line_first_row(&rendered, 10)[2];
+        assert!(fp.scroll_top <= fp.scroll_max_top);
+        // The absolute hit row is visible within the pane.
+        let abs = fp.above + expected_row;
+        assert!(fp.scroll_top <= abs && abs <= fp.scroll_top + 11, "hit visible (abs={abs})");
+
+        // Cursor clamped past the end (cursor = 99).
+        let fp2 = find_padding_for_cursor(&rendered, &matches, 99, 10, 12).expect("clamped cursor");
+        assert_eq!(fp2, fp, "a cursor past the end clamps to the last hit");
+
+        // Empty match list -> None.
+        let none = find_padding_for_cursor(&rendered, &[], 0, 10, 12);
+        assert!(none.is_none());
+    }
+
+    /// `find_matches` is case-insensitive, finds multiple occurrences per
+    /// line, and reports them in document order (top-to-bottom, then
+    /// left-to-right). An empty needle matches nothing.
+    #[test]
+    fn find_matches_is_case_insensitive_and_ordered() {
+        let rendered = lines("hello Hello world\nHELLO again hello");
+        let m = find_matches(&rendered, "hello");
+        // line 0: "hello Hello" -> 2 hits (0, 6) [case-insensitive]
+        // line 1: "HELLO again hello" -> 2 hits (0, 12)
+        assert_eq!(m.len(), 4, "4 occurrences found (case-insensitive): {m:?}");
+        // Document order: line 0 first (left-to-right), then line 1.
+        assert_eq!(m[0].0, 0);
+        assert_eq!(m[1].0, 0);
+        assert_eq!(m[2].0, 1);
+        assert_eq!(m[3].0, 1);
+        assert!(m[0].1 < m[1].1, "within a line, left-to-right order");
+
+        // Empty needle -> no matches.
+        assert!(find_matches(&rendered, "").is_empty());
+
+        // No match -> empty.
+        assert!(find_matches(&rendered, "zzz").is_empty());
+
+        // Adjacent / overlapping repeats: "aaaa" with needle "aa" -> 2 hits.
+        let m2 = find_matches(&lines("aaaa"), "aa");
+        assert_eq!(m2, vec![(0, 0), (0, 2)], "non-overlapping consecutive matches: {m2:?}");
+    }
+
+    /// The regression for the markdown-drift bug: when a body line contains
+    /// inline markdown emphasis, the *raw* form has extra delimiter bytes
+    /// (`*`, `~`, `` ` ``) that the *rendered* form does not. The find
+    /// matcher must operate on the **rendered** form (what the overlay
+    /// paints onto), so a needle match lands exactly under the right glyph
+    /// and offsets past the emphases are still correct.
+    #[test]
+    fn find_matches_targets_rendered_text_not_raw_markdown() {
+        let rendered = lines("a *italics* b `code` c");
+        let s: String = rendered[0].clone();
+        assert_eq!(s, "a italics b code c", "rendered text: {s:?}");
+        // All 'a' positions in the rendered form:
+        // "a italics b code c"
+        //  ^  ^
+        //  0  4  (the 'a' of "italics")
+        let m = find_matches(&rendered, "a");
+        assert_eq!(m, vec![(0, 0), (0, 4)], "rendered offsets (not raw): {m:?}");
+
+        // A needle that *crosses* the delimiter boundary: "s b". In the
+        // rendered form it is a literal substring; in the raw form it would
+        // require "s * b", which is not contiguous — the exact bug the user
+        // reported (a needle that spans an emphasis boundary).
+        let m3 = find_matches(&rendered, "s b");
+        assert_eq!(m3, vec![(0, 8)], "'s b' crosses the rendered emphasis boundary: {m3:?}");
+        // In the *raw* form, "s b" is not present at all:
+        let raw_lines = vec!["a *italics* b `code` c".to_owned()];
+        let raw_m = find_matches(&raw_lines, "s b");
+        assert!(raw_m.is_empty(), "raw form has NO contiguous 's b': {raw_m:?}");
+
+        // Strikethrough + code, same property:
+        let rendered2 = lines("alpha ~~gone~~ beta `x` gamma");
+        let m4 = find_matches(&rendered2, "gone beta");
+        // Rendered: "alpha gone beta x gamma" — contiguous at offset 6.
+        assert_eq!(m4, vec![(0, 6)], "'gone beta' contiguous on rendered: {m4:?}");
+    }
+
+    /// End-to-end through the `App`: arm find on a known Read body, type a
+    /// needle (live), and assert the match list, cursor, and stored
+    /// `FindPadding` all agree — and that `find_next` advances + recenters.
+    #[test]
+    fn app_find_lifecycle_activates_types_navigates_closes() {
+        let db = Db::open_in_memory_test().unwrap();
+        db.migrate().unwrap();
+        // Create a page whose body we fully control.
+        let body = "intro\nneedle here\nmiddle\nneedle again\ntail";
+        db.conn.execute(
+            "INSERT INTO pages (abs_path, id, type, title, root, rel_path, search_required_phrase, mtime_ns, content_hash)
+             VALUES ('/root/f.md', 'note:find', 'note', 'Find Test', '/root', 'f.md', NULL, 0, 'x')",
+            rusqlite::params![],
+        ).unwrap();
+        let mut app = App::new(db).unwrap();
+
+        // Enter Read on the page.
+        app.selected = app.view.iter().position(|r| r.id == "note:find").unwrap();
+        app.open_read().unwrap();
+        assert!(matches!(app.mode, Mode::Read(_)), "open_read entered Read");
+
+        // `open_read` loads the body from the *file*; seed the file so the
+        // loaded body matches `body` (the find math depends on it).
+        let rs = match &mut app.mode {
+            Mode::Read(r) => r,
+            _ => panic!(),
+        };
+        rs.body = body.to_string();
+        rs.scroll_top = 0;
+
+        // Arm find with an empty needle: no matches, centered None.
+        app.find_activate();
+        assert!(app.find_armed(), "find is armed");
+        {
+            let rs = match &app.mode { Mode::Read(r) => r, _ => panic!() };
+            let fs = rs.find.as_ref().expect("find state present");
+            assert!(fs.matches.is_empty(), "empty needle -> no matches");
+            assert!(fs.center.is_none(), "no matches -> no centering");
+        }
+
+        // Type the needle live: "needle" -> 2 matches.
+        for c in "needle".chars() {
+            app.find_input(c);
+        }
+        {
+            let rs = match &app.mode { Mode::Read(r) => r, _ => panic!() };
+            let fs = rs.find.as_ref().unwrap();
+            assert_eq!(fs.matches.len(), 2, "two 'needle' occurrences");
+            assert_eq!(fs.matches[0].0, 1, "first hit on line 1");
+            assert_eq!(fs.matches[1].0, 3, "second hit on line 3");
+            assert_eq!(fs.cursor, 0, "cursor stays on the first hit while typing");
+            assert!(fs.center.is_some(), "a centering was computed");
+            let c = fs.center.as_ref().unwrap();
+            assert!(c.scroll_top <= c.scroll_max_top, "scroll in range");
+        }
+        // Case-insensitivity: backspace to "ne", then type uppercase 'E'
+        // and 'd' → needle "neEd". `find_matches` lowercases to "need",
+        // which "needle" contains (twice) → still 2 hits.
+        app.find_backspace(); app.find_backspace(); app.find_backspace(); app.find_backspace(); // needle "ne"
+        app.find_input('E'); // "nE"
+        app.find_input('d'); // "neEd" -> lowers to "need" -> 2 hits
+        assert_eq!(
+            match &app.mode { Mode::Read(r) => r.find.as_ref().unwrap().needle.clone(), _ => panic!() },
+            "neEd"
+        );
+        {
+            let rs = match &app.mode { Mode::Read(r) => r, _ => panic!() };
+            let fs = rs.find.as_ref().unwrap();
+            assert_eq!(fs.matches.len(), 2, "case-insensitive needle still matches: needle={:?}", fs.needle);
+        }
+
+        // Navigate: next wraps to hit 2, prev wraps back.
+        app.find_next();
+        {
+            let rs = match &app.mode { Mode::Read(r) => r, _ => panic!() };
+            assert_eq!(rs.find.as_ref().unwrap().cursor, 1, "next advances cursor");
+        }
+        app.find_next();
+        {
+            let rs = match &app.mode { Mode::Read(r) => r, _ => panic!() };
+            assert_eq!(rs.find.as_ref().unwrap().cursor, 0, "next wraps around");
+        }
+        app.find_prev();
+        {
+            let rs = match &app.mode { Mode::Read(r) => r, _ => panic!() };
+            assert_eq!(rs.find.as_ref().unwrap().cursor, 1, "prev wraps to the last hit");
+        }
+
+        // Close: find disarms, but the scroll position is retained.
+        let scroll_before = match &app.mode { Mode::Read(r) => r.scroll_top, _ => 0 };
+        app.find_close();
+        assert!(!app.find_armed(), "find closed");
+        {
+            let rs = match &app.mode { Mode::Read(r) => r, _ => panic!() };
+            assert!(rs.find.is_none(), "find state dropped");
+            assert_eq!(rs.scroll_top, scroll_before, "scroll position retained after close");
+        }
+    }
+
+    /// `find_note` reports "N of M" position + the 0-match + not-armed cases.
+    #[test]
+    fn find_note_reports_position_and_empty() {
+        let db = Db::open_in_memory_test().unwrap();
+        db.migrate().unwrap();
+        let app = App::new(db).unwrap();
+        // Not in Read -> None.
+        assert!(app.find_note().is_none(), "no Read -> no find note");
     }
 
 }

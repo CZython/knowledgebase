@@ -70,6 +70,11 @@ pub fn draw(f: &mut Frame, app: &mut App) {
     // Done before the immutable match below so there is no borrow conflict.
     let has_outline = matches!(&app.mode, Mode::Read(rs) if !rs.outline.is_empty());
     app.body_pane_width = body_inner_width(area, has_outline);
+    // Write the body-pane inner height to `app` (used by find-centering math).
+    // The body pane's height = total area height minus the bordered rows (2),
+    // minus the header (1), minus the status (1). `draw_read` overwrites this
+    // every frame with the exact value from the layout split.
+    app.body_pane_height = area.height.saturating_sub(4) as usize; // rough upper bound
 
     match &app.mode {
         Mode::Browse => draw_browse(f, app, area),
@@ -226,22 +231,97 @@ fn draw_read(f: &mut Frame, app: &App, rs: &ReadState, area: ratatui::layout::Re
     //
     // P7: ATX headings (`#` through `######`) render in the `p.label` role;
     // every other line stays in the default `p.default` role.
-    let body_lines: Vec<Line<'static>> = rs.body.lines().map(|l| read_line(p, l)).collect();
+    //
+    // **Read-find overlay:** when a find session is armed (with ≥1 match),
+    // every needle occurrence is highlighted — non-selected hits in
+    // `p.find_match`, the selected hit (the one the viewport is
+    // centered on) in `p.find_current` — and blank *padding* rows are
+    // prepended / appended above / below the body so the selected hit can
+    // sit at the pane's center even when it is on the very first or last
+    // rendered row. The padding counts + scroll are the `FindPadding` the
+    // input pass already computed (FindState.center), so render and input
+    // can't desync.
+    let content_rows = crate::tui::scroll_max_top(&rendered_lines(p, &rs.body), app.body_pane_width) + 1;
+    let (pad_above, pad_below) = rs
+        .find
+        .as_ref()
+        .and_then(|fs| fs.center.as_ref())
+        .map(|c| (c.above, c.below))
+        .unwrap_or((0, 0));
+    // The selected hit's (line_idx, byte_offset) — the one match rendered
+    // in `find_current` (all others in `find_match`). `None` when there is
+    // no match.
+    let selected: Option<(usize, usize)> = rs
+        .find
+        .as_ref()
+        .and_then(|fs| {
+            if fs.matches.is_empty() { None } else {
+                Some(fs.matches[fs.cursor.min(fs.matches.len() - 1)])
+            }
+        });
+    let has_find = rs.find.as_ref().map(|fs| !fs.matches.is_empty()).unwrap_or(false);
+    let needle_len = rs.find.as_ref().map(|fs| fs.needle.len()).unwrap_or(0);
+
+    let blank = Line::from(vec![Span::styled(String::new(), p.default)]);
+    let mut body_lines: Vec<Line<'static>> = Vec::with_capacity(pad_above + rs.body.lines().count() + pad_below);
+    for _ in 0..pad_above {
+        body_lines.push(blank.clone());
+    }
+    for (li, l) in rs.body.lines().enumerate() {
+        if has_find {
+            let ms: Vec<(usize, usize)> = rs.find.as_ref().unwrap().matches.iter()
+                .filter_map(|(mli, off)| {
+                    if *mli == li { Some((*off, *off + needle_len)) } else { None }
+                })
+                .collect();
+            if !ms.is_empty() {
+                let sel = selected;
+                let patches: Vec<(usize, usize, ratatui::style::Style)> = ms
+                    .iter()
+                    .map(|(s, e)| {
+                        let is_sel = sel
+                            .map(|(sl, so)| sl == li && so == *s)
+                            .unwrap_or(false);
+                        (*s, *e, if is_sel { p.find_current } else { p.find_match })
+                    })
+                    .collect();
+                body_lines.push(apply_find_patched(
+                    read_line(p, l),
+                    &patches,
+                ));
+                continue;
+            }
+        }
+        body_lines.push(read_line(p, l));
+    }
+    for _ in 0..pad_below {
+        body_lines.push(blank.clone());
+    }
+
     // The "row N of M" note in the body pane title now reports rendered
     // rows (what the user sees), not logical lines. `scroll_top` is the
     // *first* rendered row shown, so `+1` gives a 1-based "row N" the user
-    // can quote in a bug report.
-    let total_rows = crate::tui::scroll_max_top(&rs.body, app.body_pane_width) + 1;
-    let body_widget = Paragraph::new(body_lines)
-        .block(
-            Block::default()
-                .borders(Borders::ALL)
-                .title(format!(
-                    " body — row {} of {} (jk/PgUp/Dn, g/G, Esc back)",
-                    rs.scroll_top + 1,
-                    total_rows,
-                )),
+    // can quote in a bug report. With find armed, the title doubles as the
+    // find status (needle + hit position) so the user always sees what's
+    // highlighted.
+    let total_rows = pad_above + content_rows + pad_below;
+    let title = if has_find {
+        let fs = rs.find.as_ref().unwrap();
+        let m = fs.matches.len();
+        let pos = fs.cursor.min(m - 1) + 1;
+        format!(
+            " body — find '{}': {pos} of {m} · ↑/↓ move · Esc close",
+            fs.needle
         )
+    } else {
+        format!(
+            " body — row {} of {} (jk/PgUp/Dn, g/G, Esc back)",
+            rs.scroll_top + 1,
+            total_rows,
+        )
+    };
+    let body_widget = Paragraph::new(body_lines)
+        .block(Block::default().borders(Borders::ALL).title(title))
         .wrap(ratatui::widgets::Wrap { trim: false })
         .scroll((rs.scroll_top as u16, 0));
     f.render_widget(body_widget, panes[0]);
@@ -1034,6 +1114,94 @@ fn read_line(p: &Palette, raw: &str) -> Line<'static> {
     } else {
         render_markdown_text(p, raw)
     }
+}
+
+/// The **rendered** text of one raw body line, flattened to plain `String` —
+/// the single source of truth the find overlay + row/centering math paint
+/// onto. `read_line` already emits this exact character stream (with styles);
+/// we drop the styles here. Heading lines pass through *unmodified* (the
+/// `read_line` short-circuit keeps `#` and any `**` verbatim). This is the
+/// function `mod.rs` calls when it needs to search + measure the *rendered*
+/// (not raw) body — the raw form would drift as soon as a line has any
+/// markdown emphasis, because the find offset is painted onto rendered
+/// chars.
+pub fn rendered_line(p: &Palette, raw: &str) -> String {
+    read_line(p, raw)
+        .spans
+        .iter()
+        .map(|s| s.content.as_ref().to_owned())
+        .collect()
+}
+
+/// Render every raw line of a body (one rendered `String` per raw line).
+/// The pure `find_matches` / `scroll_max_top` / `line_first_row` /
+/// `find_padding_for_cursor` helpers in `mod.rs` consume this, so the
+/// search + scroll math always agree with what `draw_read` paints.
+pub fn rendered_lines(p: &Palette, body: &str) -> Vec<String> {
+    body.lines().map(|raw| rendered_line(p, raw)).collect()
+}
+
+/// Apply the find highlight to a single rendered body line.
+/// `patches` is a list of `(start_byte, end_byte, style)` — the byte
+/// ranges (*into this line's character stream*) to color with `style`.
+/// Each char's effective style is the **last** patch (in `patches`
+/// order) that covers it — or the base span's style if no patch covers it
+/// (so a patch always overrides the markdown emphasis). Patches may
+/// overlap, be non-contiguous, or cover only part of a span; the function
+/// walks the rendered chars left-to-right, emitting consecutive chunks of
+/// the same effective style as a single `Span` (so the diff engine sees
+/// minimal, contiguous runs).
+fn apply_find_patched(
+    line: Line<'static>,
+    patches: &[(usize, usize, Style)],
+) -> Line<'static> {
+    if patches.is_empty() {
+        return line;
+    }
+    // Flatten the rendered line into a char stream + base styles.
+    let flat: Vec<(char, Style)> = line
+        .spans
+        .iter()
+        .flat_map(|sp| {
+            let base = sp.style;
+            sp.content.chars().map(move |ch| (ch, base))
+        })
+        .collect();
+    // Byte offset of each char (into the line's character stream, matching
+    // the same byte model the caller used to compute `patches`).
+    let mut byte_at: Vec<usize> = Vec::with_capacity(flat.len());
+    let mut acc = 0usize;
+    for (ch, _) in &flat {
+        byte_at.push(acc);
+        acc += ch.len_utf8();
+    }
+    // Walk chars, accumulating consecutive same-style runs.
+    let mut chunks: Vec<(String, Style)> = Vec::new();
+    for i in 0..flat.len() {
+        let (ch, base) = flat[i];
+        let by = byte_at[i];
+        // Last patch covering `by` wins (the caller sorts so the selected
+        // hit is last — but the "last in vec" rule is the contract).
+        let eff = patches
+            .iter()
+            .rev()
+            .find(|(s, e, _)| *s <= by && by < *e)
+            .map(|(_, _, sty)| *sty)
+            .unwrap_or(base);
+        if let Some(last) = chunks.last_mut() {
+            if last.1 == eff {
+                last.0.push(ch);
+                continue;
+            }
+        }
+        chunks.push((ch.to_string(), eff));
+    }
+    Line::from(
+        chunks
+            .into_iter()
+            .map(|(s, st)| Span::styled(s, st))
+            .collect::<Vec<_>>(),
+    )
 }
 
 /// True when `raw` is an ATX heading: 1–6 `#`s followed by exactly one
@@ -1953,5 +2121,97 @@ mod tests {
             // an equal-color recolor — assert the two are different strings.
             assert_ne!(flat(&err), flat(&ok), "error and success must never be identical");
         }
+    }
+
+    /// A helper for the find-patch tests: given a rendered `Line`, walk it
+    /// left-to-right and return the `Style` of the byte at `byte` (into the
+    /// rendered char stream). Returns `None` past the end (total).
+    fn byte_style(line: &Line<'_>, byte: usize) -> Option<Style> {
+        let mut acc = 0usize;
+        for sp in line.spans.iter() {
+            let w: usize = sp.content.chars().map(|c| c.len_utf8()).sum();
+            if byte >= acc && byte < acc + w {
+                return Some(sp.style);
+            }
+            acc += w;
+        }
+        None
+    }
+
+    /// `apply_find_patched` must color exactly the patched byte ranges with
+    /// the requested role and leave every other byte in its base style. It
+    /// must also let a *later* patch override an earlier one in any overlap
+    /// (the "last in vec wins" contract). Offsets are into the *rendered*
+    /// char stream (so `**bold**` contributes the styled text `bold`).
+    #[test]
+    fn apply_find_patched_colors_exactly_the_ranges() {
+        let p = Palette::default_palette();
+        // "a **bold** tail" renders to "a bold tail" (11 bytes), where
+        // bytes 2..5 = "bold" carry md_bold and the rest carry `default`.
+        let line = read_line(&p, "a **bold** tail");
+        let flat0: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
+        assert_eq!(flat0, "a bold tail", "rendered baseline: {flat0:?}");
+        assert_eq!(byte_style(&line, 2), Some(p.md_bold), "baseline byte 2 is md_bold");
+
+        // Patches: [1,2) = the space (default) → find_match; [2,5) = "bol"
+        // (md_bold) → find_current must *override* the bold emphasis. Byte 5
+        // = "d" is unpatched → keeps md_bold.
+        let patched = apply_find_patched(line, &[(1, 2, p.find_match), (2, 5, p.find_current)]);
+        let flat: String = patched.spans.iter().map(|s| s.content.as_ref()).collect();
+        assert_eq!(flat, "a bold tail", "text is preserved: {flat:?}");
+        assert_eq!(byte_style(&patched, 0), Some(p.default), "byte 0 stays default");
+        assert_eq!(byte_style(&patched, 1), Some(p.find_match), "byte 1 (space) → find_match");
+        assert_eq!(byte_style(&patched, 2), Some(p.find_current), "byte 2 (b) overridden by find_current");
+        assert_eq!(byte_style(&patched, 3), Some(p.find_current), "byte 3 (o) → find_current");
+        assert_eq!(byte_style(&patched, 4), Some(p.find_current), "byte 4 (l) → find_current");
+        assert_eq!(byte_style(&patched, 5), Some(p.md_bold), "byte 5 (d) unpatched keeps md_bold");
+        assert_eq!(byte_style(&patched, 6), Some(p.default), "byte 6 (space) stays default");
+        assert_eq!(byte_style(&patched, 10), Some(p.default), "byte 10 (l) stays default");
+
+        // Overlap: a later patch wins over an earlier one on a shared byte.
+        let patched2 = apply_find_patched(
+            read_line(&p, "a **bold** tail"),
+            &[(0, 5, p.find_match), (3, 7, p.find_current)],
+        );
+        assert_eq!(byte_style(&patched2, 3), Some(p.find_current), "later patch wins on shared byte 3");
+        assert_eq!(byte_style(&patched2, 4), Some(p.find_current), "later patch wins on byte 4");
+        assert_eq!(byte_style(&patched2, 0), Some(p.find_match), "earlier-only byte 0 → find_match");
+    }
+
+    /// An empty patch list is a byte-identity no-op (text unchanged; total).
+    #[test]
+    fn apply_find_patched_empty_patches_is_identity() {
+        let p = Palette::default_palette();
+        let original = read_line(&p, "hello **world**");
+        let out = apply_find_patched(original, &[]);
+        let a: String = out.spans.iter().map(|s| s.content.as_ref()).collect();
+        assert_eq!(a, "hello world", "rendered text (markdown emphasis stripped): {a:?}");
+        // No-panic is the real contract (the function is total).
+    }
+
+    /// A patch range that straddles *two* rendered spans (a find highlight
+    /// covering a boundary between `default` text and a `md_bold` token)
+    /// must color *both* halves with the patch role, never leaking a base
+    /// style through the middle of the range.
+    #[test]
+    fn apply_find_patched_span_straddling_range() {
+        let p = Palette::default_palette();
+        // "abc**def**ghi" renders to "abcdefghi" (9 bytes): 0..2 = "abc"
+        // (default), 2..5 = "def" (md_bold), 5..9 = "ghi" (default).
+        let line = read_line(&p, "abc**def**ghi");
+        let flat0: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
+        assert_eq!(flat0, "abcdefghi", "rendered baseline: {flat0:?}");
+        assert_eq!(byte_style(&line, 2), Some(p.default), "byte 2 (c) default");
+        assert_eq!(byte_style(&line, 3), Some(p.md_bold), "byte 3 (d) md_bold");
+
+        // Patch [2:6) starts in the `default` span and ends in the
+        // `md_bold` span (crosses the boundary at byte 3).
+        let out = apply_find_patched(line, &[(2, 6, p.find_match)]);
+        assert_eq!(byte_style(&out, 2), Some(p.find_match), "byte 2 in range → find_match");
+        assert_eq!(byte_style(&out, 3), Some(p.find_match), "byte 3 in range → find_match (overrides md_bold)");
+        assert_eq!(byte_style(&out, 4), Some(p.find_match), "byte 4 in range → find_match");
+        assert_eq!(byte_style(&out, 5), Some(p.find_match), "byte 5 in range → find_match");
+        assert_eq!(byte_style(&out, 1), Some(p.default), "byte 1 out of range stays default");
+        assert_eq!(byte_style(&out, 6), Some(p.default), "byte 6 out of range stays default");
     }
 }
