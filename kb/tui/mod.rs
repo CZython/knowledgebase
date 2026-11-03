@@ -2626,6 +2626,16 @@ fn line_first_row(lines: &[String], width: usize) -> Vec<usize> {
 /// onto, so the (line, byte_offset) matches land exactly under the right
 /// glyph, even when the raw markdown has `**`, `*`, `` ` ``, or `~~`
 /// delimiters the renderer would otherwise strip.
+///
+/// **Headings are skipped**: an ATX heading (`#`…`######` + space) renders
+/// verbatim in the `label` role and is *structural*, not prose — a needle
+/// matching a `#` heading title is not what a reader searches for (they'd
+/// want the prose under it, or the outline pane on the right). The same
+/// `is_heading` predicate `read_line` uses to pick the `label` role decides
+/// whether a line is skipped, so "what you see boxed" and "what renders
+/// boxed" never disagree. The *row/centering* math (`scroll_max_top`,
+/// `line_first_row`, `find_padding_for_cursor`) still measures the heading
+/// rows — only the *hit-set* excludes them.
 fn find_matches(lines: &[String], needle: &str) -> Vec<(usize, usize)> {
     let low = needle.to_lowercase();
     if low.is_empty() {
@@ -2633,6 +2643,9 @@ fn find_matches(lines: &[String], needle: &str) -> Vec<(usize, usize)> {
     }
     let mut out = Vec::new();
     for (li, line) in lines.iter().enumerate() {
+        if crate::tui::render::is_heading_line(line) {
+            continue;
+        }
         let lline = line.to_lowercase();
         let mut from = 0usize;
         while let Some(rel) = lline[from..].find(&low) {
@@ -6105,6 +6118,154 @@ mod tests {
         let m4 = find_matches(&rendered2, "gone beta");
         // Rendered: "alpha gone beta x gamma" — contiguous at offset 6.
         assert_eq!(m4, vec![(0, 6)], "'gone beta' contiguous on rendered: {m4:?}");
+    }
+
+    /// Headings are structural, not prose: a needle that only appears in a
+    /// heading *title* must NOT match (the reader wants the prose under the
+    /// heading, or the outline pane — not to `Ctrl-F` a `#` line). The prose
+    /// hit below the heading still matches, so the filter is surgical, not a
+    /// blanket skip. `####### seven` and `##nospace` are *not* headings
+    /// (the `read_line` predicate), so those lines do match.
+    #[test]
+    fn find_matches_skips_heading_lines() {
+        let rendered = lines(
+            "# need heading\n\
+             prose need here\n\
+             ## need sub\n\
+             more need prose",
+        );
+        // Render (headings verbatim, prose stripped of emphasis — none here):
+        //   L0: "# need heading"   (heading -> SKIP, contains "need"@2)
+        //   L1: "prose need here"  (prose    -> "need"@6)
+        //   L2: "## need sub"      (heading -> SKIP, contains "need"@3)
+        //   L3: "more need prose"  (prose    -> "need"@5)
+        let m = find_matches(&rendered, "need");
+        // The two heading lines (0 and 2) contain "need" but are *skipped*;
+        // only the two prose lines (1 and 3) match. Without the filter this
+        // would be 4 hits — the filter is what makes it 2.
+        assert_eq!(m, vec![(1, 6), (3, 5)], "only prose hits; both headings skipped: {m:?}");
+
+        // A needle that *only* appears in headings -> no matches at all.
+        let rendered2 = lines("# Alpha Beta Gamma\n# Delta Epsilon Zeta");
+        assert!(
+            find_matches(&rendered2, "Beta").is_empty(),
+            "needle only in headings -> no match"
+        );
+
+        // Not-a-heading lines (`##nospace` lacks the required space) still match:
+        let rendered3 = lines("##nospace alpha\nplain need row");
+        let m3 = find_matches(&rendered3, "need");
+        assert_eq!(m3, vec![(1, 6)], "'##nospace' isn't a heading; 'plain need row' matches at 6: {m3:?}");
+    }
+
+    /// A body far longer than the pane (many rendered rows, well over
+    /// `body_pane_height`) must find a needle on the *late* lines, not just
+    /// within the first viewport. This is the scroll-to-recenter path: each
+    /// hit's centering clamps `scroll_top` into range and the `draw_read`
+    /// `Paragraph` scrolls a *rendered* offset across the entire padded body
+    /// — so hits past the first pane are reachable, exactly like plain
+    /// `j`/`k`/`G`.
+    #[test]
+    fn find_matches_long_page_scrolls_to_late_hits() {
+        // 60 prose lines, the needle only on the late pages (past the
+        // first viewport). `i == 55` and `i == 59` each get a needle line.
+        let mut body = String::new();
+        for i in 0..60usize {
+            body.push_str(&format!("line {i:02} padding padding padding\n"));
+            if i == 55 || i == 59 {
+                body.push_str(&format!("\nneedle found on line {i}\n"));
+            }
+        }
+        let rendered = lines(&body);
+        // Locate the two needle lines by scan, not by index math (the prose
+        // lines and the needle lines interleave).
+        let needle_lines: Vec<usize> = rendered
+            .iter()
+            .enumerate()
+            .filter_map(|(i, l)| l.starts_with("needle found").then_some(i))
+            .collect();
+        assert_eq!(
+            needle_lines.len(),
+            2,
+            "exactly two 'needle found' lines: {needle_lines:?}"
+        );
+        let m = find_matches(&rendered, "needle found");
+        assert_eq!(
+            m,
+            needle_lines
+                .iter()
+                .map(|&i| (i, 0))
+                .collect::<Vec<_>>(),
+            "matches sit exactly on the scanned needle lines: {m:?}"
+        );
+        // The later needle line is far below any single pane's worth of rows
+        // (the pane here is 24 rows; the late line is 60+ rendered lines down).
+        let rows_up_to_late =
+            line_first_row(&rendered, 80).get(needle_lines[1]).copied().unwrap();
+        assert!(
+            rows_up_to_late > 24,
+            "late hit is many rendered rows down: {rows_up_to_late} > 24"
+        );
+
+        // End-to-end: arm on the App with a tall-enough pane height, select the
+        // *late* hit, and confirm the centering clamps scroll into range —
+        // proving the hit is reachable (scroll_top ≤ scroll_max_top) rather
+        // than being dropped because it sits past the first viewport.
+        let db = Db::open_in_memory_test().unwrap();
+        db.migrate().unwrap();
+        db.conn
+            .execute(
+                "INSERT INTO pages (abs_path, id, type, title, root, rel_path, search_required_phrase, mtime_ns, content_hash)
+                 VALUES ('/root/long.md', 'note:long', 'note', 'Long', '/root', 'long.md', NULL, 0, 'x')",
+                rusqlite::params![],
+            )
+            .unwrap();
+        let mut app = App::new(db).unwrap();
+        app.selected = app.view.iter().position(|r| r.id == "note:long").unwrap();
+        app.open_read().unwrap();
+        {
+            let rs = match &mut app.mode {
+                Mode::Read(r) => r,
+                _ => panic!(),
+            };
+            rs.body = body.clone();
+            rs.scroll_top = 0;
+        }
+        app.find_activate();
+        let needle: String = "needle found".to_string();
+        for c in needle.chars() {
+            app.find_input(c);
+        }
+        {
+            let rs = match &app.mode {
+                Mode::Read(r) => r,
+                _ => panic!(),
+            };
+            let fs = rs.find.as_ref().unwrap();
+            assert_eq!(fs.matches.len(), 2, "two matches on the long page");
+            // Select the *late* hit (cursor 1) and recenter.
+            app.find_next();
+        }
+        {
+            let rs = match &app.mode {
+                Mode::Read(r) => r,
+                _ => panic!(),
+            };
+            let fs = rs.find.as_ref().unwrap();
+            assert_eq!(fs.cursor, 1, "selected the late hit");
+            let c = fs.center.as_ref().unwrap();
+            assert!(c.scroll_top <= c.scroll_max_top, "scroll in range: {c:?}");
+            // A mid/late page hit requires scrolling past the first pane.
+            assert!(
+                c.scroll_max_top > 0 && c.scroll_top >= c.scroll_max_top - 24,
+                "recenter scrolled near the bottom (reachable), not at row 0: {c:?}"
+            );
+            assert!(
+                rs.scroll_top > 0,
+                "late hit forces a non-zero scroll (past the first viewport): {:?}",
+                rs.scroll_top
+            );
+        }
     }
 
     /// End-to-end through the `App`: arm find on a known Read body, type a
