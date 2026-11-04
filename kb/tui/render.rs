@@ -50,10 +50,11 @@
 //! ```
 
 use ratatui::Frame;
-use ratatui::layout::{Constraint, Direction, Layout};
-use ratatui::style::Style;
+use ratatui::buffer::Buffer;
+use ratatui::layout::{Constraint, Direction, Layout, Rect};
+use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Borders, List as RatList, ListItem, ListState, Paragraph};
+use ratatui::widgets::{Block, Borders, List as RatList, ListItem, ListState, Paragraph, Widget, Wrap};
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use crate::tui::{App, FmMeta, Mode, PageRow, ReadState, StatusKind};
@@ -241,7 +242,8 @@ fn draw_read(f: &mut Frame, app: &App, rs: &ReadState, area: ratatui::layout::Re
     // rendered row. The padding counts + scroll are the `FindPadding` the
     // input pass already computed (FindState.center), so render and input
     // can't desync.
-    let content_rows = crate::tui::scroll_max_top(&rendered_lines(p, &rs.body), app.body_pane_width) + 1;
+    let rendered = rendered_lines(p, &rs.body);
+    let content_rows = crate::tui::render::rendered_row_count(&rendered, app.body_pane_width);
     let (pad_above, pad_below) = rs
         .find
         .as_ref()
@@ -1139,6 +1141,101 @@ pub fn rendered_line(p: &Palette, raw: &str) -> String {
 /// search + scroll math always agree with what `draw_read` paints.
 pub fn rendered_lines(p: &Palette, body: &str) -> Vec<String> {
     body.lines().map(|raw| rendered_line(p, raw)).collect()
+}
+
+/// The number of **rendered rows** a set of logical lines occupies at
+/// `pane_width`, using `Paragraph`'s own `line_count` — i.e. the exact
+/// `WordWrapper` (`Wrap { trim: false }`) engine `draw_read` paints with.
+/// This is the single source of truth for the scroll/centering math, so a
+/// future ratatui wrap change moves the search scroll with it instead of
+/// drifting behind a hand-rolled `div_ceil` model.
+///
+/// `pane_width <= 1` falls back to the logical-line count (the same guard
+/// the scroll mutators use before the first render reports a real width).
+/// Empty input → 0.
+pub fn rendered_row_count(lines: &[String], pane_width: usize) -> usize {
+    if lines.is_empty() {
+        return 0;
+    }
+    if pane_width <= 1 {
+        return lines.len();
+    }
+    let text: Vec<Line<'static>> = lines.iter().map(|l| Line::from(l.clone())).collect();
+    Paragraph::new(text)
+        .wrap(Wrap { trim: false })
+        .line_count(pane_width.min(u16::MAX as usize) as u16)
+}
+
+/// The style used only as an off-screen "where did this land?" probe. It is
+/// deliberately not part of any palette, so the scan below cannot mistake a
+/// real glyph for the selected hit.
+fn find_probe_style() -> Style {
+    Style::default()
+        .fg(Color::Rgb(1, 2, 3))
+        .add_modifier(Modifier::HIDDEN)
+}
+
+/// The rendered row containing the selected find hit `(line_idx, byte_off)`,
+/// in the **unpadded** body. Instead of guessing from the line's start (the
+/// old `line_first_row` bug: a hit deep inside a long wrapped line was
+/// centered on the line's *first* row and could be scrolled off screen), we
+/// ask ratatui itself: the selected character is painted with
+/// [`find_probe_style`] into an off-screen `Buffer`, then the buffer is
+/// scanned for that style. Styling does not affect wrapping, so this is the
+/// exact row `draw_read` will paint the hit on.
+///
+/// `pane_width <= 1` falls back to the logical line index. `None` when the
+/// hit is out of range or the marked character cannot be found.
+pub fn match_rendered_row(
+    lines: &[String],
+    selected: (usize, usize),
+    pane_width: usize,
+) -> Option<usize> {
+    let (line_idx, byte_off) = selected;
+    let line = lines.get(line_idx)?;
+    if pane_width <= 1 {
+        return Some(line_idx);
+    }
+    let ch_len = line.get(byte_off..)?.chars().next()?.len_utf8();
+    if ch_len == 0 {
+        return None;
+    }
+    let rows_before = rendered_row_count(&lines[..line_idx], pane_width);
+    let probe = find_probe_style();
+    let styled = apply_find_patched(
+        Line::from(line.clone()),
+        &[(byte_off, byte_off + ch_len, probe)],
+    );
+    // Only the selected logical line needs to be rendered: word wrapping is
+    // per-logical-line, so its internal row offsets are independent of the
+    // lines above it.
+    let line_rows = Paragraph::new(vec![styled.clone()])
+        .wrap(Wrap { trim: false })
+        .line_count(pane_width as u16)
+        .max(1);
+    let width = pane_width.min(u16::MAX as usize) as u16;
+    let height = line_rows.min(u16::MAX as usize) as u16;
+    let area = Rect::new(0, 0, width, height);
+    let mut buf = Buffer::empty(area);
+    Widget::render(
+        Paragraph::new(vec![styled]).wrap(Wrap { trim: false }),
+        area,
+        &mut buf,
+    );
+    for y in 0..height {
+        for x in 0..width {
+            if let Some(c) = buf.cell((x, y)) {
+                // Compare the probe's two independent fields, not the whole
+                // `Style`: the buffer fills in `bg`/`underline_color` with
+                // `Reset`, which is irrelevant to our marker.
+                let style = c.style();
+                if style.fg == probe.fg && style.add_modifier.contains(Modifier::HIDDEN) {
+                    return Some(rows_before + y as usize);
+                }
+            }
+        }
+    }
+    None
 }
 
 /// Apply the find highlight to a single rendered body line.

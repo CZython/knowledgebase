@@ -2541,31 +2541,20 @@ impl App {
 /// cells. The scroll offset is in **rendered rows** (not logical lines): a
 /// logical line that wraps to N rendered rows contributes N to the total.
 ///
-/// Counting a line as `cells.div_ceil(pane_width)` rows is the same "how
-/// many rows of `pane_width` cells does this content occupy" that the TUI's
-/// `WordWrapper` produces (within one row of word-boundary slack, which is
-/// immaterial for a scroll clamp — the user can nudge with arrows).
-/// A blank line still occupies one rendered row (an empty line on screen).
+/// The row count comes from `render::rendered_row_count`, which delegates to
+/// `Paragraph::line_count` — ratatui's exact `WordWrapper` (`trim: false`)
+/// engine, the same one that paints the body. Nothing here re-implements
+/// wrapping, so a ratatui upgrade cannot silently desync the scroll range
+/// from what the user sees. A blank line still occupies one rendered row.
 ///
 /// When `pane_width` is 0/1 (a window too narrow to matter, or before the
-/// first render has told `App` the real pane width) we fall back to the
-/// logical-line model so the mutators remain total and monotonic.
+/// first render has told `App` the real pane width) `rendered_row_count`
+/// falls back to the logical-line model so the mutators remain total and
+/// monotonic.
 ///
 /// Pure + total. Empty body → 0.
 pub fn scroll_max_top(lines: &[String], pane_width: usize) -> usize {
-    let n = lines.len();
-    if n == 0 {
-        return 0;
-    }
-    if pane_width <= 1 {
-        return n - 1;
-    }
-    let mut total = 0usize;
-    for line in lines {
-        let cells = line.width().max(1);
-        total += cells.div_ceil(pane_width);
-    }
-    total - 1
+    crate::tui::render::rendered_row_count(lines, pane_width).saturating_sub(1)
 }
 
 // ===================================================================
@@ -2589,10 +2578,12 @@ pub fn scroll_max_top(lines: &[String], pane_width: usize) -> usize {
 //                       center, even when it is the very first or very last
 //                       rendered row (the user's "fake rows" request).
 
-/// How many rendered rows a single logical line occupies at `width` cells —
-/// the width-aware model `scroll_max_top` uses: a blank line is 1 row; a
-/// non-blank line wraps to `ceil(width / pane_width)` rows (with `width < 1`
-/// clamped to 1-cell rows). **Total** (no panics, no IO).
+/// How many rendered rows a single logical line occupies at `width` cells by
+/// the old `div_ceil(cells / width)` model. This is only a **fallback** for
+/// the degenerate `pane_width <= 1` guard and for the tests; the real scroll
+/// and centering math uses `render::rendered_row_count` (ratatui's own
+/// `WordWrapper`). A blank line is 1 row; `width < 1` clamps to 1-cell rows.
+/// **Total** (no panics, no IO).
 fn line_row_count(line: &str, width: usize) -> usize {
     if line.is_empty() {
         return 1;
@@ -2602,11 +2593,11 @@ fn line_row_count(line: &str, width: usize) -> usize {
 }
 
 /// Map the body's logical lines to the **first rendered row** each one starts
-/// on (the cumulative model `scroll_max_top` builds, but returned as a
-/// per-line table — so "the selected hit's first rendered row" is a single
-/// array lookup). `width < 1` clamps to 1-cell rows (the `scroll_max_top`
-/// fallback for a too-nan pane). A blank line contributes 1 row (it renders
-/// as a single, empty row).
+/// on using the old `div_ceil` model. This is now only the degenerate-width
+/// fallback for [`find_padding_for_cursor`]; the selected hit's *actual* row
+/// comes from `render::match_rendered_row` so it accounts for wrapping within
+/// the line. `width < 1` clamps to 1-cell rows. A blank line contributes 1
+/// row (it renders as a single, empty row).
 fn line_first_row(lines: &[String], width: usize) -> Vec<usize> {
     let mut out = Vec::new();
     let mut acc = 0usize;
@@ -2651,11 +2642,11 @@ fn find_matches(lines: &[String], needle: &str) -> Vec<(usize, usize)> {
 /// first or very last rendered row cannot sit at the viewport's center —
 /// there isn't enough content to scroll past. `above` / `below` fix that.
 ///
-/// **Total** on its inputs (pure; no IO, no `App`). The `Render` pass
-/// supplies `first_row` / `content_rows` (via `find_selected_first_row`)
-/// and `pane_height` (via `app.body_pane_height`, written each frame by
-/// `draw_read`). `find_padding_for_cursor` resolves the hit via
-/// `line_first_row`; `FindState.center: Option<FindPadding>` stores the
+/// **Total** on its inputs (pure; no IO, no `App`). The caller supplies
+/// `first_row` / `content_rows`, both measured by ratatui's own
+/// `WordWrapper` (`render::match_rendered_row` / `rendered_row_count`), and
+/// `pane_height` (via `app.body_pane_height`, written each frame by
+/// `draw_read`). `FindState.center: Option<FindPadding>` stores the
 /// latest result so that the *input* pass (which can mutate
 /// `ReadState::scroll_top`) and the *render* pass (which prepends /
 /// appends the blank rows) always agree — one computation, two consumers.
@@ -2753,9 +2744,10 @@ pub struct FindPadding {
     }
 
 /// Compute the `FindPadding` for the hit at `cursor` in `matches`, given
-/// the body content and the live pane dimensions. The hit is located by
-/// `(line_index, byte_offset)` → the *logical line* in the body → that
-/// line's first rendered row (via `line_first_row`). Returns `None` when
+/// the rendered body lines and the live pane dimensions. The hit is located
+/// by `(line_index, byte_offset)` → its **actual rendered row** via
+/// `render::match_rendered_row` (so a hit several wraps down a long line is
+/// centered on itself, not on the line's first row). Returns `None` when
 /// the match list is empty (caller stores `FindState.center = None`; render
 /// the unpadded body).
 ///
@@ -2775,11 +2767,18 @@ fn find_padding_for_cursor(
     }
     let cursor = cursor.min(matches.len() - 1);
     let (line_idx, _) = matches[cursor];
-    let first_row = line_first_row(lines, pane_width)
-        .get(line_idx)
-        .copied()
-        .unwrap_or(0);
-    let content_rows = scroll_max_top(lines, pane_width) + 1; // +1: max_top is total-1
+    // The selected hit's *actual* rendered row, via ratatui's wrap engine
+    // (see `render::match_rendered_row`). The old fallback used the line's
+    // first row, which is wrong once the hit sits several wraps down a long
+    // line; keep it only for the degenerate width guard.
+    let first_row = crate::tui::render::match_rendered_row(lines, matches[cursor], pane_width)
+        .unwrap_or_else(|| {
+            line_first_row(lines, pane_width)
+                .get(line_idx)
+                .copied()
+                .unwrap_or(0)
+        });
+    let content_rows = crate::tui::render::rendered_row_count(lines, pane_width);
     Some(find_padding(first_row, content_rows, pane_height))
 }
 
@@ -6013,22 +6012,24 @@ mod tests {
         assert_eq!(fp, FindPadding { above: 0, below: 0, scroll_top: 0, scroll_max_top: 0 });
     }
 
-    /// `find_padding_for_cursor` must resolve the *selected* hit's line to its
-    /// first rendered row and produce valid padding. It must be `None` for an
-    /// empty match list, and must clamp a cursor past the end.
+    /// `find_padding_for_cursor` must resolve the *selected* hit's rendered
+    /// row (not merely its line's first row) and produce valid padding. A
+    /// hit deeper than one wrap down a long line is the regression this
+    /// pins: centering on the line's first row would leave it off screen.
     #[test]
     fn find_padding_for_cursor_resolves_selected_line() {
-        // A body where line 2 is a "long" line (wraps to 2 rows at width 10)
-        // and the rest are single-row. The needle "xx" appears exactly once
-        // (at line 2, byte 4) among the 18 c/c's — but to keep the assertion
-        // tight we use a *distinct* needle that appears once on line 2.
+        // Line 2 is longer than one pane width: at width 10 it wraps into
+        // "cccccccccc" + "ccxxcc", so the "xx" at byte 12 lives on the
+        // line's *second* rendered row.
         let body = "a\nbb\nccccccccccccxxcc\nd"; // line 2: 12 'c' + 'xx' at offset 12 + 2 'c'
         let rendered = lines(body);
         let matches = find_matches(&rendered, "xx"); // one hit, line 2
         assert_eq!(matches, vec![(2, 12)], "exactly one 'xx' at line 2 offset 12: {matches:?}");
         let fp = find_padding_for_cursor(&rendered, &matches, 0, 10, 12).expect("a match exists");
-        // The hit's first rendered row is the cumulative rows of lines 0..2.
-        let expected_row = line_first_row(&rendered, 10)[2];
+        // Rows before line 2 (2) plus the hit's row within that line (1).
+        let expected_row = crate::tui::render::match_rendered_row(&rendered, matches[0], 10)
+            .expect("hit row resolves");
+        assert_eq!(expected_row, line_first_row(&rendered, 10)[2] + 1, "hit is on the line's second wrapped row");
         assert!(fp.scroll_top <= fp.scroll_max_top);
         // The absolute hit row is visible within the pane.
         let abs = fp.above + expected_row;

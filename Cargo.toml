@@ -88,7 +88,11 @@ dirs = "5"
 # Both are *assumed* shells (M8.0): the proven frontmatter-edit +
 # corpus-list logic they wrap is already in `kb-core` + `kb-db`. Versions
 # pinned to what is cached offline on this box (see `~/.cargo/registry`).
-ratatui  = "0.29"
+# `unstable-rendered-line-info` exposes `Paragraph::line_count`, which runs
+# the *same* `WordWrapper` the renderer paints with. It is marked unstable
+# upstream, but that is the point: a wrapping change becomes a compile error
+# here rather than a silent drift between the scroll math and the screen.
+ratatui  = { version = "0.29", features = ["unstable-rendered-line-info"] }
 crossterm = "0.28"
 # Display-width (cell) measurement for the TUI's bounded list rows —
 # ratatui/unicode internals already compile it; we use it directly to
