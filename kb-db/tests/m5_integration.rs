@@ -383,6 +383,101 @@ fn reindex_single_page_preserves_root_and_rel_path() {
     assert_eq!(rel2, rel, "rel_path must be preserved, not clobbered to ''");
 }
 
+/// Regression: the TUI `commit_edit` path (single-page re-index with empty
+/// `root`/`rel` sentinels) must also **preserve the page's `language` column
+/// when the file declares one**. Unlike `root`/`rel_path`, `language` is
+/// *frontmatter-derived* and so has no `COALESCE(NULLIF(...))` sentinel in
+/// `upsert_page` (`kb-db/src/index.rs` `DO UPDATE SET language = excluded.language`)
+/// — if it is not re-extracted at re-index time, `excluded.language` is `NULL`
+/// and the row's stored language is silently wiped, breaking the
+/// `language:` / `language:Null` search filters on any TUI-edited page.
+/// The TUI commit calls `build_page(path, "", "", true)`; with `true`,
+/// `extract_language` re-reads the `language:` field from the freshly-written
+/// file and the upsert round-trips the value intact.
+///
+/// (This mirrors `reindex_single_page_preserves_root_and_rel_path` above;
+/// the difference: `language` is derived from the file content, not ownership,
+/// so the "preserve" contract is *re-extract and write back*, not *skip*.)
+#[test]
+fn reindex_single_page_preserves_language() {
+    let s = Setup::new("reindex_preserve_lang");
+    let abs = s.root.join("sub/en.md");
+    fs::create_dir_all(s.root.join("sub")).unwrap();
+    fs::write(
+        &abs,
+        "---\ntype: note\ntitle: En Note\nlanguage: en\n---\n# En Note\nbody\n",
+    )
+    .unwrap();
+
+    // Register the root and do the initial index so the row exists with
+    // `language`: non-`NULL`.
+    let canon_root = fs::canonicalize(&s.root)
+        .unwrap()
+        .to_string_lossy()
+        .to_string();
+    s.db.add_root(&canon_root, None, false).unwrap();
+    refresh(&s.db).unwrap();
+    let abs_path = fs::canonicalize(&abs)
+        .unwrap()
+        .to_string_lossy()
+        .to_string();
+
+    // Helper: read the `language` column, mapping `NULL` → `"__NULL__"`
+    // (the `strings` helper above does `r.get::<_,String>(0)`, which errors
+    // on a `NULL` value, so we coalesce in-SQL).
+    fn read_lang(db: &Db, abs_path: &str) -> String {
+        let mut stmt = db
+            .conn
+            .prepare(&format!(
+                "SELECT COALESCE(language, '__NULL__') FROM pages WHERE abs_path = '{abs_path}'"
+            ))
+            .unwrap();
+        let mut rows = stmt.query_map([], |r| r.get::<_, String>(0)).unwrap();
+        rows.next().unwrap().unwrap()
+    }
+    assert_eq!(
+        read_lang(&s.db, &abs_path),
+        "en",
+        "precondition: initial index stored language=en"
+    );
+
+    // THE REGRESSION — the TUI commit path: `build_page` with `false` for the
+    // 4th arg reproduces the historical bug (`rec.language` is `None`, upsert
+    // writes `NULL`, the column is wiped). `true` is the fixed, correct value
+    // — `extract_language` re-reads the frontmatter and the value round-trips.
+    //
+    // We assert both:
+    //   (a) the fixed path (`include_language=true`) preserves the column;
+    //   (b) the buggy path (`include_language=false`) *does* wipe it — a
+    //       negative control that documents the failure mode and proves the
+    //       test would have caught the bug (and would catch a regression
+    //       where TUI regresses back to `false`).
+    let canonical = fs::canonicalize(&abs).unwrap();
+
+    // (a) fixed: `true` preserves.
+    let rec_true = index::build_page(&canonical, "", "", true).unwrap();
+    index::upsert_page(&s.db, &rec_true).unwrap();
+    assert_eq!(
+        read_lang(&s.db, &abs_path),
+        "en",
+        "include_language=true: upsert must round-trip the file's language"
+    );
+
+    // (b) buggy: `false` wipes (negative control).
+    let rec_false = index::build_page(&canonical, "", "", false).unwrap();
+    index::upsert_page(&s.db, &rec_false).unwrap();
+    assert_eq!(
+        read_lang(&s.db, &abs_path),
+        "__NULL__",
+        "include_language=false: the historical bug wipes the column (documents\
+         the failure mode this test guards against)"
+    );
+
+    // (c) restore the fixed path so the DB is left in the correct state.
+    index::upsert_page(&s.db, &rec_true).unwrap();
+    assert_eq!(read_lang(&s.db, &abs_path), "en");
+}
+
 #[test]
 fn walk_snapshot_surfaces_only_indexable_files() {
     let s = Setup::new("surfaces");

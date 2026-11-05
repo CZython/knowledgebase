@@ -1067,3 +1067,342 @@ fn resolve_missing_slug_is_empty_no_error() {
     assert_eq!(code, 0, "no error: stderr: {err}");
     assert!(out.contains("no page matches"), "empty: {out}");
 }
+
+// ===========================================================================
+// M7c — special-property composition: gate × language × type × label links
+// ===========================================================================
+//
+// These tests pin the *interactions* between the search-grammar features
+// (the `language:` / `language:Null` absence filter, the `search_required_phrase`
+// *gate* rule, the `type:` filter, the alias-expanded tag filter, the label
+// expansion on `tag` / `links`) rather than each feature in isolation.
+// Single-feature coverage already lives in the earlier m7 + m5 tests; these
+// are the *composition* matrix the user's original plan called out.
+
+/// The positive `language:` filter (the companion to the `language:Null`
+/// test above): a page that *has* `language: en` is included *only* when
+/// the filter value matches, and is excluded when the filter value does not
+/// match or when it is `Null`. Case-folding is symmetric (the SQL uses
+/// `lower(pages.language) = lower(?)`).
+#[test]
+fn language_positive_filter_includes_match_and_excludes_other_and_null() {
+    let s = Setup::new("lang_pos");
+    write_page(
+        &s,
+        "en.md",
+        "type: note\ntitle: Alphabetic\nlanguage: en\n",
+        "alphabetic body content\n",
+    );
+    write_page(&s, "no-lang.md", "type: note\ntitle: Beta\n", "beta body content\n");
+    write_page(&s, "fr.md", "type: note\ntitle: Gamma\nlanguage: fr\n", "gamma body content\n");
+    add(&s);
+
+    // The filter narrows the corpus to pages whose `language:` column
+    // case-folds to the filter value.
+    let (code, out, err) = run(&s, &["search", "alphabetic language:en"]);
+    assert_eq!(code, 0, "stderr: {err}");
+    assert!(out.contains("Alphabetic"), "positive match: {out}");
+    assert!(!out.contains("Beta"), "page without language must not match: {out}");
+    assert!(!out.contains("Gamma"), "page with the wrong language must not match: {out}");
+
+    // The *absence* filter is the complementary path: `language:Null` matches
+    // only the page *without* the field.
+    let (code, out, err) = run(&s, &["search", "beta language:Null"]);
+    assert_eq!(code, 0, "stderr: {err}");
+    assert!(out.contains("Beta"), "absence path returns the field-less page: {out}");
+    assert!(
+        !out.contains("Alphabetic") && !out.contains("Gamma"),
+        "pages that HAVE a language field must not match: {out}"
+    );
+
+    // `language:en` is case-insensitive end-to-end (the user-side filter value
+    // and the SQL both flow through the same case-fold — `lower(...) =
+    // lower(...)` — so `language:EN` is the *same* filter as `language:en`).
+    let (code, out, err) = run(&s, &["search", "alphabetic language:EN"]);
+    assert_eq!(code, 0, "stderr: {err}");
+    assert!(out.contains("Alphabetic"), "case-fold is symmetric: {out}");
+}
+
+/// The gate rule *alone*: a gated page with no gate phrase in the query is
+/// hidden from search; adding the gate phrase unlocks it. This is the
+/// baseline the next two tests compose *language:* on top of.
+#[test]
+fn gate_hides_from_generic_search_and_unlocks_by_phrase() {
+    let s = Setup::new("gate_baseline");
+    write_page(
+        &s,
+        "gated.md",
+        "type: note\ntitle: Gated\nsearch_required_phrase:\n  - secretword\n",
+        "gated body content\n",
+    );
+    write_page(
+        &s,
+        "ungated.md",
+        "type: note\ntitle: Ungated\n",
+        "ungated body content",
+    );
+    add(&s);
+
+    // Generic search: the un-gated page is found, the gated page is hidden.
+    let (code, out, err) = run(&s, &["search", "gated"]);
+    assert_eq!(code, 0, "stderr: {err}");
+    assert!(!out.contains("Gated"), "gated page hidden without gate phrase: {out}");
+
+    // The ungated page matches the same query.
+    let (code, out, err) = run(&s, &["search", "ungated"]);
+    assert_eq!(code, 0, "stderr: {err}");
+    assert!(out.contains("Ungated"), "ungated page is a normal search hit: {out}");
+
+    // Adding the gate phrase to the query unlocks the gated page.
+    let (code, out, err) = run(&s, &["search", "gated secretword"]);
+    assert_eq!(code, 0, "stderr: {err}");
+    assert!(out.contains("Gated"), "gate phrase in query unlocks the page: {out}");
+}
+
+/// The gate × `language:` composition: the gate rule and the language filter
+/// both apply in the *same* query (their SQL predicates are AND-composed).
+/// The gate is *necessary but not sufficient* — the language filter still
+/// narrows the result. (The existing
+/// `gate_hides_from_generic_search_and_unlocks_by_phrase` test pins the
+/// gate alone and the `language_positive_filter_*` test pins language alone;
+/// this test pins their intersection.)
+#[test]
+fn gate_and_language_compose_independently() {
+    let s = Setup::new("gate_lang");
+    write_page(
+        &s,
+        "gated_en.md",
+        "type: note\ntitle: Gated En\nlanguage: en\nsearch_required_phrase:\n  - secretword\n",
+        "gated body\n",
+    );
+    write_page(
+        &s,
+        "gated_fr.md",
+        "type: note\ntitle: Gated Fr\nlanguage: fr\nsearch_required_phrase:\n  - secretword\n",
+        "gated fr body\n",
+    );
+    write_page(
+        &s,
+        "ungated_en.md",
+        "type: note\ntitle: Ungated En\nlanguage: en\n",
+        "ungated body\n",
+    );
+    add(&s);
+
+    // Gate phrase present, no language filter: both gated pages unlock.
+    let (code, out, err) = run(&s, &["search", "gated secretword"]);
+    assert_eq!(code, 0, "stderr: {err}");
+    assert!(
+        out.contains("Gated En") && out.contains("Gated Fr"),
+        "both gated pages unlock on the phrase alone: {out}"
+    );
+
+    // Gate phrase + language:en → only the en-gated page is returned.
+    let (code, out, err) = run(&s, &["search", "gated secretword language:en"]);
+    assert_eq!(code, 0, "stderr: {err}");
+    assert!(
+        out.contains("Gated En"),
+        "en-gated page unlocks on the composed gate+language query: {out}"
+    );
+    assert!(
+        !out.contains("Gated Fr"),
+        "fr-gated page must be excluded by the language filter even though it\
+         is unlocked by the gate phrase: {out}"
+    );
+
+    // Gate phrase absent, language:en → the gated en page is STILL hidden
+    // (the language filter alone does *not* unlock the gate).
+    let (code, out, err) = run(&s, &["search", "gated language:en"]);
+    assert_eq!(code, 0, "stderr: {err}");
+    assert!(
+        !out.contains("Gated En"),
+        "the gate predicate is AND-composed with the language filter — \
+         neither alone is sufficient: {out}"
+    );
+}
+
+/// The label × special-property composition: a `type: label` page that is
+/// *also* gated AND *also* language-restricted must be hidden unless the
+/// query carries the gate phrase, AND must still be excluded by a
+/// non-matching `language:` filter even when the gate phrase is present.
+/// This is the three-way composition the user's plan called out — the
+/// "label page with a gate and a language" case.
+#[test]
+fn label_page_gated_and_language_restricted_composes() {
+    let s = Setup::new("label_gate_lang");
+    // A label page that references two non-indexed files (so the label
+    // expansion contract — label pages expand into the file list — is
+    // exercised *inside* a gated + language-restricted page).
+    //
+    // Intended composition:
+    //   * "gated from search" — the generic `search llm` query must not
+    //     return the label page (the gate predicate blocks it).
+    //   * "unlocked by the gate phrase" — `search "llm secretword"`
+    //     returns the label page.
+    //   * "language filter narrows" — `search "llm secretword language:en"`
+    //     still returns the page (the label page's language is en); a
+    //     wrong language (`language:fr`) still hides it even with the gate
+    //     phrase present.
+    fs::create_dir_all(s.root.join("papers")).unwrap();
+    fs::write(s.root.join("papers/attention.md"), "attention paper\n").unwrap();
+    fs::write(s.root.join("papers/transformer.md"), "transformer paper\n").unwrap();
+    write_page(
+        &s,
+        "LLM_PAPERS.md",
+        "type: label\ntitle: LLM Papers\nlanguage: en\nsearch_required_phrase:\n  - secretword\n",
+        "# LLM Papers\npapers/attention.md\npapers/transformer.md\n",
+    );
+    add(&s);
+
+    // Generic search (no gate phrase in the query): the label page is
+    // *hidden* by the gate, even though it matches "llm" on title/body.
+    let (code, out, err) = run(&s, &["search", "llm"]);
+    assert_eq!(code, 0, "stderr: {err}");
+    assert!(
+        !out.contains("LLM Papers"),
+        "gated label page must not be returned without the gate phrase: {out}"
+    );
+
+    // Gate phrase present: the label page is returned.
+    let (code, out, err) = run(&s, &["search", "llm secretword"]);
+    assert_eq!(code, 0, "stderr: {err}");
+    assert!(
+        out.contains("LLM Papers"),
+        "gated label page must be returned when the gate phrase is in the query: {out}"
+    );
+
+    // Gate phrase + matching language: still returned.
+    let (code, out, err) = run(&s, &["search", "llm secretword language:en"]);
+    assert_eq!(code, 0, "stderr: {err}");
+    assert!(
+        out.contains("LLM Papers"),
+        "gated label page with language en must match the composed \
+         gate+language query: {out}"
+    );
+
+    // Gate phrase + WRONG language: still hidden (the language filter is a
+    // separate AND clause).
+    let (code, out, err) = run(&s, &["search", "llm secretword language:fr"]);
+    assert_eq!(code, 0, "stderr: {err}");
+    assert!(
+        !out.contains("LLM Papers"),
+        "gated label page with language en must be EXCLUDED by a language:fr\
+         filter even though the gate phrase is present: {out}"
+    );
+}
+
+/// Multi-outgoing links: a page A that references two distinct targets B and C
+/// (two wikilinks in the body, both resolvable) must have *both* links in its
+/// forward-links view, and the backlinks views of *both* B and C must show A.
+/// (The earlier `wikilink_backlinks_resolve` test pins the 1-outgoing case;
+/// this pins the fan-out case, which exercises the `upsert_page` bulk-delete-
+/// and re-insert of the `links` rows for A, and the `links` query's `to_path`
+/// resolution for each independent target.)
+#[test]
+fn multi_outgoing_links_fan_out_to_each_target_and_backlink() {
+    let s = Setup::new("multi_out_link");
+    write_page(&s, "a.md", "type: note\ntitle: A\n", "see [[B]] and also [[C]]\n");
+    write_page(&s, "b.md", "type: note\ntitle: B\n", "the B target\n");
+    write_page(&s, "c.md", "type: note\ntitle: C\n", "the C target\n");
+    add(&s);
+
+    // A's forward view: both targets, each with a style tag (the `wikilink`
+    // style in this case).
+    let (code, out, err) = run(&s, &["links", "note:A"]);
+    assert_eq!(code, 0, "stderr: {err}");
+    assert!(out.contains("forward links (2)"), "A has exactly two outbound links: {out}");
+    assert!(out.contains("[ wikilink ]  B"), "B in A's forward list: {out}");
+    assert!(out.contains("[ wikilink ]  C"), "C in A's forward list: {out}");
+
+    // B's backlinks: exactly A.
+    let (code, out, err) = run(&s, &["links", "note:B"]);
+    assert_eq!(code, 0, "stderr: {err}");
+    assert!(
+        out.contains("backlinks (1)") && (out.contains("a.md") || out.contains("note:A")),
+        "B's only backlink is A: {out}"
+    );
+    assert!(!out.contains("note:C"), "C must not appear in B's backlinks: {out}");
+
+    // C's backlinks: exactly A.
+    let (code, out, err) = run(&s, &["links", "note:C"]);
+    assert_eq!(code, 0, "stderr: {err}");
+    assert!(
+        out.contains("backlinks (1)") && (out.contains("a.md") || out.contains("note:A")),
+        "C's only backlink is A: {out}"
+    );
+    assert!(!out.contains("note:B"), "B must not appear in C's backlinks: {out}");
+}
+
+/// A 2-cycle (A↔B): each page has one forward link to the other, and each
+/// page's backlinks view shows the other. No self-loop (A's backlinks is
+/// exactly one row: B; A is not in its own backlinks list). This pins both
+/// the *directed* semantics of the `links` table (from_path / to_path are
+/// *row*-level fields, so a single A→B row is distinct from a B→A row, and
+/// neither appears as a self-loop) AND the absence of any implicit
+/// self-linking the old raw-string-equality path had.
+#[test]
+fn two_cycle_is_directed_with_no_self_loop() {
+    let s = Setup::new("two_cycle");
+    write_page(&s, "a.md", "type: note\ntitle: A\n", "points to [[B]]\n");
+    write_page(&s, "b.md", "type: note\ntitle: B\n", "points to [[A]]\n");
+    add(&s);
+
+    // A's forward: exactly B. A's backlinks: exactly B (the reverse edge
+    // of the cycle). No self-loop (A does not link to A).
+    let (code, out, err) = run(&s, &["links", "note:A"]);
+    assert_eq!(code, 0, "stderr: {err}");
+    assert!(
+        out.contains("forward links (1)") && out.contains("[ wikilink ]  B"),
+        "A's forward is exactly [[B]]: {out}"
+    );
+    assert!(
+        out.contains("backlinks (1)") && (out.contains("b.md") || out.contains("note:B")),
+        "A's backlinks is exactly B (the reverse cycle edge): {out}"
+    );
+
+    // B mirrors this: forward = A, backlinks = A.
+    let (code, out, err) = run(&s, &["links", "note:B"]);
+    assert_eq!(code, 0, "stderr: {err}");
+    assert!(
+        out.contains("forward links (1)") && out.contains("[ wikilink ]  A"),
+        "B's forward is exactly [[A]]: {out}"
+    );
+    assert!(
+        out.contains("backlinks (1)") && (out.contains("a.md") || out.contains("note:A")),
+        "B's backlinks is exactly A (the reverse cycle edge): {out}"
+    );
+}
+
+/// A self-link (A→A): a wikilink in a page's own body that resolves to the
+/// same page. This is the *degenerate* case — the A→A row exists in the
+/// `links` table (the forward view shows it), but the backlinks view
+/// deliberately *filters out self-loops* so a page does not appear as its
+/// own backlink. The exclusion is pinned at `kb/cli/links.rs:96`:
+///   `.filter(|(src,_)| *src != abs_path)`
+/// The rationale: self-backlinks would be pure noise — the page is
+/// trivially in its own closure, so listing it adds nothing. This test
+/// pins that *intentional* asymmetric handling: forward shows the edge,
+/// backlinks does not.
+#[test]
+fn self_link_shows_in_forward_but_is_filtered_from_backlinks() {
+    let s = Setup::new("self_link");
+    write_page(&s, "a.md", "type: note\ntitle: A\n", "self-reference: [[A]]\n");
+    add(&s);
+
+    let (code, out, err) = run(&s, &["links", "note:A"]);
+    assert_eq!(code, 0, "stderr: {err}");
+    // The self-link *is* visible in A's forward view (the forward query
+    // has no self-loop filter — only the backlinks view has one).
+    assert!(
+        out.contains("forward links (1)") && out.contains("[ wikilink ]  A"),
+        "the self-link appears in A's forward view: {out}"
+    );
+    // The self-link is *filtered out* of A's backlinks view by the
+    // `src != abs_path` guard in `cmd_links` — a page does not count as
+    // its own backlink.
+    assert!(
+        out.contains("backlinks: none"),
+        "the self-link must NOT appear in A's backlinks (the CLI filters\
+         self-loops out to avoid noise): {out}"
+    );
+}

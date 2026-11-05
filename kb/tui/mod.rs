@@ -1918,11 +1918,23 @@ impl App {
         // the *row-level* root/rel_path columns are preserved by
         // `upsert_page` (it only re-derives the frontmatter-derived
         // columns); `abs_path` is the identity, so the right row is hit.
+        // `include_language = true` — the TUI commit_edit pass re-derives every
+        // frontmatter-derived column (title, description, tags, gates, body,
+        // *and* `language`) from the freshly-written file. Commit `1bd68dd`
+        // established the pattern: re-index re-sources the frontmatter, and
+        // upsert_page's `COALESCE(NULLIF(...))` sentinel preserves `root`/
+        // `rel_path` when this path passes `""`. `language` is *not* a
+        // sentinel-guarded column — it is replaced unconditionally by
+        // `excluded.language` — so passing `false` here (the historical value)
+        // silently clobbered the page's `language:` column back to NULL on
+        // every TUI edit, breaking `language:` / `language:Null` search
+        // filters on any edited page. `true` matches the refresh/create
+        // callers and is the only value consistent with the design intent.
         let rec = match kb_db::index::build_page(
             std::path::Path::new(&abs_path),
             "",
             "",
-            false,
+            true,
         ) {
             Ok(r) => r,
             Err(err) => {
@@ -4657,6 +4669,76 @@ mod tests {
         );
         // We are still in Edit mode (the commit leaves the mode intact).
         assert!(matches!(app.mode, Mode::Edit(_)), "commit stays in Edit mode");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Regression: a TUI `commit_edit` must preserve the page's `language`
+    /// column in the DB — `open_edit` + `commit_edit` re-derives every
+    /// frontmatter-derived column and upserts, so `language` (unlike the
+    /// `root`/`rel_path` sentinel-guarded pair) must be *re-extracted from the
+    /// file* by the callsite, which passes `include_language=true` to
+    /// `build_page`. The historical value was `false`, which silently nulled
+    /// the column on every TUI edit and broke the `language:` / `language:Null`
+    /// search filters on any edited page. This test exercises the TUI callsite
+    /// *itself* (not just the `build_page`/`upsert_page` contract that the
+    /// kb-db `index` tests already pin): a regression of the callsite value
+    /// back to `false` (without touching `build_page`) still fails here.
+    #[test]
+    fn commit_edit_preserves_language_column() {
+        let db = Db::open_in_memory_test().unwrap();
+        db.migrate().unwrap();
+        let dir = std::env::temp_dir().join("kb_tui_commit_edit_lang");
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("en.md");
+        let fm = "---\ntype: note\ntitle: En Note\nlanguage: en\n---\nbody\n";
+        std::fs::write(&path, fm).unwrap();
+        let abs = path.to_string_lossy().into_owned();
+        // Seed the DB row the same way `refresh` would — with `language` set.
+        db.conn
+            .execute(
+                "INSERT INTO pages (abs_path, id, type, title, language, root, rel_path,
+                                    search_required_phrase, mtime_ns, content_hash)
+                  VALUES (?1, 'note:En Note', 'note', 'En Note', 'en', '/root', 'en.md',
+                          NULL, 0, 'x')",
+                rusqlite::params![abs],
+            )
+            .unwrap();
+        let mut app = App::new(db).unwrap();
+        assert_eq!(app.view.len(), 1);
+        // Sanity: the initial DB value is `en`.
+        let lang_initial: String = app
+            .db
+            .conn
+            .query_row(
+                "SELECT COALESCE(language, '__NULL__') FROM pages WHERE abs_path = ?1",
+                [abs.clone()],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(lang_initial, "en", "precondition: DB row starts with language=en");
+
+        // A no-op commit: open_edit + commit_edit without mutating any field.
+        // This is the *minimal* edit path — the TUI's "open-then-commit" UX —
+        // and is the exact path that historically clobbered the column.
+        assert!(app.open_edit().is_ok());
+        assert!(app.commit_edit().is_ok());
+
+        // After the commit, the DB row must still carry `language: en`.
+        let lang_after: String = app
+            .db
+            .conn
+            .query_row(
+                "SELECT COALESCE(language, '__NULL__') FROM pages WHERE abs_path = ?1",
+                [abs.clone()],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            lang_after,
+            "en",
+            "commit_edit must NOT null the language column (this is the regression\
+             this test guards against)"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 
