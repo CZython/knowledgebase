@@ -1040,6 +1040,17 @@ pub(crate) fn load_corpus(db: &Db) -> Result<Vec<resolver::Page>, (String, i32)>
 /// error" contract, but for *link annotation* (the `links` view) we only
 /// surface the single unambiguous page. The caller can check
 /// `resolver::resolve` directly if it wants the full candidate set.
+///
+/// Intentional cross-surface difference: `resolve_target` (used by the
+/// edge-set / graph view — `links.style` edge semantics, M7b) coerces
+/// `Candidates → first` because a graph edge can only reference ONE target;
+/// the deterministic `abs_path`-sort order makes the choice reproducible.
+/// `annotated_links` (used by `kb links --list` human + JSON, and the TUI
+/// picker) keeps the `candidates` field so that the user (or agent) can see
+/// the *full* candidate set and choose — the picker opens the inline
+/// candidate sub-state for exactly this case (see `LinksState.candidates`).
+/// Both paths call the same `resolver::resolve`, so they never disagree on
+/// *what* the candidate set is — only on how much of it they surface.
 pub(crate) fn resolve_target(pages: &[resolver::Page], target: &str) -> Option<String> {
     match resolver::resolve(target, pages) {
         resolver::Resolution::Unique(abs) => Some(abs),

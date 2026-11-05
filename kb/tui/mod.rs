@@ -286,13 +286,68 @@ pub struct LinksEntry {
     pub abs_path: Option<String>,
 }
 
+/// One row in the **Link-candidate picker** (the sub-state of
+/// [`LinksState::candidates`]): a single candidate page for an ambiguous
+/// link. `abs_path` is the navigation target (what `open_linked` consumes);
+/// `display` is the human-readable `type:slug` id (falls back to the
+/// `abs_path` itself if the corpus snapshot has no such page — defensive,
+/// the corpus is what `annotated_links` was built against, so this should
+/// not happen in practice; the fallback keeps the picker total over any
+/// `LinksEntry` shape).
+#[derive(Debug, Clone)]
+pub struct LinkCandOption {
+    /// The navigation target — what `open_linked` consumes.
+    pub abs_path: String,
+    /// The display id (`type:slug`). Falls back to `abs_path` when the
+    /// corpus snapshot has no such page (should not happen — the candidates
+    /// were resolved against this corpus — but the picker stays total).
+    pub display: String,
+}
+
+/// The **Link-candidate picker** sub-state (M8.5): the inline disambiguation
+/// overlay opened when the user presses `Enter` on an *ambiguous* link in
+/// [`LinksState`]. Instead of the old "run `kb links --list … to
+/// disambiguate"` dead-end, the TUI surfaces the candidate set directly —
+/// `↑/↓` move across the candidates, `Enter` opens the highlighted page
+/// (via the existing `open_linked`, so the `read_return` pop-back mechanics
+/// are identical to the unique-hit path), `Esc` pops back into the flat
+/// list with the cursor restored to the entry the candidate was opened
+/// from (`entry_idx`).
+///
+/// Held *on* `LinksState` (not a separate `Mode` variant) because it is a
+/// sub-view of the same picker state — the user is still "in the link-list
+/// on page A", just zoomed into one entry's collision set. Keeping the
+/// flat-list state intact on the same struct keeps the `Esc`-back-to-list
+/// path a pure `.take()` (no `mode`-swap, no cursor re-derivation).
+#[derive(Debug, Clone)]
+pub struct LinksCandidates {
+    /// The index into [`LinksState::links`] the candidate was opened from —
+    /// so `Esc` restores the flat-list cursor to that entry (the user can
+    /// immediately `↑`/`↓` to another link on the page, or press `Enter`
+    /// again to re-open this one's candidate set).
+    pub entry_idx: usize,
+    /// The candidate pages (same order as `entry.candidates` — sorted by
+    /// `abs_path` per [`crate::resolver::resolve`]).
+    pub options: Vec<LinkCandOption>,
+    /// The highlighted option index (0 when `options` is empty —
+    /// defensive; an ambiguous entry by construction has ≥2).
+    pub cursor: usize,
+    /// The written target (`entry.target`) for the header
+    /// ("disambiguate `[[TARGET]]`") — so the user sees which link they are
+    /// resolving without scrolling back to the flat list.
+    pub target: String,
+}
+
 /// The **Link-picker** state (M8.5). Holds the full per-occurrence list of
 /// the open page's links (in document order), the cursor, and a *return
 /// reference* to the `ReadState` the user came from (the "anchor" — so
 /// `Esc` pops back into Read, not Browse).
 ///
-/// Keybindings: ↑/↓ move · `Enter` opens the selected *unique* link ·
-/// `x` / `q` cancel (back to Read) · `Esc` cancels (back to Read).
+/// Keybindings: ↑/↓ move · `Enter` opens the selected link (unique
+/// immediately; **ambiguous** opens the inline candidate picker via
+/// [`LinksCandidates`], then `Enter` opens the highlighted page) · `x` /
+/// `q` cancel (back to Read) · `Esc` cancels (back to Read, or back to the
+/// flat list when the candidate overlay is active).
 ///
 /// When the user opened `l` from a `FindState`-armed Read, the picker
 /// pre-selects the entry nearest the find hit (see
@@ -302,12 +357,21 @@ pub struct LinksState {
     /// Per-occurrence list (document order, as emitted by
     /// `crate::annotated_links`).
     pub links: Vec<LinksEntry>,
-    /// The selected index into `links` (0 when empty).
+    /// The selected index into `links`. When `candidates` is `Some`, the
+    /// *candidate* picker's cursor is `candidates.cursor`; this index is
+    /// still the entry the candidate view is zoomed into (restored on
+    /// `Esc`-back via `candidates.entry_idx`).
     pub cursor: usize,
     /// The `abs_path` of the *source* page the picker was opened from,
     /// kept so the TUI's "Esc" pops back into it via `load_body` rather
     /// than the Browse view.
     pub source_abs_path: String,
+    /// The inline **candidate picker** sub-state (the ambiguous-link
+    /// overlay). `None` in the flat-list view; `Some` when the user has
+    /// pressed `Enter` on an ambiguous entry. `Esc` clears it (restoring
+    /// the flat-list cursor via `entry_idx`); `Enter` on a highlighted
+    /// option consumes it and opens the target page's Read.
+    pub candidates: Option<LinksCandidates>,
 }
 
 /// A single row in the tag-suggestions pane: the display label (what the
@@ -1321,6 +1385,7 @@ impl App {
             links,
             cursor,
             source_abs_path: abs_path.clone(),
+            candidates: None,
         };
         self.mode = Mode::Links(ls);
         if let Some((al, ac)) = anchor {
@@ -1333,10 +1398,33 @@ impl App {
         Ok(())
     }
 
-    /// Pop back from the Link-picker to the `ReadState` the user armed it
-    /// from (held in `links_return`). Idempotent — a double-Esc can't
-    /// resurrect a second Read (the `.take()` clears the return address).
+    /// Pop back from the Link-picker.
+    ///
+    /// If the **candidate overlay** ([`LinksState::candidates`]) is active,
+    /// `Esc` / `x` pops back into the *flat list* at the entry the candidate
+    /// was opened from (the cursor is restored to that entry so the user can
+    /// `↑`/`↓` to another link or press `Enter` again to re-open the
+    /// candidate set).
+    ///
+    /// Otherwise, pop from the flat list back into the `ReadState` the user
+    /// armed it from (held in `links_return`). Idempotent on the Read side —
+    /// a double-Esc can't resurrect a second Read (the `.take()` clears the
+    /// return address).
     pub fn close_links(&mut self) {
+        // (1) Candidate overlay active: pop back to the flat list.
+        if let Mode::Links(l) = &mut self.mode {
+            if let Some(c) = l.candidates.take() {
+                // Restore the cursor to the entry the candidate overlay was
+                // opened from (so `↑`/`↓` continue the flat-list navigation
+                // at the same point the user left off). Clamp defensively in
+                // case `links` is empty (shouldn't happen — the overlay is
+                // only set on an existing entry, but the pick stays total).
+                l.cursor = if l.links.is_empty() { 0 } else { c.entry_idx.min(l.links.len() - 1) };
+                self.set_info("back to the link list — ↑/↓ move · Enter open · Esc back");
+                return;
+            }
+        }
+        // (2) Flat list: pop to the Read (or Browse if no Read return).
         let rs = self.links_return.take();
         self.mode = match rs {
             Some(rs) => Mode::Read(rs),
@@ -1390,14 +1478,52 @@ impl App {
     }
 
     /// Enter-key action in the Link-picker: read the *selected* entry and
-    /// either open it (unique) or no-op (ambiguous / unresolved). Kept as a
-    /// separate `pub` method (not a match arm) so it can be unit-tested
-    /// directly (`let _ = app.links_open_selected();` and assert on the
-    /// resulting mode + `read_return`).
+    /// either open it (unique), open the **inline candidate picker** for an
+    /// ambiguous entry (the M8.5 sub-state), or no-op for an unresolved
+    /// (dead) link.
+    ///
+    /// If the *candidate picker* is ALREADY active (the overlay case — the
+    /// caller is pressing `Enter` on a highlighted candidate option, not on
+    /// a flat-list entry), this routes to `open_linked` on the highlighted
+    /// option's `abs_path` and clears the overlay (so the user's `Enter`
+    /// from the candidate view behaves exactly like `Enter` from a unique
+    /// flat-list entry — the `read_return` pop-back is identical).
+    ///
+    /// Kept as a separate `pub` method (not a match arm) so it can be
+    /// unit-tested directly (`let _ = app.links_open_selected();` and assert
+    /// on the resulting mode + `read_return`).
     pub fn links_open_selected(&mut self) -> KbResult<()> {
-        // Read the selected entry out of the mode first (the borrow of
-        // `self.mode` conflicts with the `self.open_linked` call below, so
-        // clone the entry + cursor out and drop the borrow).
+        // (a) Candidate overlay active — open the highlighted option's page.
+        {
+            let (overlay_cursor, overlay_len, highlighted, has_overlay) = match &self.mode {
+                Mode::Links(l) => match &l.candidates {
+                    Some(c) => (
+                        c.cursor,
+                        c.options.len(),
+                        c.options.get(c.cursor).cloned(),
+                        true,
+                    ),
+                    None => (0, 0, None, false),
+                },
+                _ => (0, 0, None, false),
+            };
+            if has_overlay {
+                let Some(opt) = highlighted else {
+                    self.set_info("candidate picker — no option at cursor");
+                    return Ok(());
+                };
+                // Consume the overlay before open_linked (open_linked moves
+                // `self.mode` into Read, so the overlay state is
+                // subsumed). The flat-list state stays consistent
+                // (unchanged) — the user's `Esc` from the new Read lands in
+                // the *incoming* Read via `read_return`, not back into the
+                // (now-orphaned) picker state.
+                let _ = (overlay_cursor, overlay_len);
+                self.open_linked(&opt.abs_path)?;
+                return Ok(());
+            }
+        }
+        // (b) Flat list — read the selected entry.
         let (entry, cursor, total) = match &self.mode {
             Mode::Links(l) => {
                 let e = l.links.get(l.cursor).cloned();
@@ -1410,18 +1536,50 @@ impl App {
             self.set_info("link-picker — no entry at cursor");
             return Ok(());
         };
-        // Unique resolution — open it.
+        // Unique resolution — open it (the existing `open_linked` pop-back
+        // handles the `read_return` stack).
         if let Some(abs) = entry.abs_path.clone() {
             return self.open_linked(&abs);
         }
-        // Ambiguous — tell the user how to get there from the CLI.
+        // Ambiguous — open the INLINE candidate picker (the M8.5 sub-state).
+        // The user presses `↑`/`↓` to walk the candidates, `Enter` to open
+        // one (recursion into the (a) arm above), `Esc` to pop back to the
+        // flat list at this entry (via `close_links`'s (1) arm).
         if !entry.candidates.is_empty() {
+            // Resolve each candidate abs_path to a display id (best-effort
+            // corpus lookup — same invariant as the unique-hit path: the
+            // corpus snapshot is the one `annotated_links` was built
+            // against, so any miss means the corpus changed between `l`
+            // and now; falling back to the raw abs_path keeps the picker
+            // usable rather than empty).
+            if let Mode::Links(l) = &mut self.mode {
+                l.candidates = Some(LinksCandidates {
+                    entry_idx: cursor,
+                    options: entry
+                        .candidates
+                        .iter()
+                        .map(|abs| {
+                            let display = self
+                                .rows
+                                .iter()
+                                .find(|r| r.abs_path == *abs)
+                                .map(|r| r.id.clone())
+                                .unwrap_or_else(|| abs.clone());
+                            LinkCandOption {
+                                abs_path: abs.clone(),
+                                display,
+                            }
+                        })
+                        .collect(),
+                    cursor: 0,
+                    target: entry.target.clone(),
+                });
+            }
             self.set_info(format!(
-                "link {} of {} is ambiguous ({} candidates) — run `kb links --list {page}` to disambiguate",
+                "link {} of {} is ambiguous ({} candidates) — ↑/↓ pick · Enter open · Esc back",
                 cursor + 1,
                 total,
-                entry.candidates.len(),
-                page = self.links_source_page()
+                entry.candidates.len()
             ));
             return Ok(());
         }
@@ -1433,6 +1591,86 @@ impl App {
             target = entry.target
         ));
         Ok(())
+    }
+
+    /// Move the highlighted option in the **candidate picker** (M8.5
+    /// sub-state). `down` is `true`/`false` (wrap-around). No-op when
+    /// there is no overlay (the flat-list view) — the caller's `↑`/`↓`
+    /// handlers dispatch the flat-list cursor instead.
+    ///
+    /// Mirrors [`App::move_suggestion`] (the `%` wrap idiom already used
+    /// for the Edit-mode candidate list, see mod.rs:2216). Kept as a
+    /// separate `pub` method so the `input.rs` handler can call it without
+    /// knowing the inner shape (and so the wrapping math is unit-testable
+    /// without a real `App`).
+    pub fn move_link_candidate(&mut self, down: bool) {
+        let (n, cursor) = match &self.mode {
+            Mode::Links(l) => match &l.candidates {
+                Some(c) => (c.options.len(), c.cursor),
+                None => return,
+            },
+            _ => return,
+        };
+        if n == 0 {
+            return;
+        }
+        let next = if down { (cursor + 1) % n } else { (cursor + n - 1) % n };
+        if let Mode::Links(l) = &mut self.mode {
+            if let Some(c) = l.candidates.as_mut() {
+                c.cursor = next;
+            }
+        }
+        self.set_link_candidate_note();
+    }
+
+    /// Jump to the top / bottom of the **candidate picker**.
+    pub fn jump_link_candidate(&mut self, top: bool) {
+        let n = match &self.mode {
+            Mode::Links(l) => match &l.candidates {
+                Some(c) => c.options.len(),
+                None => return,
+            },
+            _ => return,
+        };
+        if n == 0 {
+            return;
+        }
+        if let Mode::Links(l) = &mut self.mode {
+            if let Some(c) = l.candidates.as_mut() {
+                c.cursor = if top { 0 } else { n - 1 };
+            }
+        }
+        self.set_link_candidate_note();
+    }
+
+    /// Status-bar note for the **candidate picker**: the highlighted
+    /// option's display id + target at a glance. Mirrors
+    /// [`App::set_links_note`] for the flat-list case, scoped to the
+    /// overlay. `App` owns it so it is unit-testable.
+    pub fn set_link_candidate_note(&mut self) {
+        let (cursor, total, opt) = match &self.mode {
+            Mode::Links(l) => match &l.candidates {
+                Some(c) => (
+                    c.cursor,
+                    c.options.len(),
+                    c.options.get(c.cursor).cloned(),
+                ),
+                None => (0, 0, None),
+            },
+            _ => (0, 0, None),
+        };
+        let Some(opt) = opt else {
+            self.set_info("candidate picker — no options");
+            return;
+        };
+        // (cursor, total) are unused in the message — we show the option's
+        // display id + position. They are read for the borrow-checker to
+        // see the overlay is active.
+        let _ = (cursor, total);
+        self.set_info(format!(
+            "candidate — Enter open {id} · Esc back to the link list",
+            id = opt.display
+        ));
     }
 
     /// Status-bar note for the Link-picker: the selected entry's context +
@@ -1454,7 +1692,7 @@ impl App {
         let status = match &entry.resolved {
             Some(id) => format!("→ {id} — Enter opens"),
             None if entry.candidates.len() > 1 => format!(
-                "({} candidates — open from the CLI to disambiguate)",
+                "({} candidates — Enter to pick)",
                 entry.candidates.len()
             ),
             None => String::from("unresolved — dead link"),
@@ -1466,15 +1704,6 @@ impl App {
             status = status,
             context = entry.context
         ));
-    }
-
-    /// The `abs_path` of the page the picker was opened from — for status
-    /// messages that need to name it (`self.links_source_page()`).
-    pub fn links_source_page(&self) -> String {
-        match &self.mode {
-            Mode::Links(l) => l.source_abs_path.clone(),
-            _ => String::new(),
-        }
     }
 
     /// Commit the selected row to a new Read mode (loads the body from the
@@ -6969,11 +7198,13 @@ mod tests {
     }
 
     /// `links_open_selected` on an *ambiguous* target: the App must NOT
-    /// open a new Read (no unique winner); it must set an info note naming
-    /// the candidate count; it must NOT consume `links_return` (the picker
-    /// is still open).
+    /// open a new Read (no unique winner); it must open the **inline
+    /// candidate picker** sub-state (the M8.5 overlay on the same
+    /// `LinksState`); it must NOT consume `links_return` (the picker is
+    /// still open — the user is "zoomed in" on one entry's collision set,
+    /// not "out of" the picker).
     #[test]
-    fn links_open_selected_ambiguous_is_noop_and_keeps_picker() {
+    fn links_open_selected_ambiguous_opens_candidate_picker() {
         let db = Db::open_in_memory_test().unwrap();
         db.migrate().unwrap();
         // Two pages with the same slug but different roots → `[[ambig]]`
@@ -6988,18 +7219,308 @@ mod tests {
             Mode::Links(l) => l,
             _ => panic!("expected Links"),
         };
-        assert_eq!(ls.links.len(), 1, "exactly one wikilink in the body");
+        assert_eq!(ls.links.len(), 1, "exactly one wikilink on page A");
         // The link must be ambiguous (two slug matches → Candidates(2)).
         assert!(ls.links[0].resolved.is_none(), "not unique → resolved is None");
         assert_eq!(ls.links[0].candidates.len(), 2, "two candidate abs_paths");
+        // Before `links_open_selected`, the overlay is unset.
+        assert!(ls.candidates.is_none(), "fresh picker has no overlay");
         app.links_open_selected().unwrap();
-        // We must still be in Links (no navigation).
-        assert!(
-            matches!(app.mode, Mode::Links(_)),
-            "ambiguous target does NOT open a new Read"
-        );
-        // And the return stack is intact (the picker is still open).
-        assert!(app.links_return.is_some(), "picker's return stack is unconsumed");
+        // We must still be in Links (the overlay is a sub-state, not a new mode).
+        let ls = match &app.mode {
+            Mode::Links(l) => l,
+            m => panic!("expected Links (with overlay), got {m:?}"),
+        };
+        // The overlay is now set, pointing back to entry 0 (the entry the
+        // user pressed Enter on), with the same 2 options in the same
+        // abs_path order the flat-list entry had.
+        let cand = ls.candidates.as_ref().expect("overlay must be set");
+        assert_eq!(cand.entry_idx, 0, "overlay points back to the flat-list entry");
+        assert_eq!(cand.options.len(), 2, "two candidate options");
+        assert_eq!(cand.cursor, 0, "cursor starts at the first option");
+        assert_eq!(cand.target, "ambig", "header shows the link target for context");
+        // `links_return` must still be set (the user is still "in" the
+        // picker — the overlay is not an exit).
+        assert!(app.links_return.is_some(), "picker's return stack is unconsumed by the overlay");
+        // The flat-list cursor is not advanced by the overlay.
+        assert_eq!(ls.cursor, 0, "flat-list cursor is not advanced by the overlay");
+    }
+
+    /// `move_link_candidate` wraps around in both directions (mirroring the
+    /// `move_suggestion` `%` idiom): `down` from the last option wraps to
+    /// the first, `up` from the first wraps to the last. No-op when there
+    /// is no overlay (the flat-list cursor is untouched).
+    #[test]
+    fn links_candidate_move_wraps_around() {
+        let db = Db::open_in_memory_test().unwrap();
+        db.migrate().unwrap();
+        insert_page(&db, "a", "A", "see [[ambig]] twice");
+        insert_page(&db, "ambig", "Ambig", "first\n");
+        insert_page(&db, "ambig2", "Ambig", "second\n");
+        insert_page(&db, "ambig3", "Ambig", "third\n");
+        let mut app = App::new(db).unwrap();
+        app.selected = 0;
+        app.open_read().unwrap();
+        app.open_links().unwrap();
+        // No overlay yet: `move_link_candidate` is a no-op.
+        app.move_link_candidate(true);
+        app.move_link_candidate(false);
+        let l0 = match &app.mode {
+            Mode::Links(l) => l,
+            _ => panic!(),
+        };
+        assert!(l0.candidates.is_none(), "no overlay → no-op");
+        // Enter the overlay on the ambiguous entry (cursor at 0).
+        app.links_open_selected().unwrap();
+        let ls = match &app.mode {
+            Mode::Links(l) => l,
+            _ => panic!(),
+        };
+        let cand = ls.candidates.as_ref().expect("overlay");
+        assert_eq!(cand.options.len(), 3, "three candidate options");
+        assert_eq!(cand.cursor, 0, "starts at option 0");
+        // Wrap down: 0 → 1 → 2 → 0.
+        app.move_link_candidate(true);
+        assert_eq!(ls_cursor_of(&app), 1, "down: 0 → 1");
+        app.move_link_candidate(true);
+        assert_eq!(ls_cursor_of(&app), 2, "down: 1 → 2");
+        app.move_link_candidate(true);
+        assert_eq!(ls_cursor_of(&app), 0, "down: 2 → 0 (wrap)");
+        // Wrap up: 0 → 2 → 1 → 0.
+        app.move_link_candidate(false);
+        assert_eq!(ls_cursor_of(&app), 2, "up: 0 → 2 (wrap)");
+        app.move_link_candidate(false);
+        assert_eq!(ls_cursor_of(&app), 1, "up: 2 → 1");
+        app.move_link_candidate(false);
+        assert_eq!(ls_cursor_of(&app), 0, "up: 1 → 0");
+    }
+
+    /// `jump_link_candidate(true/false)` jumps to the first / last option
+    /// of the candidate overlay (mirroring the flat-list's Home/End).
+    #[test]
+    fn links_candidate_jump_home_end() {
+        let db = Db::open_in_memory_test().unwrap();
+        db.migrate().unwrap();
+        insert_page(&db, "a", "A", "see [[ambig]] twice");
+        insert_page(&db, "ambig", "Ambig", "first\n");
+        insert_page(&db, "ambig2", "Ambig", "second\n");
+        insert_page(&db, "ambig3", "Ambig", "third\n");
+        let mut app = App::new(db).unwrap();
+        app.selected = 0;
+        app.open_read().unwrap();
+        app.open_links().unwrap();
+        // Enter the overlay (3 options, cursor at 0).
+        app.links_open_selected().unwrap();
+        // Home → 0. End → last. Home → 0.
+        app.jump_link_candidate(true);
+        assert_eq!(ls_cursor_of(&app), 0, "Home → 0");
+        app.jump_link_candidate(false);
+        assert_eq!(ls_cursor_of(&app), 2, "End → last (2 of 3)");
+        app.jump_link_candidate(true);
+        assert_eq!(ls_cursor_of(&app), 0, "Home → 0 again");
+    }
+
+    /// `links_open_selected` from INSIDE the overlay: opens the
+    /// highlighted candidate's page (the same pop-back as the unique-hit
+    /// path — `read_return` is set, `links_return` is cleared). The test
+    /// asserts the *exact* target page is opened (so a bug where the wrong
+    /// candidate's `abs_path` is used is visible): we move to the *last*
+    /// option and click `Enter`; the open must be on that page, not the
+    /// first.
+    #[test]
+    fn links_candidate_enter_opens_the_highlighted_page() {
+        let db = Db::open_in_memory_test().unwrap();
+        db.migrate().unwrap();
+        insert_page(&db, "a", "A", "see [[ambig]] twice");
+        insert_page(&db, "ambig", "Ambig", "first\n");
+        insert_page(&db, "ambig2", "Ambig", "second\n");
+        insert_page(&db, "ambig3", "Ambig", "third\n");
+        let mut app = App::new(db).unwrap();
+        app.selected = 0;
+        app.open_read().unwrap();
+        app.open_links().unwrap();
+        // Enter the overlay.
+        app.links_open_selected().unwrap();
+        let before = match &app.mode {
+            Mode::Links(l) => l,
+            _ => panic!(),
+        };
+        assert_eq!(before.candidates.as_ref().unwrap().options.len(), 3);
+        // Move to the *last* option (index 2).
+        app.jump_link_candidate(false);
+        let last_target = {
+            let ls = match &app.mode {
+                Mode::Links(l) => l,
+                _ => panic!(),
+            };
+            ls.candidates.as_ref().unwrap().options[2].abs_path.clone()
+        };
+        // Click Enter — the open must be on the *last* option.
+        app.links_open_selected().unwrap();
+        let rs = match &app.mode {
+            Mode::Read(r) => r,
+            m => panic!("expected Read on the last candidate, got {m:?}"),
+        };
+        assert_eq!(rs.abs_path, last_target, "the highlighted (last) option's page is open");
+        assert!(app.read_return.is_some(), "incoming Read parked in read_return");
+        assert!(app.links_return.is_none(), "picker's return stack is consumed");
+    }
+
+    /// `close_links` from inside the overlay: pops back into the *flat
+    /// list* (same `Mode::Links`, `candidates == None`), with the
+    /// flat-list cursor RESTORED to `entry_idx` (the entry the overlay was
+    /// opened from). `links_return` is unchanged (we are still "in" the
+    /// picker). A second `Esc` then pops to the Read (the usual path).
+    #[test]
+    fn close_links_overlay_pops_to_flat_list_then_read() {
+        let db = Db::open_in_memory_test().unwrap();
+        db.migrate().unwrap();
+        insert_page(&db, "a", "A", "see [[ambig]] twice and [[ambig]] again");
+        insert_page(&db, "ambig", "Ambig", "first\n");
+        insert_page(&db, "ambig2", "Ambig", "second\n");
+        let mut app = App::new(db).unwrap();
+        app.selected = 0;
+        app.open_read().unwrap();
+        app.open_links().unwrap();
+        // Enter the overlay on entry 0.
+        app.links_open_selected().unwrap();
+        let ls = match &app.mode {
+            Mode::Links(l) => l,
+            _ => panic!(),
+        };
+        let entry_idx = ls.candidates.as_ref().unwrap().entry_idx;
+        assert_eq!(entry_idx, 0);
+        // First `Esc`: overlay → flat list.
+        app.close_links();
+        let ls = match &app.mode {
+            Mode::Links(l) => l,
+            m => panic!("expected Links (flat), got {m:?}"),
+        };
+        assert!(ls.candidates.is_none(), "overlay is cleared");
+        assert_eq!(ls.cursor, entry_idx, "flat-list cursor RESTORED to entry_idx");
+        assert!(app.links_return.is_some(), "still in the picker — links_return intact");
+        // Second `Esc`: flat list → Read (the usual path).
+        app.close_links();
+        assert!(matches!(app.mode, Mode::Read(_)), "second Esc pops to the Read");
+        assert!(app.links_return.is_none(), "links_return is consumed by the flat-list pop");
+    }
+
+    /// The overlay's **cursor** and the **flat-list cursor** are
+    /// independent: walking the overlay's cursor (↑/↓ inside the overlay)
+    /// does NOT advance the flat-list cursor, so an `Esc` back to the flat
+    /// list lands on the *same entry* the user entered the overlay from.
+    #[test]
+    fn close_overlay_restores_entry_not_last_candidate() {
+        let db = Db::open_in_memory_test().unwrap();
+        db.migrate().unwrap();
+        insert_page(&db, "a", "A", "see [[a1]] and [[a2]]");
+        insert_page(&db, "a1x", "A1", "first of a1\n");
+        insert_page(&db, "a1y", "A1", "second of a1\n");
+        insert_page(&db, "a2x", "A2", "first of a2\n");
+        insert_page(&db, "a2y", "A2", "second of a2\n");
+        let mut app = App::new(db).unwrap();
+        app.selected = 0;
+        app.open_read().unwrap();
+        app.open_links().unwrap();
+        // Open the overlay on entry 0 (`[[a1]]`).
+        app.links_open_selected().unwrap();
+        let ls = match &app.mode {
+            Mode::Links(l) => l,
+            _ => panic!(),
+        };
+        let entry_idx = ls.candidates.as_ref().unwrap().entry_idx;
+        assert_eq!(entry_idx, 0, "overlay opened from entry 0");
+        // Walk the overlay's cursor around (no effect on the flat list).
+        app.move_link_candidate(true);
+        app.move_link_candidate(false);
+        // Esc back.
+        app.close_links();
+        let ls = match &app.mode {
+            Mode::Links(l) => l,
+            _ => panic!(),
+        };
+        assert_eq!(ls.cursor, entry_idx, "flat-list cursor is the entry the overlay was opened from (0)");
+        assert!(ls.candidates.is_none());
+    }
+
+    /// `set_link_candidate_note` shows the "Enter open" + "Esc back"
+    /// hints, so the user sees *what happens on Enter* without scrolling
+    /// back to the flat list.
+    #[test]
+    fn set_link_candidate_note_shows_hints() {
+        let db = Db::open_in_memory_test().unwrap();
+        db.migrate().unwrap();
+        insert_page(&db, "a", "A", "see [[ambig]] twice");
+        insert_page(&db, "ambig", "Ambig", "first\n");
+        insert_page(&db, "ambig2", "Ambig", "second\n");
+        let mut app = App::new(db).unwrap();
+        app.selected = 0;
+        app.open_read().unwrap();
+        app.open_links().unwrap();
+        app.links_open_selected().unwrap();
+        app.move_link_candidate(true);
+        app.set_link_candidate_note();
+        let status = app.status.text.clone();
+        assert!(status.contains("Enter open"), "the 'Enter open' hint is present: {status:?}");
+        assert!(status.contains("Esc back"), "the 'Esc back' hint is present: {status:?}");
+    }
+
+    /// `links_open_selected` from inside the overlay consumes `links_return`
+    /// EXACTLY ONCE (the overlay and the flat list share one `links_return`
+    /// slot — there is no separate candidate-Return address on the App).
+    /// The `Esc` back from the opened page lands in the *incoming* Read.
+    #[test]
+    fn links_candidate_enter_consumes_links_return_once() {
+        let db = Db::open_in_memory_test().unwrap();
+        db.migrate().unwrap();
+        insert_page(&db, "a", "A", "see [[ambig]] twice");
+        insert_page(&db, "ambig", "Ambig", "first\n");
+        insert_page(&db, "ambig2", "Ambig", "second\n");
+        let mut app = App::new(db).unwrap();
+        app.selected = 0;
+        app.open_read().unwrap();
+        app.open_links().unwrap();
+        app.links_open_selected().unwrap(); // → overlay
+        assert!(app.links_return.is_some(), "picker parked the Read");
+        app.links_open_selected().unwrap(); // Enter on the highlighted candidate
+        assert!(matches!(app.mode, Mode::Read(_)));
+        assert!(app.links_return.is_none(), "links_return is consumed exactly once");
+        assert!(app.read_return.is_some(), "the incoming Read is parked in read_return");
+    }
+
+    /// `close_links` from inside the overlay does NOT consume
+    /// `links_return` (the user is "zoomed in", not "out of" the picker);
+    /// a *second* `Esc` (now from the flat list) is what consumes it.
+    #[test]
+    fn close_links_overlay_does_not_consume_links_return() {
+        let db = Db::open_in_memory_test().unwrap();
+        db.migrate().unwrap();
+        insert_page(&db, "a", "A", "see [[ambig]] twice");
+        insert_page(&db, "ambig", "Ambig", "first\n");
+        insert_page(&db, "ambig2", "Ambig", "second\n");
+        let mut app = App::new(db).unwrap();
+        app.selected = 0;
+        app.open_read().unwrap();
+        app.open_links().unwrap();
+        assert!(app.links_return.is_some(), "picker parked the Read");
+        app.links_open_selected().unwrap(); // → overlay
+        assert!(app.links_return.is_some(), "still set — the overlay is a sub-state");
+        app.close_links(); // Esc inside overlay → flat list
+        assert!(matches!(app.mode, Mode::Links(_)), "Esc inside overlay → flat list");
+        assert!(app.links_return.is_some(), "links_return survived the overlay pop");
+        app.close_links(); // Esc from flat list → Read
+        assert!(matches!(app.mode, Mode::Read(_)));
+        assert!(app.links_return.is_none(), "links_return is consumed by the flat-list pop");
+    }
+
+    /// Helper: extract the candidate-overlay cursor from an `App` (falls
+    /// back to `usize::MAX` when there is no overlay, so an `assert_eq!`
+    /// against a small index fails loudly if the overlay is missing).
+    fn ls_cursor_of(app: &App) -> usize {
+        match &app.mode {
+            Mode::Links(l) => l.candidates.as_ref().map(|c| c.cursor).unwrap_or(usize::MAX),
+            _ => usize::MAX,
+        }
     }
 
     /// `close_links` must pop the parked Read back into Read mode (not

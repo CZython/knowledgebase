@@ -1711,14 +1711,31 @@ fn browse_row_text(row: &PageRow, width: usize) -> String {
 /// Each row is:
 ///
 /// ```text
-///  <n>  L<line>  [style]  <target>  → <resolved_id | (N candidates) | (unresolved)>
+///  <n>  L<line>  [style]  <target>  → <resolved_id | (N candidates — Enter to pick) | (unresolved)>
 ///      <context>
 /// ```
 ///
 /// Two rows per link (header + context) keeps the context inline, which
 /// is what makes this picker agent-friendly (no offscreen scroll needed
 /// to see "what did this link point at").
+///
+/// When `ls.candidates` is `Some` (the inline **candidate-picker** sub-state),
+/// the list pane shows the candidate options for the entry currently
+/// highlighted — `↑/↓` move the *candidate* cursor (not the flat-list
+/// cursor), `Enter` opens the highlighted option's page (via the shared
+/// `links_open_selected` / `open_linked` path), `Esc` pops back into the
+/// flat list at the entry the candidate was opened from (see
+/// `close_links`).
 fn draw_links(f: &mut ratatui::Frame, app: &App, ls: &LinksState, area: Rect) {
+    // Inline candidate picker (the M8.5 sub-state): a distinct list of
+    // candidate options for the currently-open entry. Routed to a
+    // separate draw path so the header / title / status all
+    // disambiguate from the flat-list case.
+    if let Some(cand) = &ls.candidates {
+        draw_link_candidates(f, app, ls, cand, area);
+        return;
+    }
+
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
@@ -1764,7 +1781,7 @@ fn draw_links(f: &mut ratatui::Frame, app: &App, ls: &LinksState, area: Rect) {
             let status = match &e.resolved {
                 Some(id) => Span::styled(format!("→ {id}"), app.palette.success),
                 None if e.candidates.len() > 1 => Span::styled(
-                    format!("({} candidates — disambiguate from the CLI)", e.candidates.len()),
+                    format!("({} candidates — `Enter` to pick)", e.candidates.len()),
                     app.palette.hint,
                 ),
                 None => Span::styled("(unresolved — dead link)", app.palette.error),
@@ -1823,6 +1840,135 @@ fn draw_links(f: &mut ratatui::Frame, app: &App, ls: &LinksState, area: Rect) {
         );
     let mut state = ListState::default();
     state.select(Some(ls.cursor));
+    f.render_stateful_widget(list, chunks[1], &mut state);
+}
+
+/// Draw the **inline candidate picker** (the M8.5 sub-state of the
+/// link-picker): the candidate options for a single ambiguous entry the
+/// user pressed `Enter` on. The flat-list state (`ls.links`,
+/// `ls.cursor`, `ls.source_abs_path`) is *still present* (the overlay
+/// "zooms in" on a single entry — not a separate `Mode` variant); this
+/// draw shows the candidate list in the same list pane, with the
+/// *overlay's* cursor (`cand.cursor`) as the selection, and the
+/// *source* entry's target (`cand.target`) in the header (so the user
+/// sees which link they are disambiguating without scrolling back to
+/// the flat list).
+///
+/// Keys: `↑`/`↓`/`k`/`j` move the candidate highlight (wrap-around —
+/// see `App::move_link_candidate`), `Home`/`End` jump, `Enter` opens the
+/// highlighted page (routed through the shared
+/// `links_open_selected`/`open_linked` path), `x`/`Esc` pops back to the
+/// flat list at the entry the candidate was opened from
+/// (`cand.entry_idx`).
+fn draw_link_candidates(
+    f: &mut ratatui::Frame,
+    app: &App,
+    ls: &LinksState,
+    cand: &crate::tui::LinksCandidates,
+    area: Rect,
+) {
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(1), // header
+            Constraint::Min(1),    // list
+            Constraint::Length(1), // status
+        ])
+        .split(area);
+
+    // Header: name the entry we are disambiguating + the target. The user
+    // is "zoomed in" on entry `cand.entry_idx` of `ls.links` (the flat
+    // list's cursor still points at that entry — we don't touch it), so
+    // the header makes that explicit.
+    let entry_idx = cand.entry_idx;
+    let entry_count = ls.links.len();
+    let header = format!(
+        "kb tui — links · disambiguating `[[{target}]]` (entry {entry} of {count} on {source}) · ↑↓/jk pick · Enter open · Esc back",
+        target = cand.target,
+        entry = entry_idx + 1,
+        count = entry_count,
+        source = ls.source_abs_path,
+    );
+    let header_widget = Paragraph::new(header).style(app.palette.label);
+    f.render_widget(header_widget, chunks[0]);
+
+    if cand.options.is_empty() {
+        // Defensive — the overlay is only set on an *ambiguous* entry, so
+        // `options.len() >= 2` by construction. But the picker stays
+        // total: render an empty-state note rather than a blank pane.
+        let empty = Paragraph::new(vec![
+            Line::from(vec![
+                Span::styled("   ", Style::default()),
+                Span::styled(
+                    "(no candidates — Esc back to the link list)",
+                    app.palette.info,
+                ),
+            ])
+        ])
+        .wrap(Wrap { trim: false });
+        f.render_widget(empty, chunks[1]);
+        return;
+    }
+
+    // The flat-list cursor (the entry the candidate was opened from) is
+    // read out of `ls` so the title shows *both* the entry index and the
+    // source page — the user can still tell "I'm zoomed into entry 2 of 5"
+    // even from the candidate view.
+    let flat_entry = cand.entry_idx;
+    let flat_count = ls.links.len();
+
+    // Build the ratatui list — one item per candidate option. Each row
+    // is `<display>  (<abs_path>)` so the user can see both the human
+    // id and the navigation identity (a `type:slug` display id can be
+    // shared by multiple pages — e.g. `note:A` for two different bodies —
+    // and the `abs_path` is the stable key `open_linked` consumes).
+    let items: Vec<ListItem> = cand
+        .options
+        .iter()
+        .enumerate()
+        .map(|(i, opt)| {
+            let on = i == cand.cursor;
+            let style = if on {
+                app.palette.active.add_modifier(Modifier::BOLD)
+            } else {
+                app.palette.default
+            };
+            let n_str = format!("{:>3}  ", i + 1);
+            let header_line = Line::from(vec![
+                Span::styled(n_str, style),
+                Span::styled(opt.display.clone(), style),
+                Span::styled("   ", style),
+                Span::styled(
+                    format!("({})", opt.abs_path),
+                    if on { app.palette.info } else { app.palette.dim },
+                ),
+            ]);
+            ListItem::new(vec![header_line])
+        })
+        .collect();
+
+    // ratatui 0.29 — same shape as the flat-list draw above. `highlight_style`
+    // is the `active` palette slot (consistent with the other pickers).
+    let cand_cursor_plus = cand.cursor + 1;
+    let cand_count = cand.options.len();
+    let list = RatList::new(items)
+        .highlight_symbol("▶ ")
+        .highlight_style(app.palette.active)
+        .block(
+            Block::default()
+                .borders(Borders::ALL)
+                .title(format!(
+                    "candidates for `[[{target}]]` (entry {flat} of {total} on {source}) · {cc} of {ccn}",
+                    target = cand.target,
+                    flat = flat_entry + 1,
+                    total = flat_count,
+                    source = ls.source_abs_path,
+                    cc = cand_cursor_plus,
+                    ccn = cand_count,
+                )),
+        );
+    let mut state = ListState::default();
+    state.select(Some(cand.cursor));
     f.render_stateful_widget(list, chunks[1], &mut state);
 }
 

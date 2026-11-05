@@ -12,13 +12,18 @@ the API is still moving; breaking changes are called out explicitly.
   (wikilink and path tokens, in document order), each annotated with its
   line/column, a context snippet, and its inline resolution status
   (`→ type:slug`, `N candidates`, or `unresolved`). `Enter` on a *unique*
-  hit opens the linked page's reader; `Esc`/`x` pops back to the origin
-  Read (one level of return-stack, by design — the CLI `kb links --list`
-  is the "deep backstack" surface). The picker is **find-aware**: with a
-  find session armed, `l` opens the picker with the cursor pre-selected
-  on the link **nearest** the highlighted hit (`nearest_link_index`:
-  `|line|` primary, `|col|` tiebreak), so the "I just finished `f`, now
-  follow this" path is a one-keystroke follow-through.
+  hit opens the linked page's reader; `Enter` on an *ambiguous* target
+  opens the **inline candidate picker** (a sub-state on the same
+  `LinksState`, not a new mode) — ↑/↓/Home/End walk the `abs_path`-sorted
+  candidate set and `Enter` opens the highlighted candidate; `Esc` pops
+  back to the flat list with the cursor restored to the entry the overlay
+  was opened from, so the user can pick a different entry or leave.
+  `Esc`/`x` from the flat list pops back to the origin Read. The picker is
+  **find-aware**: with a find session armed, `l` opens the picker with the
+  cursor pre-selected on the link **nearest** the highlighted hit
+  (`nearest_link_index`: `|line|` primary, `|col|` tiebreak), so the "I
+  just finished `f`, now follow this" path is a one-keystroke
+  follow-through.
 - **`kb links --list` — the agent-friendly link surface.** The existing
   `kb links` verb gains a `--list` mode that emits a *numbered* per-
   occurrence report (both a human-readable form and a stable JSON
@@ -37,9 +42,21 @@ the API is still moving; breaking changes are called out explicitly.
   find-armed title names `l links`. `LinksEntry` was reshaped to drop a
   dead `resolved_id` field and merge the display id into a single
   `resolved: Option<String>` (the pre-joined `type:slug` form); `abs_path`
-  keeps its navigation-target meaning. 140 TUI tests total; the new
-  `find_armed_l_opens_picker_not_typed` and `read_armed_l_opens_picker_without_find`
-  pin the capture order of the `l` arm.
+   keeps its navigation-target meaning. 148 TUI tests total; the new
+   `find_armed_l_opens_picker_not_typed` and `read_armed_l_opens_picker_without_find`
+   pin the capture order of the `l` arm, and the nine inline-candidate
+   picker tests (`links_open_selected_ambiguous_opens_candidate_picker`,
+   `links_candidate_move_wraps_around`, `links_candidate_jump_home_end`,
+   `links_candidate_enter_opens_the_highlighted_page`,
+   `close_links_overlay_pops_to_flat_list_then_read`,
+   `close_overlay_restores_entry_not_last_candidate`,
+   `set_link_candidate_note_shows_hints`,
+   `links_candidate_enter_consumes_links_return_once`,
+   `close_links_overlay_does_not_consume_links_return`) pin the
+   sub-state overlay semantics: overlay is NOT a new `Mode`, `Esc`
+   pops back to the flat list with the cursor restored to `entry_idx`,
+   `Enter` consumes `links_return` exactly once, and the overlay's
+   cursor does not advance the flat-list cursor.
 
 - **`D7` — the package identity is now a `const` in the shared body.**
   `kb/main.rs` defines `pub const VARIANT: &str = "user" | "hardened"` once,

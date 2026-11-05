@@ -311,23 +311,91 @@ fn handle_read(app: &mut App, ev: KeyEvent) -> bool {
 /// Input handler for the **Link-picker** (M8.5) — the TUI half of the
 /// agent-friendly "list links + open one by index" workflow.
 ///
-/// Keys:
-/// - `↑` / `↓` / `k` / `j` — move the cursor over the link list.
-/// - `Home` / `End` — jump to first / last.
-/// - `Enter` — open the selected *unique* link (ambiguous targets are
-///   no-ops: the TUI surfaces them with a "(N candidates)" hint and the
-///   user disambiguates from the CLI; the picker is intentionally dumb).
-/// - `x` / `Esc` — drop the picker (back to the Read the picker was
-///   opened from). Two keys for muscle memory.
-/// - `q` / `C-c` — quit the TUI (consistent with every other mode).
+/// Two sub-states, dispatched by a runtime check on `LinksState::candidates`:
 ///
-/// No character-typed input (the list is positional, not a query), so no
+/// * **Flat list** (`candidates == None`): a numbered list of every
+///   link occurrence in the page body.
+///     - `↑` / `↓` / `k` / `j` — move the cursor over the link list.
+///     - `Home` / `End` — jump to first / last.
+///     - `Enter` — open the selected link.
+///       - **unique** → open the target page's Read (the existing
+///         `open_linked` pop-back via `read_return`).
+///       - **ambiguous** → open the inline **candidate picker** sub-state
+///         on the same `LinksState` (no new `Mode` variant; the sub-state
+///         holds the candidate options + its own cursor).
+///       - **unresolved** → no-op with a status note ("dead link").
+///     - `x` / `Esc` — drop the picker (back to the Read that armed it).
+///     - `q` / `C-c` — quit the TUI (consistent with every other mode).
+/// * **Candidate picker** (`candidates == Some`, the sub-state):
+///     - `↑` / `↓` / `k` / `j` — move across the candidates (wrap-around).
+///     - `Home` / `End` — jump to first / last candidate.
+///     - `Enter` — open the highlighted candidate's page (same pop-back
+///       as the unique-hit path — the caller routes to
+///       `links_open_selected`, which handles both branches).
+///     - `x` / `Esc` — pop back into the flat list at the entry the
+///       candidate was opened from (the cursor is restored to
+///       `entry_idx` by `close_links`).
+///     - `q` / `C-c` — quit the TUI.
+///
+/// No character-typed input (both views are positional), so no
 /// `filter_active`-style top-level check.
 fn handle_links(app: &mut App, ev: KeyEvent) -> bool {
-    match ev.code {
-        KeyCode::Char('q') => true,
-        KeyCode::Char('c') if ev.modifiers.contains(KeyModifiers::CONTROL) => true,
+    // (0) Quit — consistent with every mode.
+    if matches!(ev.code, KeyCode::Char('q'))
+        || (matches!(ev.code, KeyCode::Char('c'))
+            && ev.modifiers.contains(KeyModifiers::CONTROL))
+    {
+        return true;
+    }
 
+    // (1) Candidate picker overlay (the sub-state). When active, the keys
+    // dispatch to the overlay's own cursor / actions — the flat list's
+    // cursor is *not* touched (so `Esc` can pop back into the flat list
+    // with the cursor still on the entry the candidate was opened from —
+    // see `close_links`'s `entry_idx` restore).
+    let overlay_active = matches!(&app.mode, crate::tui::Mode::Links(l) if l.candidates.is_some());
+    if overlay_active {
+        return match ev.code {
+            KeyCode::Up | KeyCode::Char('k') => {
+                app.move_link_candidate(false); // wrap-around (last → first)
+                false
+            }
+            KeyCode::Down | KeyCode::Char('j') => {
+                app.move_link_candidate(true); // wrap-around (first → last)
+                false
+            }
+            KeyCode::Home => {
+                app.jump_link_candidate(true);
+                false
+            }
+            KeyCode::End => {
+                app.jump_link_candidate(false);
+                false
+            }
+            // `Enter` — open the highlighted candidate's page. Routed
+            // through `links_open_selected` (which handles both the
+            // flat-list and the overlay branches — see the method doc),
+            // so the pop-back mechanics are shared.
+            KeyCode::Enter => match app.links_open_selected() {
+                Ok(()) => false,
+                Err((msg, _)) => {
+                    app.set_error(msg);
+                    false
+                }
+            },
+            // Pop back to the flat list at the entry the candidate was
+            // opened from (`close_links` restores the flat-list cursor to
+            // `entry_idx`).
+            KeyCode::Char('x') | KeyCode::Esc => {
+                app.close_links();
+                false
+            }
+            _ => false,
+        };
+    }
+
+    // (2) Flat link list (the default view).
+    match ev.code {
         KeyCode::Up | KeyCode::Char('k') => {
             if let crate::tui::Mode::Links(l) = &mut app.mode {
                 if l.cursor > 0 {
@@ -361,9 +429,11 @@ fn handle_links(app: &mut App, ev: KeyEvent) -> bool {
             false
         }
 
-        // `Enter` opens the selected entry's unique resolution (parked in
-        // `App::read_return` so `Esc`-back lands in the Read the picker
-        // was opened from); a no-op for ambiguous / unresolved targets.
+        // `Enter` — open the selected entry. Dispatches by resolution:
+        // unique → open; ambiguous → open the inline candidate picker;
+        // unresolved → no-op. All three branches live inside
+        // `links_open_selected` so the pop-back is one place, not
+        // three.
         KeyCode::Enter => match app.links_open_selected() {
             Ok(()) => false,
             Err((msg, _)) => {
