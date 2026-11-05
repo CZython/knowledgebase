@@ -76,6 +76,18 @@ pub fn draw(f: &mut Frame, app: &mut App) {
     // minus the header (1), minus the status (1). `draw_read` overwrites this
     // every frame with the exact value from the layout split.
     app.body_pane_height = area.height.saturating_sub(4) as usize; // rough upper bound
+    // Pre-warm the body roll-up *before* the immutable read pass below. `draw`
+    // holds `&mut App`; the match arm immediately takes a `&app` borrow, so we
+    // must issue the one `&mut App` write (the roll-up build/update) here, in
+    // `draw`'s scope, before the borrow. Cheap on a hit (no body or width
+    // change); O(n) on a miss (new page or window resize).
+    let (body, in_read) = match &app.mode {
+        Mode::Read(rs) => (rs.body.clone(), true),
+        _ => (String::new(), false),
+    };
+    if in_read {
+        app.ensure_body_rollup(&body);
+    }
 
     match &app.mode {
         Mode::Browse => draw_browse(f, app, area),
@@ -243,7 +255,19 @@ fn draw_read(f: &mut Frame, app: &App, rs: &ReadState, area: ratatui::layout::Re
     // input pass already computed (FindState.center), so render and input
     // can't desync.
     let rendered = rendered_lines(p, &rs.body);
-    let content_rows = crate::tui::render::rendered_row_count(&rendered, app.body_pane_width);
+    // The roll-up was pre-warmed in `draw` (the `&mut App` frame); `valid` is
+    // `true` for a Read body (the only mode that reaches `draw_read`). We
+    // still keep the `rendered_lines` pass — it feeds the find overlay and
+    // the per-line `read_line` loop below — but the **row-count** math is
+    // now O(1) from the cache instead of re-running `rendered_row_count`.
+    let content_rows = if app.body_rollup.valid {
+        app.body_rollup.total_rows
+    } else {
+        // Defensive fallback: the pre-warm should always have run for a Read
+        // frame, but belt-and-braces in case a future refactor reorders the
+        // calls. One extra O(n) pass, never a panic.
+        crate::tui::render::rendered_row_count(&rendered, app.body_pane_width)
+    };
     let (pad_above, pad_below) = rs
         .find
         .as_ref()
@@ -1164,6 +1188,22 @@ pub fn rendered_row_count(lines: &[String], pane_width: usize) -> usize {
     Paragraph::new(text)
         .wrap(Wrap { trim: false })
         .line_count(pane_width.min(u16::MAX as usize) as u16)
+}
+
+/// The rendered-row count of **one** logical line at `pane_width`, via that
+/// line's own `Paragraph::line_count` (the same `WordWrapper`, so it is exact
+/// for that line). Used to build the body roll-up incrementally — the cache
+/// only ever (re)renders the logical lines that changed since the last
+/// roll-up. `pane_width <= 1` falls back to the logical one-row-per-line
+/// model (the same guard `rendered_row_count` uses).
+pub fn line_row_count(line: &str, pane_width: usize) -> usize {
+    if pane_width <= 1 {
+        return 1;
+    }
+    Paragraph::new(Line::from(line.to_string()))
+        .wrap(Wrap { trim: false })
+        .line_count(pane_width.min(u16::MAX as usize) as u16)
+        .max(1)
 }
 
 /// The style used only as an off-screen "where did this land?" probe. It is

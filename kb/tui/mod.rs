@@ -73,9 +73,10 @@ use ratatui::backend::CrosstermBackend;
 use ratatui::Terminal;
 
 use kb_db::Db;
+#[cfg(test)]
+use unicode_width::UnicodeWidthStr;
 use kb_core::frontmatter as fm;
 use kb_core::section as section_core;
-use unicode_width::UnicodeWidthStr;
 
 use crate::EXIT_ERR;
 use crate::EXIT_OK;
@@ -289,6 +290,51 @@ pub struct ReadState {
     /// `App`) so find can't outlive the page it's searching — opening a
     /// different page clears it via `open_read`/`open_in_editor`.
     pub find: Option<FindState>,
+}
+
+/// The memoized geometry of the body currently open in Read mode: the
+/// per-line rendered row counts, the cumulative first-row table, and the
+/// total, measured by ratatui's `WordWrapper` at a **specific** pane
+/// width. The three `App` hot paths that previously re-measured the whole
+/// body on every call (`scroll_body`, `scroll_body_bottom`,
+/// `find_center_scroll`) plus the every-frame `draw_read` now read these in
+/// O(1); the roll-up is rebuilt only when the body or the pane width
+/// changes. `total_rows` is the full rendered-row count (the
+/// `render::rendered_row_count` value); `total_rows - 1` is the
+/// `scroll_max_top` (largest valid `scroll_top`), and `first_row_of` is the
+/// old per-line `line_first_row`.
+///
+/// **Single-writer invariant:** only the owning `App` builds and replaces
+/// this (via `App::ensure_body_rollup`), against the current `(body, width)`,
+/// so the read paths can assume the numbers match the body that is on
+/// screen. A hash collision or a width mismatch that the key somehow fails
+/// to catch would only change a *scroll clamp* (worst case the user nudges
+/// with arrows) — never a crash, because every read is `.min()`-clamped and
+/// `total_rows` is `saturating_sub`-ed.
+#[derive(Debug, Clone, Default)]
+pub struct BodyRollup {
+    /// `true` once a roll-up has been built for the current key.
+    pub valid: bool,
+    /// The FNV-1a hash of the body the tables were built against (so a key
+    /// change on the body triggers a rebuild — even if the body pointer
+    /// hasn't moved, a new `open_read` with different bytes does).
+    pub body_hash: u64,
+    /// The pane width (cells) the tables were measured at.
+    pub width: usize,
+    /// Per-logical-line **first** rendered row (the cumulative sum of per-line
+    /// counts). `first_row_of[n]` = the rendered row line `n` starts on.
+    pub first_row_of: Vec<usize>,
+    /// The full rendered-row count of the body (sum of the per-line counts).
+    pub total_rows: usize,
+}
+
+impl BodyRollup {
+    /// The largest valid `scroll_top` (the old `scroll_max_top`): one less
+    /// than the total rendered-row count, `saturating_sub` so an empty body
+    /// clamps to 0 rather than underflowing.
+    pub fn max_top(&self) -> usize {
+        self.total_rows.saturating_sub(1)
+    }
 }
 
 /// The reader-find session (the `f` key in Read mode): a *needle* typed by
@@ -645,6 +691,13 @@ pub struct App {
     /// the event loop consumes it (one `terminal.clear()`, then reset) so
     /// the next frame repaints the whole pane from scratch.
     pub needs_clear: bool,
+    /// Memoized body geometry (see [`BodyRollup`]). Rebuilt lazily by
+    /// [`App::ensure_body_rollup`] the first time it's needed for a given
+    /// `(body_revision, pane_width)` key, then read back in O(1). Holding
+    /// it on `App` (not `ReadState`) lets the cache outlive the body: when
+    /// the user re-opens the same page (with the same body bytes) the cache
+    /// is still valid without a re-measure.
+    pub body_rollup: BodyRollup,
 }
 
 /// A `Result` over the `(message, exit-code)` tuple the rest of `kb`
@@ -692,7 +745,60 @@ impl App {
             // already clears; only *post-editor* returns need the forced
             // clear, so start off.
             needs_clear: false,
+            // Empty roll-up: the first body we scroll / center / draw
+            // triggers a build. Default to a known-stale state so the
+            // identity check below always misses.
+            body_rollup: BodyRollup::default(),
         })
+    }
+
+    /// Build (or rebuild) the body roll-up on `self`, so that the caller can
+    /// then read the fields on `self.body_rollup` with a fresh, short-lived
+    /// immutable borrow. Kept as a **void** method (not `-> &BodyRollup`) so
+    /// that the `&mut self` borrow ends *before* the caller takes its
+    /// subsequent `&self` reads — this is what lets the read paths mix
+    /// `self.body_rollup.max_top()` + `self.palette` + `self.body_pane_width`
+    /// (and friends) in the same expression without tripping E0502, and it
+    /// is the entire reason this is written the way it is.
+    ///
+    /// The key is `(body_hash, pane_width)`: the body is *hashed* (a 64-bit
+    /// FNV-1a on the raw body string — see [`fnv1a`]) and the width is an
+    /// exact `usize` match. A key hit means the tables are already valid,
+    /// so the whole call is **O(1)**. A miss triggers a single O(n) pass —
+    /// one `line_row_count` (`WordWrapper`) call per logical line — and
+    /// installs the result; the next hit is free.
+    ///
+    /// **Correctness guard:** a 64-bit FNV-1a collision that maps two
+    /// different bodies to the same `body_hash` would return a stale
+    /// roll-up. That is acceptable for a TUI scroll-clamp (worst case: the
+    /// user nudges with arrows); it cannot panic or corrupt memory because
+    /// every read site is `.min()`-clamped and `total_rows` is
+    /// `saturating_sub`-ed. If a stronger guarantee is ever needed, swap
+    /// the FNV-1a for 128-bit xxHash + body byte length.
+    pub fn ensure_body_rollup(&mut self, body: &str) {
+        let hash = fnv1a(body.as_bytes());
+        let stale = {
+            let r = &self.body_rollup;
+            !r.valid || r.body_hash != hash || r.width != self.body_pane_width
+        };
+        if !stale {
+            return;
+        }
+        let width = self.body_pane_width;
+        let mut first_row_of: Vec<usize> = Vec::new();
+        let mut acc: usize = 0;
+        for line in body.lines() {
+            let per = crate::tui::render::line_row_count(line, width);
+            first_row_of.push(acc);
+            acc += per;
+        }
+        self.body_rollup = BodyRollup {
+            valid: true,
+            body_hash: hash,
+            width,
+            first_row_of,
+            total_rows: acc,
+        };
     }
 
     /// Install a resolved palette (P2). Called from `run_tui` after
@@ -787,10 +893,16 @@ impl App {
     /// event loop draws before it dispatches the key, so this mirror is
     /// always current.
     pub fn scroll_body(&mut self, delta: isize) {
+        // Take the current body + scroll out of the borrow (we need `&mut self`
+        // for the roll-up, so we can't hold a borrow simultaneously).
+        let (body, cur) = match &self.mode {
+            Mode::Read(r) => (r.body.clone(), r.scroll_top),
+            _ => return,
+        };
+        self.ensure_body_rollup(&body);
+        let max_top = self.body_rollup.max_top();
+        let n = cur as isize + delta;
         if let Mode::Read(r) = &mut self.mode {
-            let lines = crate::tui::render::rendered_lines(&self.palette, &r.body);
-            let max_top = scroll_max_top(&lines, self.body_pane_width);
-            let n = r.scroll_top as isize + delta;
             r.scroll_top = n.clamp(0, max_top as isize) as usize;
         }
     }
@@ -804,21 +916,28 @@ impl App {
 
     /// Scroll the Read body to the bottom (the last rendered row).
     pub fn scroll_body_bottom(&mut self) {
-        // Compute the max from the rendered body + any stored find centering
-        // up front (immutable reads), then write scroll_top (one mutable write).
-        let target = {
-            let rs = match &self.mode {
-                Mode::Read(rs) => rs,
-                _ => return,
-            };
-            let plain = || {
-                let lines = crate::tui::render::rendered_lines(&self.palette, &rs.body);
-                scroll_max_top(&lines, self.body_pane_width)
-            };
-            match &rs.find {
-                Some(fs) => fs.center.as_ref().map(|c| c.scroll_max_top).unwrap_or_else(plain),
-                None => plain(),
-            }
+        // Read the body + find-center up front (immutable), then compute the
+        // plain max via the roll-up (which needs `&mut self`), then write the
+        // target. Two passes over `self` are required by the borrow checker,
+        // so we copy what we need into locals and do the roll-up once.
+        let (body, center_max) = match &self.mode {
+            Mode::Read(rs) => (
+                rs.body.clone(),
+                rs.find
+                    .as_ref()
+                    .and_then(|fs| fs.center.as_ref())
+                    .map(|c| c.scroll_max_top),
+            ),
+            _ => return,
+        };
+        // If find has no stored center, the plain max (from the roll-up) is
+        // what we use; if it does, the stored center already carries the
+        // pad-aware max and we skip the roll-up.
+        let target: usize = if let Some(c) = center_max {
+            c
+        } else {
+            self.ensure_body_rollup(&body);
+            self.body_rollup.max_top()
         };
         if let Mode::Read(rs) = &mut self.mode {
             rs.scroll_top = target;
@@ -933,59 +1052,66 @@ impl App {
     ///     stays where they are — no jump to row 0).
     /// Total (a no-op outside Read mode or when find is closed).
     pub fn find_center_scroll(&mut self) {
-        // Compute everything up front using immutable access (the borrow
-        // checker can't hold `&self` reads and `&mut self` writes at once).
-        let new_matches: Vec<(usize, usize)>;
-        let new_center: Option<FindPadding>;
-        {
-            let r = match &self.mode {
-                Mode::Read(r) => r,
-                _ => return,
-            };
-            let fs = match &r.find {
-                Some(fs) => fs,
+        // Read the body + needle up front (immutable), so the roll-up and
+        // center compute don't hold a borrow across the `&mut self` writes.
+        let (body, needle, cursor, cur_top) = match &self.mode {
+            Mode::Read(r) => match &r.find {
+                Some(fs) => (
+                    r.body.clone(),
+                    fs.needle.clone(),
+                    fs.cursor,
+                    r.scroll_top,
+                ),
                 None => return,
-            };
-            let lines = crate::tui::render::rendered_lines(&self.palette, &r.body);
-            let m = find_matches(&lines, &fs.needle);
-            new_matches = m;
-            let sel_idx = if new_matches.is_empty() {
-                None
-            } else {
-                Some(fs.cursor.min(new_matches.len() - 1))
-            };
-            new_center = sel_idx.and_then(|cur| {
-                find_padding_for_cursor(
-                    &lines,
-                    &new_matches,
-                    cur,
-                    self.body_pane_width,
-                    self.body_pane_height,
-                )
-            });
-        }
-        // Write back.
+            },
+            _ => return,
+        };
+        // Build / refresh the roll-up on the body (O(1) on a hit; O(n) only
+        // when the body or width has actually changed). After the call the
+        // roll-up lives on `self.body_rollup`; we copy the two fields we
+        // need into locals (both are `usize` / a `Vec<usize>`, cheap to
+        // read) so the `&self` reads below don't conflict with the
+        // subsequent `&mut self` write.
+        self.ensure_body_rollup(&body);
+        let total_rows = self.body_rollup.total_rows;
+        // O(n) clone of the per-line first-row table (one `usize` per logical
+        // line — typically far smaller than the body itself). Cloned once,
+        // then the closure below reads only locals, so the `&mut self`
+        // borrow ends cleanly before the `&mut self` write after.
+        let first_row_of = self.body_rollup.first_row_of.clone();
+        let max_plain = total_rows.saturating_sub(1);
+        let pane_h = self.body_pane_height;
+        let pane_w = self.body_pane_width;
+        let lines = crate::tui::render::rendered_lines(&self.palette, &body);
+        let m = find_matches(&lines, &needle);
+        let sel_idx = if m.is_empty() { None } else { Some(cursor.min(m.len() - 1)) };
+        let new_center: Option<FindPadding> = sel_idx.map(|cur| {
+            let (line_idx, byte_off) = m[cur];
+            // Resolve the hit's *actual* rendered row (ratatui's own
+            // `WordWrapper`, via an off-screen `Buffer` probe) — the
+            // per-line row tables in the roll-up can't see a hit several
+            // wraps down a long line, so we call out to ratatui for that,
+            // falling back to the line's first row from the cached table.
+            let hit_row = crate::tui::render::match_rendered_row(&lines, (line_idx, byte_off), pane_w)
+                .unwrap_or_else(|| first_row_of.get(line_idx).copied().unwrap_or(0));
+            find_padding(hit_row, total_rows, pane_h)
+        });
+        let max = new_center
+            .as_ref()
+            .map(|c| c.scroll_max_top)
+            .unwrap_or(max_plain);
+        let target = new_center
+            .as_ref()
+            .map(|c| c.scroll_top.min(c.scroll_max_top))
+            .unwrap_or(cur_top);
         if let Mode::Read(r) = &mut self.mode {
             let fs = match r.find.as_mut() {
                 Some(fs) => fs,
                 None => return,
             };
-            fs.matches = new_matches.clone();
-            fs.cursor = fs.cursor.min(fs.matches.len().saturating_sub(1));
+            fs.matches = m.clone();
+            fs.cursor = cursor.min(fs.matches.len().saturating_sub(1));
             fs.center = new_center;
-            // Clamp the scroll to the pad-aware max; target the center row
-            // when a match is selected, else keep the current row.
-            let max = new_center
-                .as_ref()
-                .map(|c| c.scroll_max_top)
-                .unwrap_or_else(|| {
-                    let lines = crate::tui::render::rendered_lines(&self.palette, &r.body);
-                    scroll_max_top(&lines, self.body_pane_width)
-                });
-            let target = new_center
-                .as_ref()
-                .map(|c| c.scroll_top.min(c.scroll_max_top))
-                .unwrap_or(r.scroll_top);
             r.scroll_top = target.min(max);
         }
     }
@@ -2553,8 +2679,31 @@ impl App {
 /// monotonic.
 ///
 /// Pure + total. Empty body → 0.
+///
+/// Now test-only: the production scroll mutators read
+/// [`BodyRollup::max_top`] instead (the per-frame roll-up). Kept as a pure
+/// helper so the "scroll max is a pure function of body + width" invariant
+/// stays unit-testable without spinning up an `App`.
+#[cfg(test)]
 pub fn scroll_max_top(lines: &[String], pane_width: usize) -> usize {
     crate::tui::render::rendered_row_count(lines, pane_width).saturating_sub(1)
+}
+
+/// A 64-bit FNV-1a over `data` — the small, allocation-free hash the body
+/// roll-up cache keys on. Not cryptographic; a collision only costs one
+/// scroll-clamp nudge (see `BodyRollup`'s `single-writer invariant`). Inlined
+/// here (4 lines) rather than pulling `fnv` into the TUI crate's dep surface
+/// so that (a) `kb-hardened` (which strips TUI deps) never sees it and (b)
+/// the cache stays on the cheap path even if we ever add other deps.
+fn fnv1a(data: &[u8]) -> u64 {
+    const FNV_OFFSET: u64 = 0xcbf2_9ce4_8422_2325;
+    const FNV_PRIME: u64 = 0x0000_0100_0000_01b3;
+    let mut h = FNV_OFFSET;
+    for b in data {
+        h ^= *b as u64;
+        h = h.wrapping_mul(FNV_PRIME);
+    }
+    h
 }
 
 // ===================================================================
@@ -2584,6 +2733,11 @@ pub fn scroll_max_top(lines: &[String], pane_width: usize) -> usize {
 /// and centering math uses `render::rendered_row_count` (ratatui's own
 /// `WordWrapper`). A blank line is 1 row; `width < 1` clamps to 1-cell rows.
 /// **Total** (no panics, no IO).
+///
+/// Test-only: superseded by the production `BodyRollup.first_row_of` table
+/// (built from `render::line_row_count`), which the find/scroll paths now
+/// read.
+#[cfg(test)]
 fn line_row_count(line: &str, width: usize) -> usize {
     if line.is_empty() {
         return 1;
@@ -2598,6 +2752,10 @@ fn line_row_count(line: &str, width: usize) -> usize {
 /// comes from `render::match_rendered_row` so it accounts for wrapping within
 /// the line. `width < 1` clamps to 1-cell rows. A blank line contributes 1
 /// row (it renders as a single, empty row).
+///
+/// Test-only: the production centering path reads
+/// [`BodyRollup::first_row_of`] instead.
+#[cfg(test)]
 fn line_first_row(lines: &[String], width: usize) -> Vec<usize> {
     let mut out = Vec::new();
     let mut acc = 0usize;
@@ -2755,6 +2913,12 @@ pub struct FindPadding {
 /// the list). `pane_width` 0/1 falls back to the logical-line row model
 /// (same guard `scroll_max_top` uses). `pane_height` 0 ⇒ no padding
 /// applied (the `FindPadding` is all-zero).
+///
+/// Test-only: the production `App::find_center_scroll` path inlines this
+/// same math against the cached `BodyRollup` (so the per-frame re-measure is
+/// gone), but this helper is kept pure + self-contained so the
+/// row-resolution and clamp behavior stays unit-testable in isolation.
+#[cfg(test)]
 fn find_padding_for_cursor(
     lines: &[String],
     matches: &[(usize, usize)],
@@ -3731,6 +3895,52 @@ mod tests {
         // degenerate width 0/1 → the logical-line fallback.
         assert_eq!(scroll_max_top(&lines("a\nb\nc"), 0), 2);
         assert_eq!(scroll_max_top(&lines("a\nb\nc"), 1), 2);
+    }
+
+    /// The roll-up cache's `total_rows` is the single source of truth for the
+    /// scroll range — if it ever desyncs from what ratatui's `WordWrapper`
+    /// actually paints, the user's scroll clamp is wrong. This test pins
+    /// `BodyRollup.total_rows` to `render::rendered_row_count` (which calls
+    /// ratatui's own `Paragraph::line_count`) for a body with heavy
+    /// character- and word-wrapping at a narrow pane, at multiple widths so
+    /// any future change that makes one side of the equation forget to track
+    /// the other is immediately caught. The same check is done at
+    /// `width = 1` (the degenerate fallback path) and at `width = 80` (most
+    /// lines do not wrap at all — the two engines should still agree, not
+    /// *only* when wrapping kicks in).
+    #[test]
+    fn body_rollup_total_rows_matches_ratatui_wrapper() {
+        // A body that exercises both word-wrap (long tokens at a narrow
+        // width) and multi-line structure at once. The specific tokens
+        // matter only in that they are longer than 10 cells (the narrow
+        // width below) so `WordWrapper` is forced to break them — the exact
+        // regression this cache guards.
+        let db = Db::open_in_memory_test().unwrap();
+        db.migrate().unwrap();
+        // "abcdefghijklmnopqrst" (22 chars) at width 10 → WordWrapper must
+        // wrap it; at width 80 → single row.
+        insert_page(&db, "p", "P", "abcdefghijklmnopqrst\nshort\nanother long line here that should wrap at 10\n\nlast");
+        let mut app = App::new(db).unwrap();
+        app.open_read().unwrap();
+        let body = match &app.mode {
+            Mode::Read(r) => r.body.clone(),
+            _ => panic!("expected Read"),
+        };
+        let pal = app.palette;
+        let rendered = crate::tui::render::rendered_lines(&pal, &body);
+        for w in [usize::MAX, 0, 1, 10, 12, 80] {
+            let w = if w == usize::MAX { 80 } else { w };
+            app.body_pane_width = w;
+            // Force a rebuild from scratch (different body_hash from a
+            // previous width — but the hash is the same; force via `valid`).
+            app.body_rollup.valid = false;
+            app.ensure_body_rollup(&body);
+            assert!(app.body_rollup.valid, "roll-up should be valid after ensure");
+            let cached = app.body_rollup.total_rows;
+            let reference = crate::tui::render::rendered_row_count(&rendered, w);
+            assert_eq!(cached, reference,
+                "total_rows desynced from ratatui at width {w}: cached={cached} reference={reference}");
+        }
     }
 
     /// The scroll mutators are total + bounded: on any body the resulting
