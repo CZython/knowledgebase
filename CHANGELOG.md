@@ -42,21 +42,15 @@ the API is still moving; breaking changes are called out explicitly.
   find-armed title names `l links`. `LinksEntry` was reshaped to drop a
   dead `resolved_id` field and merge the display id into a single
   `resolved: Option<String>` (the pre-joined `type:slug` form); `abs_path`
-   keeps its navigation-target meaning. 148 TUI tests total; the new
-   `find_armed_l_opens_picker_not_typed` and `read_armed_l_opens_picker_without_find`
-   pin the capture order of the `l` arm, and the nine inline-candidate
-   picker tests (`links_open_selected_ambiguous_opens_candidate_picker`,
-   `links_candidate_move_wraps_around`, `links_candidate_jump_home_end`,
-   `links_candidate_enter_opens_the_highlighted_page`,
-   `close_links_overlay_pops_to_flat_list_then_read`,
-   `close_overlay_restores_entry_not_last_candidate`,
-   `set_link_candidate_note_shows_hints`,
-   `links_candidate_enter_consumes_links_return_once`,
-   `close_links_overlay_does_not_consume_links_return`) pin the
-   sub-state overlay semantics: overlay is NOT a new `Mode`, `Esc`
-   pops back to the flat list with the cursor restored to `entry_idx`,
-   `Enter` consumes `links_return` exactly once, and the overlay's
-   cursor does not advance the flat-list cursor.
+    keeps its navigation-target meaning. 152 TUI tests total: 9
+    inline-candidate state-machine tests (covering the overlay semantics
+    — not a new `Mode`, `Esc` pops back with cursor restored to
+    `entry_idx`, `Enter` consumes `links_return` exactly once, the
+    overlay's cursor is independent of the flat-list cursor) + 4
+    inline-candidate render tests (covering the *row the user reads*:
+    display + `abs_path` in parens, stable 1-based number column, the
+    full `abs_path` kept whole, text stable across the highlighted /
+    unselected state) + 2 capture-order tests + the baseline TUI suite.
 
 - **`D7` — the package identity is now a `const` in the shared body.**
   `kb/main.rs` defines `pub const VARIANT: &str = "user" | "hardened"` once,

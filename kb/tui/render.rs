@@ -57,7 +57,7 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, List as RatList, ListItem, ListState, Paragraph, Widget, Wrap};
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
-use crate::tui::{App, FmMeta, LinksState, Mode, PageRow, ReadState, StatusKind};
+use crate::tui::{App, FmMeta, LinkCandOption, LinksState, Mode, PageRow, ReadState, StatusKind};
 use crate::tui::palette::Palette;
 
 /// Draw the whole screen for `app`. Called once per event-loop tick.
@@ -1843,6 +1843,46 @@ fn draw_links(f: &mut ratatui::Frame, app: &App, ls: &LinksState, area: Rect) {
     f.render_stateful_widget(list, chunks[1], &mut state);
 }
 
+/// Build the row of spans for **one** candidate option in the inline
+/// candidate picker's list. `idx` is the 0-based position in the list
+/// (1-based for display, right-aligned to 3 cells); `on` selects
+/// highlighted vs. not.
+///
+/// Extracted from `draw_link_candidates` so it can be unit-tested for
+/// the *flattened* text the user reads (the same coverage convention as
+/// `browse_row_text`).
+fn candidate_row_spans(
+    p: &Palette,
+    idx: usize,
+    opt: &LinkCandOption,
+    on: bool,
+) -> Vec<Span<'static>> {
+    let n_str = format!("{:>3}  ", idx + 1);
+    let base = if on {
+        p.active.add_modifier(Modifier::BOLD)
+    } else {
+        p.default
+    };
+    let path_style = if on { p.info } else { p.dim };
+    vec![
+        Span::styled(n_str, base),
+        Span::styled(opt.display.clone(), base),
+        Span::styled("   ", base),
+        Span::styled(format!("({})", opt.abs_path), path_style),
+    ]
+}
+
+/// Flattened text for a candidate option's row (for unit tests — same
+/// convention as `browse_row_text`).
+#[cfg(test)]
+fn candidate_row_text(idx: usize, opt: &LinkCandOption, on: bool) -> String {
+    let p = Palette::default_palette();
+    candidate_row_spans(&p, idx, opt, on)
+        .iter()
+        .map(|s| s.content.as_ref())
+        .collect::<String>()
+}
+
 /// Draw the **inline candidate picker** (the M8.5 sub-state of the
 /// link-picker): the candidate options for a single ambiguous entry the
 /// user pressed `Enter` on. The flat-list state (`ls.links`,
@@ -1918,32 +1958,22 @@ fn draw_link_candidates(
     let flat_count = ls.links.len();
 
     // Build the ratatui list — one item per candidate option. Each row
-    // is `<display>  (<abs_path>)` so the user can see both the human
-    // id and the navigation identity (a `type:slug` display id can be
-    // shared by multiple pages — e.g. `note:A` for two different bodies —
-    // and the `abs_path` is the stable key `open_linked` consumes).
+    // is `<n>  <display>   (<abs_path>)` so the user can see both the
+    // human id AND the navigation identity (a `type:slug` display id can
+    // be shared by multiple pages — e.g. `note:A` for two different
+    // bodies — and the `abs_path` is the stable key `open_linked`
+    // consumes). The number is 1-based and right-aligned for a column of
+    // candidate rows; the `abs_path` is de-emphasized (dimmed for
+    // unselected, info for the highlighted row) so the display id stays
+    // the focal point.
     let items: Vec<ListItem> = cand
         .options
         .iter()
         .enumerate()
         .map(|(i, opt)| {
             let on = i == cand.cursor;
-            let style = if on {
-                app.palette.active.add_modifier(Modifier::BOLD)
-            } else {
-                app.palette.default
-            };
-            let n_str = format!("{:>3}  ", i + 1);
-            let header_line = Line::from(vec![
-                Span::styled(n_str, style),
-                Span::styled(opt.display.clone(), style),
-                Span::styled("   ", style),
-                Span::styled(
-                    format!("({})", opt.abs_path),
-                    if on { app.palette.info } else { app.palette.dim },
-                ),
-            ]);
-            ListItem::new(vec![header_line])
+            let spans = candidate_row_spans(&app.palette, i, opt, on);
+            ListItem::new(vec![Line::from(spans)])
         })
         .collect();
 
@@ -2639,5 +2669,95 @@ mod tests {
         assert_eq!(byte_style(&out, 5), Some(p.find_match), "byte 5 in range → find_match");
         assert_eq!(byte_style(&out, 1), Some(p.default), "byte 1 out of range stays default");
         assert_eq!(byte_style(&out, 6), Some(p.default), "byte 6 out of range stays default");
+    }
+
+    // ── M8.5 inline candidate-picker — row construction ────────────────
+    // Same coverage convention as the `browse_row_*` tests: the row the
+    // user reads is the load-bearing part of the picker; the ratatui
+    // widget machinery (Layout, ListState, borders) is not. These tests
+    // flatten the spans and assert the *text* a user would see, so a
+    // regression that drops the `abs_path`, renumbers the candidate, or
+    // swaps the order of (display, abs_path) is caught without a live
+    // terminal.
+
+    fn cand(display: &str, abs_path: &str) -> LinkCandOption {
+        LinkCandOption {
+            abs_path: abs_path.to_string(),
+            display: display.to_string(),
+        }
+    }
+
+    /// A candidate row renders as `<n>  <display>   (<abs_path>)` — the
+    /// number is 1-based (right-aligned to 3 cells) and the `abs_path`
+    /// is *always* present in parentheses (the navigation identity the
+    /// user needs when two pages share a display id, e.g. `note:A` for
+    /// two different bodies).
+    #[test]
+    fn candidate_row_renders_display_and_abs_path() {
+        let o1 = cand("note:A", "/root/a1.md");
+        let o2 = cand("note:A", "/root/a2.md"); // same display id, *different* path
+        assert_eq!(
+            candidate_row_text(0, &o1, false),
+            "  1  note:A   (/root/a1.md)",
+            "first option: 1-based number, display, then abs_path; got"
+        );
+        assert_eq!(
+            candidate_row_text(1, &o2, false),
+            "  2  note:A   (/root/a2.md)",
+            "second option: same display id, *different* abs_path — the user can tell them apart"
+        );
+    }
+
+    /// The 1-based number column is *stable-width* for a reasonable
+    /// candidate count (≤ 999): the right-aligned to-3 rule means
+    /// option 1 renders as `"  1  "`, option 12 as `" 12  "`, option 999
+    /// as `"999  "` — one cell of visual drift per digit, never a full
+    /// column shift. (The `resolver` dedups by `abs_path`, so a real
+    /// corpus has at most two or three candidates, but the picker stays
+    /// total over a pathological one.)
+    #[test]
+    fn candidate_row_number_is_stable_width() {
+        let o = cand("note:A", "/a.md");
+        assert_eq!(candidate_row_text(0, &o, false), "  1  note:A   (/a.md)");
+        assert_eq!(candidate_row_text(1, &o, false), "  2  note:A   (/a.md)");
+        assert_eq!(candidate_row_text(9, &o, false), " 10  note:A   (/a.md)");
+        assert_eq!(candidate_row_text(99, &o, false), "100  note:A   (/a.md)");
+        assert_eq!(candidate_row_text(998, &o, false), "999  note:A   (/a.md)");
+    }
+
+    /// The `abs_path` is *always* shown, even when it is *long* — it is
+    /// the stable identity `open_linked` consumes and the *only* thing a
+    /// user can key off to tell two same-named pages apart. (The flat
+    /// list's `browse_row` truncates the path for width; the candidate
+    /// row does not — the candidate set is ≤3 rows, so a long path is
+    /// better than a truncated one.)
+    #[test]
+    fn candidate_row_keeps_the_abs_path_whole_when_it_is_long() {
+        let long = "a-very-long-absolute-path/with-many-segments/to/a/page.md";
+        let o = cand("note:A", long);
+        let text = candidate_row_text(0, &o, false);
+        assert!(
+            text.contains(&format!("({})", long)),
+            "the full abs_path must be present in its parens even when long; got {text:?}"
+        );
+        assert_eq!(
+            text,
+            format!("  1  note:A   ({long})"),
+            "display + full path, one row"
+        );
+    }
+
+    /// Highlighted vs. unselected rows *render the same text* (the
+    /// palette role — `active + BOLD` for selected, `default` for not —
+    /// is a styling choice the palette owns, not the row's content).
+    /// This pins that the *row content* is stable across the cursor
+    /// position: moving the cursor (↑/↓) changes the *style*, not the
+    /// *text* the user reads.
+    #[test]
+    fn candidate_row_text_is_stable_across_selection() {
+        let o = cand("note:A", "/a.md");
+        let on = candidate_row_text(0, &o, true);
+        let off = candidate_row_text(0, &o, false);
+        assert_eq!(on, off, "the same option renders the same text whether or not it is highlighted");
     }
 }
