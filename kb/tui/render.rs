@@ -57,7 +57,7 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, List as RatList, ListItem, ListState, Paragraph, Widget, Wrap};
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
-use crate::tui::{App, FmMeta, Mode, PageRow, ReadState, StatusKind};
+use crate::tui::{App, FmMeta, LinksState, Mode, PageRow, ReadState, StatusKind};
 use crate::tui::palette::Palette;
 
 /// Draw the whole screen for `app`. Called once per event-loop tick.
@@ -96,6 +96,7 @@ pub fn draw(f: &mut Frame, app: &mut App) {
         Mode::Alias(ast) => draw_alias(f, app, ast, area),
         Mode::Roots(rs) => draw_roots(f, app, rs, area),
         Mode::Search(ss) => draw_search(f, app, ss, area),
+        Mode::Links(ls) => draw_links(f, app, ls, area),
     }
 }
 
@@ -1697,10 +1698,153 @@ fn browse_row_text(row: &PageRow, width: usize) -> String {
         .collect::<String>()
 }
 
+// =====================================================================
+//  M8.5 — Link-picker render
+// =====================================================================
+
+/// Draw the **Link-picker** (M8.5): a single full-width list pane of the
+/// source page's links, pre-annotated with resolution. The list is the
+/// *same* order as `crate::annotated_links` (document order) — the
+/// user's "this is the 3rd link on the page" mental model is preserved;
+/// only the *cursor* is pre-computed for the find-armed case.
+///
+/// Each row is:
+///
+/// ```text
+///  <n>  L<line>  [style]  <target>  → <resolved_id | (N candidates) | (unresolved)>
+///      <context>
+/// ```
+///
+/// Two rows per link (header + context) keeps the context inline, which
+/// is what makes this picker agent-friendly (no offscreen scroll needed
+/// to see "what did this link point at").
+fn draw_links(f: &mut ratatui::Frame, app: &App, ls: &LinksState, area: Rect) {
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(1), // header
+            Constraint::Min(1),    // list
+            Constraint::Length(1), // status
+        ])
+        .split(area);
+
+    // Header: identity + hint.
+    let header = format!(
+        "kb tui — links · {} link(s) on {} · ↑↓/jk move · Enter open · Esc back",
+        ls.links.len(),
+        ls.source_abs_path
+    );
+    let header_widget = Paragraph::new(header).style(app.palette.label);
+    f.render_widget(header_widget, chunks[0]);
+
+    if ls.links.is_empty() {
+        let empty = Paragraph::new(vec![
+            Line::from(vec![
+                Span::styled("   ", Style::default()),
+                Span::styled(
+                    "(this page has no links — `l` is a no-op here; Esc back to Read)",
+                    app.palette.info,
+                ),
+            ])
+        ])
+        .wrap(Wrap { trim: false });
+        f.render_widget(empty, chunks[1]);
+        return;
+    }
+
+    // Build the ratatui list items — one item per link (header + context
+    // folded into a single `ListItem` of two `Line`s so `ListState::selected`
+    // highlights the whole pair).
+    let items: Vec<ListItem> = ls
+        .links
+        .iter()
+        .enumerate()
+        .map(|(i, e)| {
+            // Status span — role-mapped to the palette (no inline colors).
+            let status = match (&e.resolves_to, e.candidates.len()) {
+                (Some((t, sl)), 0) => Span::styled(format!("→ {t}:{sl}"), app.palette.success),
+                (None, n) if n > 1 => Span::styled(
+                    format!("({n} candidates — disambiguate from the CLI)"),
+                    app.palette.hint,
+                ),
+                (None, _) => Span::styled("(unresolved — dead link)", app.palette.error),
+                _ => Span::styled("?", app.palette.dim),
+            };
+            let on = i == ls.cursor;
+            let style = if on {
+                // The selected row is emphasized: brighter than `default`
+                // (which we use for unselected). `active` + BOLD matches
+                // the highlight_symbol color, so the row + the `▶` read as
+                // one unit.
+                app.palette.active.add_modifier(Modifier::BOLD)
+            } else {
+                app.palette.default
+            };
+            let n_str = format!("{:>3}  ", i + 1);
+            let line_str = format!("L{}  ", e.line + 1);
+            let style_str = format!("[{}]", e_style_str(e));
+            let header_line = Line::from(vec![
+                Span::styled(n_str, style),
+                Span::styled(line_str, style),
+                Span::styled(format!("{style_str}  "), style),
+                Span::styled(e.target.clone(), style),
+                Span::styled("  ", style),
+                status,
+            ]);
+            let context_line = if e.context.is_empty() {
+                Line::from("")
+            } else {
+                let ctx_style = if on {
+                    app.palette.info
+                } else {
+                    app.palette.dim
+                };
+                Line::from(vec![
+                    Span::styled("      ", ctx_style),
+                    Span::styled(truncate(&e.context, 96), ctx_style),
+                ])
+            };
+            ListItem::new(vec![header_line, context_line])
+        })
+        .collect();
+
+    // ratatui 0.29: `List::new(items).highlight_symbol("▶").highlight_style(...)`.
+    let list = RatList::new(items)
+        .highlight_symbol("▶ ")
+        .highlight_style(app.palette.active)
+        .block(
+            Block::default()
+                .borders(Borders::ALL)
+                .title(format!(
+                    "links on {} · {} of {}",
+                    ls.source_abs_path,
+                    ls.cursor + 1,
+                    ls.links.len()
+                )),
+        );
+    let mut state = ListState::default();
+    state.select(Some(ls.cursor));
+    f.render_stateful_widget(list, chunks[1], &mut state);
+}
+
+/// The `LinkStyle` as a short display tag (the CLI uses the same
+/// `as_str()` from `kb_core::links`).
+fn e_style_str(e: &crate::tui::LinksEntry) -> &'static str {
+    // The enum lives in `kb_core::links`; `LinksEntry` only stores a clone
+    // of the *style* — but we did not persist the enum here (we dropped it
+    // in favor of the target + resolution). Display by convention: a
+    // wikilink target is a slug; a relative/absolute target is a path.
+    if e.target.starts_with('/') {
+        "abs"
+    } else if e.target.contains('/') {
+        "rel"
+    } else {
+        "wik"
+    }
+}
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ratatui::style::Color;
 
     fn row(id: &str, rel: &str) -> PageRow {
         PageRow {

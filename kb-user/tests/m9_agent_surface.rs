@@ -387,6 +387,94 @@ fn resolve_info_links_json() {
     }
 }
 
+/// M8.5 — the per-occurrence agent surface: `kb links --list --json`. Unlike
+/// the edge-set `--json` (above), `--list` reads the page *body* and renders
+/// every link occurrence in document order, each with position + context +
+/// inline resolution. This test pins the top-level shape (object with
+/// `page`/`count`/`links`) and the per-occurrence fields an agent refers
+/// back to (`n`, `line`, `col`, `context`, `target`, `style`, and, for a
+/// unique hit, `resolves_to` + `resolved_id`).
+#[test]
+fn links_list_json_shape() {
+    let s = Setup::new("linklist");
+    let root = s.root.to_string_lossy().into_owned();
+    // `a` is the page under test; its body carries two wikilinks (one to a
+    // unique page, one to a nonexistent page) + a bare path token, on two
+    // distinct lines so `line`/`col` are non-trivial.
+    write_page(
+        &s,
+        "a.md",
+        "type: note\ntitle: Source-A\n",
+        "intro\nsee [[B]] and notes/missing.md\n\n[[Nobody]] on line 4\n",
+    );
+    write_page(&s, "b.md", "type: note\ntitle: Page-B\n", "b body\n");
+    let (code, _, _) = run(&s, &["add", &root]);
+    assert_eq!(code, 0);
+
+    let (code, out, _) = run(&s, &["links", "note:Source-A", "--list", "--json"]);
+    assert_eq!(code, 0, "links --list --json must exit 0; got: {out}");
+    assert_json(&out, "links-list", false, true);
+    // Top-level envelope: page + count + a links array.
+    for k in ["page", "count", "links"] {
+        assert!(out.contains(&format!("\"{k}\"")), "links-list missing {k}; got: {out}");
+    }
+    assert!(
+        out.contains("\"page\":") && root.split('/').any(|seg| !seg.is_empty()),
+        "page field must carry the source abs_path (root-anchored); got: {out}"
+    );
+    // Per-occurrence fields present (unique + unresolved + path all land).
+    for k in ["\"n\"", "\"line\"", "\"col\"", "\"context\"", "\"target\"", "\"style\""] {
+        assert!(out.contains(k), "links-list occurrence missing {k}; got: {out}");
+    }
+    // The unique `[[B]]` must resolve — carry `resolves_to` + `resolved_id`.
+    assert!(
+        out.contains("\"resolves_to\"") && out.contains("\"resolved_id\""),
+        "the unique [[B]] hit must carry resolves_to + resolved_id; got: {out}"
+    );
+    assert!(
+        out.contains("note:Page-B"),
+        "resolved_id must be the [[B]] target's id (note:Page-B); got: {out}"
+    );
+    // The two wikilinks must appear (count = 3: [[B]], notes/missing.md,
+    // [[Nobody]]).
+    assert!(
+        out.contains("\"count\": 3"),
+        "three link occurrences expected; got: {out}"
+    );
+    // Document order: [[B]] (line 0 of body, i.e. body line 1) comes
+    // before [[Nobody]] (a later body line). `n` is the document-order index.
+    assert!(
+        out.contains("\"target\": \"B\"") && out.contains("\"target\": \"Nobody\"")
+            && out.contains("\"target\": \"notes/missing.md\""),
+        "all three targets must be surfaced; got: {out}"
+    );
+}
+
+/// `kb links --list` on a *zero-link* body is still well-formed JSON: an
+/// object with `count: 0` and an empty `links` array (not `null`/missing).
+/// Agents rely on the field always existing so `jq '.links | length'` works
+/// whether or not the page has links.
+#[test]
+fn links_list_json_empty_is_well_formed() {
+    let s = Setup::new("linklistempty");
+    let root = s.root.to_string_lossy().into_owned();
+    write_page(&s, "plain.md", "type: note\ntitle: Plain-P\n", "no links here at all\n");
+    let (code, _, _) = run(&s, &["add", &root]);
+    assert_eq!(code, 0);
+
+    let (code, out, _) = run(&s, &["links", "note:Plain-P", "--list", "--json"]);
+    assert_eq!(code, 0, "empty --list --json must exit 0; got: {out}");
+    assert_json(&out, "links-list-empty", false, true);
+    assert!(
+        out.contains("\"count\": 0"),
+        "no links → count must be 0; got: {out}"
+    );
+    assert!(
+        out.contains("\"links\": []") || out.contains("\"links\":[]"),
+        "no links → links must be an empty array (not null/missing); got: {out}"
+    );
+}
+
 #[test]
 fn stats_json() {
     let s = Setup::new("stats");

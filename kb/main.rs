@@ -31,6 +31,7 @@ use clap::{Args, Parser, Subcommand};
 use kb_core::aliases as kbalias;
 use kb_core::frontmatter as fm;
 use kb_core::labels;
+use kb_core::links;
 use kb_core::meta::NoteType;
 use kb_core::resolve as resolver;
 use kb_core::search_grammar;
@@ -396,10 +397,25 @@ pub(crate) enum Cmd {
         json: bool,
     },
     /// Forward links (raw targets + style) and backlinks for one page.
+    ///
+    /// Default: the *edge set* — one row per dedup'd `(target, style)` pair,
+    /// with raw backlinks. `--list`: the *occurrence set* — one numbered row
+    /// per link occurrence in the page's body, in document order, each with
+    /// its position (`line`/`col`), surrounding context, and its §4
+    /// resolution (`resolves_to` + `candidates`). `--list` is what the TUI's
+    /// link-picker and the agent's "follow the link next to my text" workflow
+    /// consume; it is the per-occurrence view the dedup'd edge set cannot
+    /// express.
     Links {
         /// A page path (absolute) or display id (`wiki:slug`).
         target: String,
-        /// Emit a JSON object (forward links + backlinks).
+        /// Per-occurrence link list (numbered, with position + context +
+        /// resolution). Implies the JSON / human link list rather than the
+        /// edge set + backlinks.
+        #[arg(long)]
+        list: bool,
+        /// Emit a JSON object (forward links + backlinks, or the link list
+        /// when `--list` is set).
         #[arg(long)]
         json: bool,
     },
@@ -722,7 +738,7 @@ pub(crate) fn run(cli: &Cli) -> i32 {
             },
             *json,
         ),
-        Cmd::Links { target, json } => cmd_links(cli.db.as_deref(), target, *json),
+        Cmd::Links { target, list, json } => cmd_links(cli.db.as_deref(), target, *list, *json),
         Cmd::Resolve { query, json } => cmd_resolve(cli.db.as_deref(), query, *json),
         Cmd::Info { path, json } => cmd_info(cli.db.as_deref(), path, *json),
         Cmd::Stats { json } => cmd_stats(cli.db.as_deref(), *json),
@@ -1030,6 +1046,173 @@ pub(crate) fn resolve_target(pages: &[resolver::Page], target: &str) -> Option<S
         resolver::Resolution::Candidates(v) => v.into_iter().next(),
         resolver::Resolution::Empty => None,
     }
+}
+
+/// A single reference extracted from a page body, **annotated** with its
+/// position and resolution. Unlike `kb_core::links::Link` (an unpositioned
+/// `{target, style}`), this carries:
+///
+/// - `line` / `col` — the *raw* body coordinate (0-based line index + byte
+///   offset into the line where the reference starts). This is the
+///   `link_anchor` the TUI uses to pre-select "the link nearest my find hit"
+///   (the find hit's `(line_idx, byte_offset)` lives in the same row/col
+///   space, so the two are comparable for nearest-neighbor).
+/// - `context` — the containing raw line, trimmed. Kept because a page often
+///   repeats a target (`[[LLM]]` in three sections); the context is what lets
+///   a user (or agent) pick the occurrence they want when targets collide.
+/// - `resolves_to` — the page `abs_path` the target points at (`None` when it
+///   is unresolved or ambiguous).
+/// - `candidates` — the collision set (`§4` "a collision is legal, never a
+///   hard error"), sorted + dedup'd, when two or more pages match.
+///
+/// Pure over `body` + `pages` (no IO, no SQL): the *assumed* TUI, the CLI
+/// `kb links --list`, and any agent surface all resolve a link through this
+/// one function, so the TUI's "open the link I clicked" and the CLI's
+/// "show me the link list" can never disagree.
+#[derive(Debug, Clone)]
+pub struct AnnotatedLink {
+    /// 0-based index of the raw body line the reference starts on.
+    pub line: usize,
+    /// Byte offset within that line where the reference starts (the `col`).
+    pub col: usize,
+    /// The containing raw line, trimmed — one-line surrounding context.
+    pub context: String,
+    /// The written target (wikilink inner text, or a path token).
+    pub target: String,
+    /// How it was written (mirrors `links.style`).
+    pub style: links::LinkStyle,
+    /// The page it resolves to, when a unique match exists.
+    pub resolves_to: Option<String>,
+    /// The candidate `abs_path`s (sorted) when the target is ambiguous.
+    pub candidates: Vec<String>,
+    /// `Some((typ, slug))` of the resolved page, for display / navigation.
+    pub resolved_id: Option<(String, String)>,
+}
+
+/// Extract every link in `body`, **in document order**, each annotated with
+/// its position + resolution against `pages`.
+///
+/// Classification mirrors `kb_core::links::extract_links` exactly (a `[[ … ]]`
+/// span is one *wikilink* target — its inner text, *never* further split even
+/// if it contains `/`; surrounding tokens are split on whitespace and a token
+/// is a *path* link only when `links::is_pathlike` accepts it). What it adds
+/// on top is the per-occurrence position (`line`, `col`), the surrounding
+/// `context`, and the resolution (`resolves_to` / `candidates` /
+/// `resolved_id`), which `extract_links` leaves to the caller.
+///
+/// `pages` is the full corpus (every resolved page, e.g. from
+/// [`load_corpus`]); it is read-only.
+pub fn annotated_links(body: &str, pages: &[resolver::Page]) -> Vec<AnnotatedLink> {
+    let mut out: Vec<AnnotatedLink> = Vec::new();
+    for (li, line) in body.lines().enumerate() {
+        let context = line.trim().to_string();
+        let bytes = line.as_bytes();
+        let mut i = 0usize;
+        while i < bytes.len() {
+            if bytes[i] == b'[' && i + 1 < bytes.len() && bytes[i + 1] == b'[' {
+                i += 2;
+                let start = i;
+                while i < bytes.len()
+                    && !(bytes[i] == b']' && i + 1 < bytes.len() && bytes[i + 1] == b']')
+                {
+                    i += 1;
+                }
+                if i < bytes.len() && bytes[i] == b']' && i + 1 < bytes.len() && bytes[i + 1] == b']'
+                {
+                    let target = line[start..i].trim().to_string();
+                    if !target.is_empty() {
+                        push_annotated(&mut out, li, start, &context, target, links::LinkStyle::Wikilink, pages);
+                    }
+                    i += 2;
+                } else {
+                    // no closing `]]`: decorative — continue scanning
+                }
+            } else {
+                let token_start = i;
+                while i < bytes.len() && !bytes[i].is_ascii_whitespace() {
+                    i += 1;
+                }
+                if token_start < i {
+                    let token = &line[token_start..i];
+                    if let Some(style) = classify_path_token(token) {
+                        push_annotated(&mut out, li, token_start, &context, token.to_string(), style, pages);
+                    }
+                }
+                while i < bytes.len() && bytes[i].is_ascii_whitespace() {
+                    i += 1;
+                }
+            }
+        }
+    }
+    out
+}
+
+/// Classify a bare path token (a path link iff path-like; absolute iff it
+/// starts with `/`). The inverse is `None` (skip the token).
+fn classify_path_token(token: &str) -> Option<links::LinkStyle> {
+    if links::is_pathlike(token) {
+        Some(if token.starts_with('/') {
+            links::LinkStyle::Absolute
+        } else {
+            links::LinkStyle::Relative
+        })
+    } else {
+        None
+    }
+}
+
+/// Resolve `target` against `pages` and record a single `AnnotatedLink`.
+fn push_annotated(
+    out: &mut Vec<AnnotatedLink>,
+    line: usize,
+    col: usize,
+    context: &str,
+    target: String,
+    style: links::LinkStyle,
+    pages: &[resolver::Page],
+) {
+    let (resolves_to, candidates, resolved_id) = match resolver::resolve(&target, pages) {
+        resolver::Resolution::Unique(abs) => {
+            let id = pages
+                .iter()
+                .find(|p| p.abs_path == abs)
+                .map(|p| (p.typ.clone(), p.slug.clone()));
+            (Some(abs), Vec::new(), id)
+        }
+        resolver::Resolution::Candidates(v) => (None, v, None),
+        resolver::Resolution::Empty => (None, Vec::new(), None),
+    };
+    out.push(AnnotatedLink {
+        line,
+        col,
+        context: context.to_string(),
+        target,
+        style,
+        resolves_to,
+        candidates,
+        resolved_id,
+    });
+}
+
+/// Index of the link in `links` **nearest** the anchor `(anchor_line,
+/// anchor_col)`, where "nearest" is `|line - anchor_line|` (primary) then
+/// `|col - anchor_col|` (tiebreak). Returns `None` for an empty list.
+///
+/// Shared by the TUI Link-picker (pre-select the link closest to the last
+/// find hit, so the `f` → type → `l` → `Enter` "follow this fact" path
+/// starts at the right place) and any CLI consumer of a positioned link
+/// list. Keyed on `(line, col)` pairs (not a concrete link type) so it is
+/// generic over the `AnnotatedLink` / `LinksEntry` shapes.
+pub fn nearest_link_index(
+    links: &[(usize, usize)],
+    anchor_line: usize,
+    anchor_col: usize,
+) -> Option<usize> {
+    links
+        .iter()
+        .enumerate()
+        .min_by_key(|(_i, &(l, c))| (l.abs_diff(anchor_line), c.abs_diff(anchor_col)))
+        .map(|(i, _)| i)
 }
 
 pub(crate) fn shell_quote(s: &str) -> String {
@@ -1410,5 +1593,154 @@ print('round-trip-ok')
         );
         let out = String::from_utf8_lossy(&res.stdout);
         assert!(out.contains("round-trip-ok"), "python must print round-trip-ok; got: {out}");
+    }
+}
+
+#[cfg(test)]
+mod links_tests {
+    use super::*;
+
+    fn page(abs: &str, slug: &str, typ: &str) -> resolver::Page {
+        resolver::Page {
+            abs_path: abs.to_string(),
+            slug: slug.to_string(),
+            typ: typ.to_string(),
+            rel_path: abs.rsplit('/').next().unwrap_or(abs).to_string(),
+        }
+    }
+
+    #[test]
+    fn annotated_links_empty_body_is_empty() {
+        assert!(annotated_links("", &[]).is_empty());
+    }
+
+    #[test]
+    fn annotated_links_extracts_wikilink_with_position() {
+        let pages = vec![page("/data/wiki/attention.md", "attention", "wiki")];
+        let body = "The [[attention]] pattern is core.";
+        let links = annotated_links(body, &pages);
+        assert_eq!(links.len(), 1, "must extract exactly one wikilink");
+        let l = &links[0];
+        assert_eq!(l.line, 0, "single line → index 0");
+        assert_eq!(l.col, 6, "col is where the *target text* begins (after [[)");
+        assert_eq!(l.target, "attention");
+        assert_eq!(l.resolves_to.as_deref(), Some("/data/wiki/attention.md"));
+        assert!(l.candidates.is_empty(), "unique hit → no candidate set");
+        assert_eq!(l.context, body, "single-line body → whole line is the context");
+        match l.style {
+            links::LinkStyle::Wikilink => {}
+            _ => panic!("wikilink target must be classified as Wikilink"),
+        }
+    }
+
+    #[test]
+    fn annotated_links_extracts_relative_path() {
+        let pages = vec![page("/data/notes/todo.md", "todo", "note")];
+        let body = "See notes/todo.md for the next step.";
+        let links = annotated_links(body, &pages);
+        assert_eq!(links.len(), 1);
+        assert_eq!(links[0].target, "notes/todo.md");
+        match links[0].style {
+            links::LinkStyle::Relative => {}
+            _ => panic!("notes/todo.md must be classified as Relative"),
+        }
+    }
+
+    #[test]
+    fn annotated_links_extracts_absolute_path() {
+        let pages = vec![page("/data/a/b/c.md", "c", "note")];
+        let body = "Full: /data/a/b/c.md end.";
+        let links = annotated_links(body, &pages);
+        assert_eq!(links.len(), 1);
+        assert_eq!(links[0].target, "/data/a/b/c.md");
+        match links[0].style {
+            links::LinkStyle::Absolute => {}
+            _ => panic!("/data/a/b/c.md must be classified as Absolute"),
+        }
+    }
+
+    #[test]
+    fn annotated_links_multiple_on_same_line() {
+        let pages = vec![
+            page("/data/a.md", "a", "note"),
+            page("/data/b.md", "b", "note"),
+        ];
+        let body = "[[a]] and [[b]] are both here.";
+        let links = annotated_links(body, &pages);
+        assert_eq!(links.len(), 2, "two distinct wikilinks on one line");
+        assert!(links[0].col < links[1].col, "document order preserved");
+        assert_eq!(links[0].line, links[1].line, "same line index");
+    }
+
+    #[test]
+    fn annotated_links_multiple_lines() {
+        let pages = vec![
+            page("/data/a.md", "a", "note"),
+            page("/data/b.md", "b", "note"),
+        ];
+        let body = "[[a]] on line one.\n\n[[b]] on line three.";
+        let links = annotated_links(body, &pages);
+        assert_eq!(links.len(), 2);
+        assert_eq!(links[0].line, 0, "first link on line 0 (0-indexed)");
+        assert_eq!(links[1].line, 2, "second link on line 2 (0-indexed)");
+    }
+
+    #[test]
+    fn annotated_links_unresolved_target() {
+        let body = "Points at [[nonexistent-page]].";
+        let links = annotated_links(body, &[]);
+        assert_eq!(links.len(), 1);
+        assert!(links[0].resolves_to.is_none(), "no corpus → must be unresolved");
+        assert!(links[0].candidates.is_empty(), "no candidates (Empty, not Candidates)");
+    }
+
+    #[test]
+    fn annotated_links_ambiguous_target_lists_candidates() {
+        let pages = vec![
+            page("/data/a/ambig.md", "ambig", "note"),
+            page("/data/b/ambig.md", "ambig", "wiki"),
+        ];
+        let body = "Ambiguous: [[ambig]]";
+        let links = annotated_links(body, &pages);
+        assert_eq!(links.len(), 1);
+        assert!(links[0].resolves_to.is_none(), "two matches → not unique");
+        assert_eq!(links[0].candidates.len(), 2, "two candidate abs_paths");
+    }
+
+    #[test]
+    fn nearest_link_index_empty_is_none() {
+        assert_eq!(nearest_link_index(&[], 5, 5), None);
+    }
+
+    #[test]
+    fn nearest_link_index_single() {
+        assert_eq!(nearest_link_index(&[(0, 0)], 99, 99), Some(0));
+    }
+
+    #[test]
+    fn nearest_link_index_picks_closest_line() {
+        // lines 10, 20, 30 — anchor at 25: line-20 is 5 away, line-30 is 5 away;
+        // tiebreak → both at the same |line-anchor|, take whichever min_by_key
+        // sees first (stable by enumeration order).
+        let links = vec![(10, 0), (20, 5), (30, 5)];
+        let nearest = nearest_link_index(&links, 25, 0).unwrap();
+        // Tie (5,_) vs (5,_) → first one wins (stable sort). That's index 1.
+        assert!(nearest == 1 || nearest == 2, "closest must be row 1 or 2 (tie on line-dist)");
+    }
+
+    #[test]
+    fn nearest_link_index_strong_line_preference() {
+        // A "close" column match on a far line must LOSE to a "far" column on
+        // a near line. The primary distance is |line - anchor_line|.
+        let links = vec![(3, 5), (0, 1000)];
+        let nearest = nearest_link_index(&links, 5, 15).unwrap();
+        assert_eq!(nearest, 0, "line-3 is closer than line-0 regardless of column");
+    }
+
+    #[test]
+    fn nearest_link_index_column_tiebreak() {
+        let links = vec![(5, 0), (5, 50)];
+        let nearest = nearest_link_index(&links, 5, 48).unwrap();
+        assert_eq!(nearest, 1, "same line, col 50 → closer than col 0");
     }
 }

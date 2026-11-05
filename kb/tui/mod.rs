@@ -78,6 +78,8 @@ use unicode_width::UnicodeWidthStr;
 use kb_core::frontmatter as fm;
 use kb_core::section as section_core;
 
+use crate::load_corpus;
+
 use crate::EXIT_ERR;
 use crate::EXIT_OK;
 
@@ -199,6 +201,12 @@ pub enum Mode {
     /// Edit a single page's frontmatter (scalar fields + list fields) with
     /// tab-autocomplete over the corpus. M8.2.
     Edit(EditState),
+    /// Show a page's links (per-occurrence list, position + context +
+    /// resolution) and navigate into the one the user picked — the M8.5
+    /// link-picker. Opened by `l` in Read mode (anchored to the last find
+    /// hit when one is armed); closed by `Esc`, which pops back to the Read
+    /// that armed it.
+    Links(LinksState),
     /// Manage `tag_aliases`: list, add (upsert), remove. M8.3.
     Alias(AliasState),
     /// Manage registered roots: list, add, drop. M8.3.
@@ -232,6 +240,73 @@ pub struct SearchState {
     pub tag_sugs: Vec<TagSuggestion>,
     /// The highlighted tag suggestion (0 when `tag_sugs` is empty).
     pub tag_sel: usize,
+}
+
+/// A single row in the **Link-picker** (M8.5): one reference in the open
+/// page's body, with its position + context (so a user can pick *which*
+/// `[[…]]` among repeats) and its resolution (so the user sees where it
+/// points *before* they open it).
+///
+/// `resolves_to` / `candidates` mirror the §4 contract on the CLI side:
+/// exactly one of `resolves_to` and `candidates.len() > 1` is `Some` /
+/// non-empty when the target is ambiguous or multi-page; both are `None` /
+/// empty when it is a dead `[[…]]` (the shell may display it as
+/// unresolved).
+///
+/// `abs_path` is the *target* page the link points at (NOT the page the
+/// user is reading) — the value `links_open` uses as the `abs_path` of the
+/// new `ReadState` it builds on `Enter`.
+#[derive(Debug, Clone)]
+pub struct LinksEntry {
+    /// 0-based raw line index (matching `FindState::matches`).
+    pub line: usize,
+    /// 0-based byte offset in that line where the **target token** begins
+    /// (for wikilinks: the first char after `[[`; for path tokens: the
+    /// first char of the path). The `[[` itself is *not* counted — the
+    /// offset is where the *content* the user wrote starts.
+    pub col: usize,
+    /// The containing raw line, trimmed (for context display).
+    pub context: String,
+    /// The written target (wikilink inner text, or a path token).
+    pub target: String,
+    /// `Some((type, slug))` of the *unique* page the target resolves to.
+    /// `None` = ambiguous (see `candidates`) or unresolved.
+    pub resolves_to: Option<(String, String)>,
+    /// The collision set (absolute paths, sorted) when resolution was
+    /// ambiguous. Empty when the link is unique or unresolved.
+    pub candidates: Vec<String>,
+    /// The resolved `abs_path` the `Enter` key will navigate to (only set
+    /// for a *unique* hit; `None` otherwise).
+    pub abs_path: Option<String>,
+    /// The target page's `id` (`type:slug`) — the display string the
+    /// picker shows in the list ("→ wiki:LLM"). `None` when ambiguous or
+    /// unresolved.
+    #[allow(dead_code)]
+    pub resolved_id: Option<String>,
+}
+
+/// The **Link-picker** state (M8.5). Holds the full per-occurrence list of
+/// the open page's links (in document order), the cursor, and a *return
+/// reference* to the `ReadState` the user came from (the "anchor" — so
+/// `Esc` pops back into Read, not Browse).
+///
+/// Keybindings: ↑/↓ move · `Enter` opens the selected *unique* link ·
+/// `x` / `q` cancel (back to Read) · `Esc` cancels (back to Read).
+///
+/// When the user opened `l` from a `FindState`-armed Read, the picker
+/// pre-selects the entry nearest the find hit (see
+/// [`App::nearest_link_for_find_anchor`]).
+#[derive(Debug, Clone)]
+pub struct LinksState {
+    /// Per-occurrence list (document order, as emitted by
+    /// `crate::annotated_links`).
+    pub links: Vec<LinksEntry>,
+    /// The selected index into `links` (0 when empty).
+    pub cursor: usize,
+    /// The `abs_path` of the *source* page the picker was opened from,
+    /// kept so the TUI's "Esc" pops back into it via `load_body` rather
+    /// than the Browse view.
+    pub source_abs_path: String,
 }
 
 /// A single row in the tag-suggestions pane: the display label (what the
@@ -698,6 +773,18 @@ pub struct App {
     /// the user re-opens the same page (with the same body bytes) the cache
     /// is still valid without a re-measure.
     pub body_rollup: BodyRollup,
+    /// Return address for the **Link-picker** (M8.5): the `ReadState` the
+    /// user was looking at when they pressed `l`. Held on `App` (not
+    /// `ReadState`) so the picker can pop back into the Read pane with its
+    /// scroll / outline / find state intact. `None` when the Link-picker is
+    /// not active.
+    pub links_return: Option<ReadState>,
+    /// Return address for a *linked* Read (M8.5): the `ReadState` the user
+    /// was looking at when they pressed `Enter` in the Link-picker and the
+    /// TUI opened the *target* page's Read. `Esc`-back from that linked
+    /// Read pops to this (not Browse). `None` when the current Read was
+    /// opened from Browse / Search (the normal case).
+    pub read_return: Option<ReadState>,
 }
 
 /// A `Result` over the `(message, exit-code)` tuple the rest of `kb`
@@ -745,6 +832,10 @@ impl App {
             // already clears; only *post-editor* returns need the forced
             // clear, so start off.
             needs_clear: false,
+            // Link-picker not open yet — nothing to return to; same for a
+            // linked Read (no link was followed yet).
+            links_return: None,
+            read_return: None,
             // Empty roll-up: the first body we scroll / center / draw
             // triggers a build. Default to a known-stale state so the
             // identity check below always misses.
@@ -1144,6 +1235,249 @@ impl App {
         ))
     }
 
+    // ===================================================================
+    //  M8.5 — Link-picker
+    //  ===================================================================
+
+    /// Open the **Link-picker** for the page at `abs_path`. Loads the
+    /// page's body + the full corpus on demand (the TUI does not cache the
+    /// corpus in the App — `load_corpus` is O(corpus) and the picker is
+    /// short-lived), and pre-selects the link nearest a *pending* find
+    /// anchor in the current Read mode (the `f` key left a cursor on a hit;
+    /// `l` then starts the picker at the closest link to that hit, so the
+    /// "follow this fact" path is *`f` → type the fact → `l` → `Enter`*).
+    ///
+    /// `abs_path` is required because the picker is opened *from* the Read
+    /// mode (the App already knows it) but it is also the identity for the
+    /// return stack (`links_return`) — the picker's `Esc` pops back to it
+    /// without a re-lookup.
+    pub fn open_links(&mut self) -> KbResult<()> {
+        let rs = match &self.mode {
+            Mode::Read(rs) => rs,
+            _ => {
+                self.set_info("link-picker: press `l` while in Read mode");
+                return Ok(());
+            }
+        };
+        // Snapshot of the Read state we're coming from (so `Esc` can pop
+        // back to it with scroll / outline / find intact).
+        let return_read = rs.clone();
+        let abs_path = rs.abs_path.clone();
+
+        // If a find session is armed *right now*, use the *currently
+        // highlighted* hit as the anchor (the user typed, moved with ↑/↓,
+        // and is now pressing `l` to follow the closest link). Otherwise
+        // no anchor → start at link 0.
+        let anchor: Option<(usize, usize)> = rs
+            .find
+            .as_ref()
+            .and_then(|fs| fs.matches.get(fs.cursor).copied());
+
+        let corpus = load_corpus(&self.db)?;
+        let body: String = self
+            .db
+            .conn
+            .query_row(
+                "SELECT COALESCE(body, '') FROM pages WHERE abs_path = ?1",
+                [abs_path.as_str()],
+                |r| r.get(0),
+            )
+            .map_err(|e| (format!("body lookup for {abs_path}: {e}"), EXIT_ERR))?;
+        let annotated = crate::annotated_links(&body, &corpus);
+        let entries: Vec<LinksEntry> = annotated
+            .into_iter()
+            .map(|al| LinksEntry {
+                line: al.line,
+                col: al.col,
+                context: al.context,
+                target: al.target,
+                resolves_to: al.resolved_id.as_ref().map(|(t, s)| (t.clone(), s.clone())),
+                candidates: al.candidates,
+                abs_path: al.resolves_to,
+                resolved_id: al
+                    .resolved_id
+                    .as_ref()
+                    .map(|(t, s)| format!("{t}:{s}")),
+            })
+            .collect();
+
+        // Nearest-neighbor selector: when an anchor (the find hit) is
+        // supplied, the picker's cursor points at the entry closest to it
+        // (primary: `|line - anchor_line|`, then `|col - anchor_col|`).
+        // The list stays in document order — the user still has a stable
+        // "this is the 3rd link on the page" mental model — only the
+        // starting position is pre-computed for the "I just finished `f`"
+        // path. A pure function (no IO, no App) so it is unit-testable.
+        let links = entries;
+        let cursor = if let Some((al, ac)) = anchor {
+            let pairs: Vec<(usize, usize)> = links.iter().map(|l| (l.line, l.col)).collect();
+            crate::nearest_link_index(&pairs, al, ac).unwrap_or(0)
+        } else {
+            0
+        };
+
+        // Park the Read we're leaving for the picker's `Esc`; clear the
+        // linked-Read return stack so a stale one doesn't leak through.
+        self.links_return = Some(return_read);
+        self.read_return = None;
+        let ls = LinksState {
+            links,
+            cursor,
+            source_abs_path: abs_path.clone(),
+        };
+        self.mode = Mode::Links(ls);
+        if let Some((al, ac)) = anchor {
+            self.set_info(format!(
+                "link-picker — started at the link nearest find hit (line {al}, col {ac}) · ↑↓ move · Enter open · Esc back"
+            ));
+        } else {
+            self.set_info("link-picker — ↑↓ move · Enter open · Esc back");
+        }
+        Ok(())
+    }
+
+    /// Pop back from the Link-picker to the `ReadState` the user armed it
+    /// from (held in `links_return`). Idempotent — a double-Esc can't
+    /// resurrect a second Read (the `.take()` clears the return address).
+    pub fn close_links(&mut self) {
+        let rs = self.links_return.take();
+        self.mode = match rs {
+            Some(rs) => Mode::Read(rs),
+            None => Mode::Browse,
+        };
+    }
+
+    /// Open a *linked* page's Read from the Link-picker (the `Enter`
+    /// action on a *unique* link entry). The target page is identified by
+    /// its `abs_path` (the stable identity — see `open_read`), so a
+    /// `full-rebuild` that reassigns rowids can't open the wrong page.
+    ///
+    /// The *incoming* Read is parked in `read_return` (so `Esc`-back from
+    /// the new Read lands in the *incoming* Read state, not Browse —
+    /// `close_read` checks `read_return` before `search_return`); the
+    /// picker itself was opened *from* the incoming Read, so its
+    /// `links_return` is set to the *same* state and the two return stacks
+    /// are consistent after the round trip.
+    pub fn open_linked(&mut self, abs_path: &str) -> KbResult<()> {
+        let (body, outline, fm) = load_body(&self.db, abs_path)?;
+        // row_idx / id are display only — the *identity* is the path.
+        let id = self
+            .rows
+            .iter()
+            .find(|r| r.abs_path == abs_path)
+            .map(|r| r.id.clone())
+            .unwrap_or_else(|| "?".to_string());
+        let row_idx = self
+            .rows
+            .iter()
+            .position(|r| r.abs_path == abs_path)
+            .unwrap_or(0);
+        // Park the *incoming* Read in `read_return` (so `close_read` can
+        // pop back into it) and clear the picker's return address (the
+        // picker is done).
+        let incoming = std::mem::take(&mut self.links_return);
+        self.read_return = incoming;
+        let new_rs = ReadState {
+            row_idx,
+            id,
+            body,
+            outline,
+            scroll_top: 0,
+            abs_path: abs_path.to_string(),
+            fm,
+            find: None,
+        };
+        self.mode = Mode::Read(new_rs);
+        self.set_success(format!("opened linked page {abs_path} — Esc back to the link you followed"));
+        Ok(())
+    }
+
+    /// Enter-key action in the Link-picker: read the *selected* entry and
+    /// either open it (unique) or no-op (ambiguous / unresolved). Kept as a
+    /// separate `pub` method (not a match arm) so it can be unit-tested
+    /// directly (`let _ = app.links_open_selected();` and assert on the
+    /// resulting mode + `read_return`).
+    pub fn links_open_selected(&mut self) -> KbResult<()> {
+        // Read the selected entry out of the mode first (the borrow of
+        // `self.mode` conflicts with the `self.open_linked` call below, so
+        // clone the entry + cursor out and drop the borrow).
+        let (entry, cursor, total) = match &self.mode {
+            Mode::Links(l) => {
+                let e = l.links.get(l.cursor).cloned();
+                let t = l.links.len();
+                (e, l.cursor, t)
+            }
+            _ => (None, 0usize, 0usize),
+        };
+        let Some(entry) = entry else {
+            self.set_info("link-picker — no entry at cursor");
+            return Ok(());
+        };
+        // Unique resolution — open it.
+        if let Some(abs) = entry.abs_path.clone() {
+            return self.open_linked(&abs);
+        }
+        // Ambiguous — tell the user how to get there from the CLI.
+        if !entry.candidates.is_empty() {
+            self.set_info(format!(
+                "link {} of {} is ambiguous ({} candidates) — run `kb links --list {page}` to disambiguate",
+                cursor + 1,
+                total,
+                entry.candidates.len(),
+                page = self.links_source_page()
+            ));
+            return Ok(());
+        }
+        // Unresolved — dead link.
+        self.set_info(format!(
+            "link {} of {} is unresolved (no matching page) — {target}",
+            cursor + 1,
+            total,
+            target = entry.target
+        ));
+        Ok(())
+    }
+
+    /// Status-bar note for the Link-picker: the selected entry's context +
+    /// resolution at a glance (the user can see *which* link they're about
+    /// to open without reading the list). `App` owns this so it is
+    /// unit-testable.
+    pub fn set_links_note(&mut self) {
+        let (cursor, total, entry) = match &self.mode {
+            Mode::Links(l) => {
+                let e = l.links.get(l.cursor).cloned();
+                (l.cursor, l.links.len(), e)
+            }
+            _ => (0, 0, None),
+        };
+        let Some(entry) = entry else {
+            self.set_info("link-picker — no links on this page");
+            return;
+        };
+        let status = match (&entry.resolves_to, entry.candidates.len()) {
+            (Some((t, s)), 0) => format!("→ {t}:{s} — Enter opens"),
+            (None, n) if n > 1 => format!("({n} candidates — open from the CLI to disambiguate)"),
+            (None, _) => "unresolved — dead link".to_string(),
+            _ => "?".into(),
+        };
+        self.set_info(format!(
+            "link {cursor_plus} of {total} · L{line} {status} · {context}",
+            cursor_plus = cursor + 1,
+            line = entry.line + 1,
+            status = status,
+            context = entry.context
+        ));
+    }
+
+    /// The `abs_path` of the page the picker was opened from — for status
+    /// messages that need to name it (`self.links_source_page()`).
+    pub fn links_source_page(&self) -> String {
+        match &self.mode {
+            Mode::Links(l) => l.source_abs_path.clone(),
+            _ => String::new(),
+        }
+    }
+
     /// Commit the selected row to a new Read mode (loads the body from the
     /// DB). Called by `Enter` from Browse. The page is identified by its
     /// *absolute path* — a stable identity across a `full-rebuild` (which
@@ -1158,8 +1492,11 @@ impl App {
         // This read is a Browse/filter open — no Search context to return to.
         // (A read opened *from* Search sets `search_return` explicitly in
         // `search_open`; clearing here also kills any stale address from an
-        // earlier search session.)
+        // earlier search session.) Also clear any stale `read_return` (a
+        // linked Read's return stack) so it does not leak through this new
+        // Read opened from the list.
         self.search_return = None;
+        self.read_return = None;
         let (body, outline, fm) = load_body(&self.db, &row.abs_path)?;
         let id = row.id;
         // Keep a stable row-index for the header display: the index of the
@@ -1193,6 +1530,13 @@ impl App {
     /// `open_read` that cleared the address) never resurrects a second
     /// search.
     pub fn close_read(&mut self) {
+        // Linked-Read return takes precedence (most specific): a Read opened
+        // *from* a link picker lands back on the incoming Read, not Browse.
+        if let Some(rs) = self.read_return.take() {
+            self.mode = Mode::Read(rs);
+            self.set_info("back to the Read you linked from");
+            return;
+        }
         if let Some(search) = self.search_return.take() {
             self.mode = Mode::Search(search);
             let note = self.position_note();
@@ -6507,6 +6851,321 @@ mod tests {
         let app = App::new(db).unwrap();
         // Not in Read -> None.
         assert!(app.find_note().is_none(), "no Read -> no find note");
+    }
+
+    // ===================================================================
+    //  M8.5 — Link-picker tests
+    // ===================================================================
+
+    /// `l` from a Read (no find armed) must (a) load the source page's body,
+    /// (b) call `annotated_links` against the full corpus, (c) put the picker
+    /// in `Mode::Links` with `cursor == 0`, (d) park the original Read in
+    /// `links_return` so `Esc` can pop back to it. The picker itself must not
+    /// leak into `read_return` (that slot is for *following* a link, and is
+    /// cleared on entry).
+    #[test]
+    fn open_links_from_read_parks_return_stack_and_starts_at_zero() {
+        let db = Db::open_in_memory_test().unwrap();
+        db.migrate().unwrap();
+        // Two pages: `a` links to `b`.
+        insert_page(&db, "a", "Page A", "See [[b]] for the follow-up.\n");
+        insert_page(&db, "b", "Page B", "the follow-up body\n");
+        let mut app = App::new(db).unwrap();
+        // Enter Read on page A (Browse → Enter).
+        app.selected = app
+            .rows
+            .iter()
+            .position(|r| r.id == "note:a")
+            .expect("page A in rows");
+        app.open_read().unwrap();
+        assert!(matches!(app.mode, Mode::Read(_)));
+        // Park a stale state in `read_return` to verify `open_links` clears.
+        app.read_return = Some(ReadState {
+            row_idx: 0,
+            id: "note:stale".into(),
+            body: "stale".into(),
+            outline: Vec::new(),
+            scroll_top: 0,
+            abs_path: "/stale.md".into(),
+            fm: FmMeta::default(),
+            find: None,
+        });
+        app.open_links().unwrap();
+        let ls = match &app.mode {
+            Mode::Links(l) => l,
+            m => panic!("expected Links mode, got {m:?}"),
+        };
+        assert_eq!(ls.links.len(), 1, "one wikilink on page A");
+        assert_eq!(ls.cursor, 0, "no find armed → cursor 0");
+        assert_eq!(ls.source_abs_path, "/root/a.md");
+        // The return stack must hold the Read we just left; `read_return`
+        // must be cleared (stale state wiped so a later Browse-open can't
+        // pop to an unrelated Read).
+        assert!(app.links_return.is_some(), "links_return parked for the Esc pop");
+        assert!(app.read_return.is_none(), "open_links clears a stale read_return");
+    }
+
+    /// `open_links` from *outside* Read mode is a no-op (the key is only
+    /// reachable from Read — `handle_read` gates it — but the App method
+    /// must be total so it never panics on a stray call).
+    #[test]
+    fn open_links_outside_read_is_total() {
+        let db = Db::open_in_memory_test().unwrap();
+        db.migrate().unwrap();
+        insert_page(&db, "a", "A", "see [[a2]] later\n");
+        insert_page(&db, "a2", "A2", "ok\n");
+        let mut app = App::new(db).unwrap();
+        // In Browse; the call must succeed (not panic) AND not leave us in
+        // Links mode (the key is Read-gated — this only exercises the total
+        // contract, not the gating itself).
+        let res = app.open_links();
+        assert!(res.is_ok(), "total: Ok even when not in Read");
+        assert!(
+            matches!(app.mode, Mode::Browse),
+            "Browse is preserved (no phantom Links mode)"
+        );
+    }
+
+    /// `links_open_selected` on a *unique* target: the App transitions to
+    /// Read mode, parks the picker's `links_return` into `read_return` so
+    /// `Esc`-back lands in the *incoming* Read (not Browse), and the linked
+    /// Read is on the target page's body.
+    #[test]
+    fn links_open_selected_unique_parks_read_return_and_opens() {
+        let db = Db::open_in_memory_test().unwrap();
+        db.migrate().unwrap();
+        insert_page(&db, "a", "A", "see [[b]] for the follow-up\n");
+        insert_page(&db, "b", "B", "the follow-up body\n");
+        let mut app = App::new(db).unwrap();
+        // Enter Read → arm picker → cursor at 0 (the `[[b]]` is the only
+        // link, so cursor 0 is unambiguously it).
+        app.selected = 0;
+        app.open_read().unwrap();
+        app.open_links().unwrap();
+        let links_return_before = app.links_return.is_some();
+        assert!(links_return_before, "the picker parked the read");
+        app.links_open_selected().unwrap();
+        assert!(matches!(app.mode, Mode::Read(_)), "Read on the linked page");
+        let rs = match &app.mode {
+            Mode::Read(r) => r,
+            _ => panic!(),
+        };
+        assert_eq!(rs.abs_path, "/root/b.md", "the *target* page (b.md) is open");
+        assert!(
+            rs.body.contains("the follow-up body"),
+            "linked Read shows the destination page's body; got: {:?}",
+            rs.body
+        );
+        // The original Read must now be in `read_return` so that a later
+        // `close_read` pops back to it, and `links_return` must be cleared
+        // (the picker is done).
+        assert!(
+            app.read_return.is_some(),
+            "the original Read is parked in read_return for the Esc-back"
+        );
+        assert!(
+            app.links_return.is_none(),
+            "picker's return stack is consumed, not duplicated"
+        );
+    }
+
+    /// `links_open_selected` on an *ambiguous* target: the App must NOT
+    /// open a new Read (no unique winner); it must set an info note naming
+    /// the candidate count; it must NOT consume `links_return` (the picker
+    /// is still open).
+    #[test]
+    fn links_open_selected_ambiguous_is_noop_and_keeps_picker() {
+        let db = Db::open_in_memory_test().unwrap();
+        db.migrate().unwrap();
+        // Two pages with the same slug but different roots → `[[ambig]]`
+        // is ambiguous by stage 1 (slug-collision on the same type).
+        insert_page(&db, "ambig", "Ambig", "see [[ambig]] twice");
+        insert_page(&db, "ambig2", "Ambig", "second\n");
+        let mut app = App::new(db).unwrap();
+        app.selected = 0;
+        app.open_read().unwrap();
+        app.open_links().unwrap();
+        let ls = match &app.mode {
+            Mode::Links(l) => l,
+            _ => panic!("expected Links"),
+        };
+        assert_eq!(ls.links.len(), 1, "exactly one wikilink in the body");
+        // The link must be ambiguous (two slug matches → Candidates(2)).
+        assert!(ls.links[0].resolves_to.is_none(), "not unique → resolves_to is None");
+        assert_eq!(ls.links[0].candidates.len(), 2, "two candidate abs_paths");
+        app.links_open_selected().unwrap();
+        // We must still be in Links (no navigation).
+        assert!(
+            matches!(app.mode, Mode::Links(_)),
+            "ambiguous target does NOT open a new Read"
+        );
+        // And the return stack is intact (the picker is still open).
+        assert!(app.links_return.is_some(), "picker's return stack is unconsumed");
+    }
+
+    /// `close_links` must pop the parked Read back into Read mode (not
+    /// Browse), and then a subsequent `close_read` must go to Browse (not
+    /// resurrect a duplicate Read).
+    #[test]
+    fn close_links_pops_parked_read_not_browse() {
+        let db = Db::open_in_memory_test().unwrap();
+        db.migrate().unwrap();
+        insert_page(&db, "a", "A", "see [[b]]\n");
+        insert_page(&db, "b", "B", "b body\n");
+        let mut app = App::new(db).unwrap();
+        app.selected = 0;
+        app.open_read().unwrap();
+        // Mark the Read with a sentinel so we can verify the *state* (not
+        // just the path) survives the round trip. `scroll_top` is the
+        // simplest field — the body is short so the real scroll is 0, but
+        // the value is an opaque "where the user was" token the picker
+        // must round-trip verbatim.
+        if let Mode::Read(r) = &mut app.mode {
+            r.scroll_top = 42;
+        } else {
+            panic!("expected Read after open_read");
+        }
+        app.open_links().unwrap();
+        app.close_links();
+        // Back in Read (not Browse).
+        assert!(matches!(app.mode, Mode::Read(_)), "picker pop lands in Read");
+        let rs = match &app.mode {
+            Mode::Read(r) => r,
+            _ => panic!(),
+        };
+        assert_eq!(rs.abs_path, "/root/a.md", "the *incoming* page A is back");
+        assert_eq!(rs.scroll_top, 42, "the Read's state is round-tripped verbatim");
+        // And consuming it left `links_return = None`.
+        assert!(app.links_return.is_none(), "parked stack consumed, not duplicated");
+        // Final pop goes to Browse (no second Read to fall back on).
+        app.close_read();
+        assert!(matches!(app.mode, Mode::Browse), "final pop lands in Browse");
+        assert!(app.read_return.is_none(), "no linked-Read stack to pop to");
+    }
+
+    /// Round trip: Read A → picker → open B → Read B → close B → Read A →
+    /// close A → Browse. This is the full "follow a link then backtrack"
+    /// workflow the M8.5 feature promises; if any slot leaks, this test
+    /// fails on the exact slot.
+    #[test]
+    fn follow_a_link_then_backtrack_full_round_trip() {
+        let db = Db::open_in_memory_test().unwrap();
+        db.migrate().unwrap();
+        insert_page(&db, "a", "A", "see [[b]]\n");
+        insert_page(&db, "b", "B", "b body — also see [[c]]\n");
+        insert_page(&db, "c", "C", "c body\n");
+        let mut app = App::new(db).unwrap();
+
+        // 1. Browse → Read A.
+        app.selected = app
+            .rows
+            .iter()
+            .position(|r| r.id == "note:a")
+            .expect("a in rows");
+        app.open_read().unwrap();
+
+        // 2. Read A → Picker.
+        app.open_links().unwrap();
+        assert!(matches!(app.mode, Mode::Links(_)));
+
+        // 3. Picker → Read B (the unique `[[b]]`).
+        app.links_open_selected().unwrap();
+        assert!(
+            matches!(app.mode, Mode::Read(_)),
+            "Read B (unique target opens)"
+        );
+        let rs = match &app.mode {
+            Mode::Read(r) => r,
+            _ => panic!(),
+        };
+        assert_eq!(rs.abs_path, "/root/b.md");
+
+        // 4. Read B → Picker (its own links).
+        app.open_links().unwrap();
+        assert!(matches!(app.mode, Mode::Links(_)));
+
+        // 5. Picker → Read C (the `[[c]]` on B).
+        app.links_open_selected().unwrap();
+        let rs = match &app.mode {
+            Mode::Read(r) => r,
+            _ => panic!(),
+        };
+        assert_eq!(rs.abs_path, "/root/c.md", "C is open");
+        // The chain of returns: `read_return` is Read B (the last open),
+        // and Read A is… not parked (the picker that *opened* B consumed
+        // it via `.take()` → into `read_return`; when B was opened A was
+        // still in `links_return` which got *taken* into `read_return`;
+        // then B's own picker parked B into `links_return`; then C's open
+        // took B into `read_return`. So A is *dropped* at step 5 — only
+        // the *immediate* return is preserved by design (M8.5 is one-level
+        // backtracking; the user's "deep backstack" is the CLI `kb links`
+        // surface, not the TUI).
+        assert!(
+            app.read_return.is_some(),
+            "the immediate return (B) is parked for the Esc back"
+        );
+
+        // 6. Esc from Read C → Read B (not Browse).
+        app.close_read();
+        let rs = match &app.mode {
+            Mode::Read(r) => r,
+            m => panic!("Esc from C should land in Read B, got {m:?}"),
+        };
+        assert_eq!(rs.abs_path, "/root/b.md", "back to B");
+
+        // 7. Esc from Read B → Browse (A was dropped at step 5).
+        app.close_read();
+        assert!(
+            matches!(app.mode, Mode::Browse),
+            "Esc from B lands in Browse (one-level backtracking by design)"
+        );
+    }
+
+    /// The `l` key in `handle_read` is only reachable when find is not
+    /// armed. The *input* dispatch (`handle_event`) routes `Mode::Links(_)`
+    /// to `handle_links` — a unit-test of the full path would need
+    /// `KeyEvent` plumbing, but we can at least verify that the *mode*
+    /// reaches `handle_links` by observing that pressing `Esc` from the
+    /// picker goes through `close_links` (pops to Read), not through
+    /// `handle_read`'s Esc arm (which would also pop to Read via
+    /// `close_read` — so we need a discriminator: pressing `j`/`k` from
+    /// the picker moves the *picker's* cursor, not the body's scroll).
+    ///
+    /// This test pins the observable state transition: enter the picker,
+    /// call `links_open_selected` on entry 0, then verify the mode is Read.
+    #[test]
+    fn links_picker_is_a_distinct_mode_not_read() {
+        let db = Db::open_in_memory_test().unwrap();
+        db.migrate().unwrap();
+        // A page with two links so we can exercise the cursor.
+        insert_page(
+            &db,
+            "a",
+            "A",
+            "see [[b]] then [[c]]\n",
+        );
+        insert_page(&db, "b", "B", "b body\n");
+        insert_page(&db, "c", "C", "c body\n");
+        let mut app = App::new(db).unwrap();
+        app.selected = 0;
+        app.open_read().unwrap();
+        app.open_links().unwrap();
+        if let Mode::Links(l) = &mut app.mode {
+            assert_eq!(l.links.len(), 2, "two wikilinks on A");
+            // Moving down: the cursor advances, but *the Read scroll is
+            // untouched* (it lives on the parked `ReadState`, not here).
+            l.cursor += 1;
+            assert_eq!(l.cursor, 1, "cursor advanced within the picker");
+        } else {
+            panic!("expected Links mode after open_links");
+        }
+        // Esc back: the Read is exactly where we left it (scroll still 0).
+        app.close_links();
+        let rs = match &app.mode {
+            Mode::Read(r) => r,
+            _ => panic!(),
+        };
+        assert_eq!(rs.scroll_top, 0, "Read scroll unchanged by the picker excursion");
     }
 
 }

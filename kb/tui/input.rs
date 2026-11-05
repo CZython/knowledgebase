@@ -73,6 +73,7 @@ pub fn handle_event(app: &mut App, ev: KeyEvent) -> bool {
         crate::tui::Mode::Alias(_) => handle_alias(app, ev),
         crate::tui::Mode::Roots(_) => handle_roots(app, ev),
         crate::tui::Mode::Search(_) => handle_search(app, ev),
+        crate::tui::Mode::Links(_) => handle_links(app, ev),
     }
 }
 
@@ -282,6 +283,97 @@ fn handle_read(app: &mut App, ev: KeyEvent) -> bool {
                 .find_note()
                 .unwrap_or_else(|| "find — type a needle · Esc close".to_owned());
             app.set_info(note);
+            false
+        }
+        // `l` opens the **Link-picker** (M8.5) for the page being read:
+        // lists every link on the page (wikilink + path) with position,
+        // context, and resolution; `Enter` follows a *unique* link, `Esc`
+        // pops back to this Read. Pre-selects the link nearest the most
+        // recent find hit (if any) so the "I just finished `f`" follow-up
+        // path starts at the right place rather than at line 0.
+        //
+        // **Only when find is not armed** (the `handle_find_input` branch
+        // at the top captures all keys including `l` while find is live).
+        KeyCode::Char('l') => {
+            if let Err((msg, _)) = app.open_links() {
+                app.set_error(msg);
+            }
+            false
+        }
+
+        _ => false,
+    }
+}
+
+
+/// Input handler for the **Link-picker** (M8.5) — the TUI half of the
+/// agent-friendly "list links + open one by index" workflow.
+///
+/// Keys:
+/// - `↑` / `↓` / `k` / `j` — move the cursor over the link list.
+/// - `Home` / `End` — jump to first / last.
+/// - `Enter` — open the selected *unique* link (ambiguous targets are
+///   no-ops: the TUI surfaces them with a "(N candidates)" hint and the
+///   user disambiguates from the CLI; the picker is intentionally dumb).
+/// - `x` / `Esc` — drop the picker (back to the Read the picker was
+///   opened from). Two keys for muscle memory.
+/// - `q` / `C-c` — quit the TUI (consistent with every other mode).
+///
+/// No character-typed input (the list is positional, not a query), so no
+/// `filter_active`-style top-level check.
+fn handle_links(app: &mut App, ev: KeyEvent) -> bool {
+    match ev.code {
+        KeyCode::Char('q') => true,
+        KeyCode::Char('c') if ev.modifiers.contains(KeyModifiers::CONTROL) => true,
+
+        KeyCode::Up | KeyCode::Char('k') => {
+            if let crate::tui::Mode::Links(l) = &mut app.mode {
+                if l.cursor > 0 {
+                    l.cursor -= 1;
+                }
+            }
+            app.set_links_note();
+            false
+        }
+        KeyCode::Down | KeyCode::Char('j') => {
+            if let crate::tui::Mode::Links(l) = &mut app.mode {
+                if l.cursor + 1 < l.links.len() {
+                    l.cursor += 1;
+                }
+            }
+            app.set_links_note();
+            false
+        }
+        KeyCode::Home => {
+            if let crate::tui::Mode::Links(l) = &mut app.mode {
+                l.cursor = 0;
+            }
+            app.set_links_note();
+            false
+        }
+        KeyCode::End => {
+            if let crate::tui::Mode::Links(l) = &mut app.mode {
+                l.cursor = l.links.len().saturating_sub(1);
+            }
+            app.set_links_note();
+            false
+        }
+
+        // `Enter` opens the selected entry's unique resolution (parked in
+        // `App::read_return` so `Esc`-back lands in the Read the picker
+        // was opened from); a no-op for ambiguous / unresolved targets.
+        KeyCode::Enter => match app.links_open_selected() {
+            Ok(()) => false,
+            Err((msg, _)) => {
+                app.set_error(msg);
+                false
+            }
+        },
+
+        // Drop the picker (back to the Read the picker was opened from).
+        // `close_links` owns the status note.
+        KeyCode::Char('x') | KeyCode::Esc => {
+            app.close_links();
             false
         }
 

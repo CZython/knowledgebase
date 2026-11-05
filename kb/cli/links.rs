@@ -33,18 +33,38 @@ fn resolve_target_path(
 }
 
 
-pub(crate) fn cmd_links(dbpath: Option<&Path>, target: &str, json: bool) -> Kb {
+pub(crate) fn cmd_links(dbpath: Option<&Path>, target: &str, list: bool, json: bool) -> Kb {
     let db = open_db(dbpath)?;
 
     let Some(abs_path) = resolve_target_path(&db, target)? else {
         return Err((format!("no page found for {target:?}"), EXIT_ERR));
     };
 
+    let corpus_pages = load_corpus(&db)?;
+
+    // `--list` is the per-occurrence view: it reads the page's body directly
+    // (not the `links` table, which is the dedup'd edge set) and resolves
+    // every occurrence against the corpus. It does NOT compute backlinks
+    // (a list is about forward edges; the edge-set path owns backlinks).
+    if list {
+        let body: String = db
+            .conn
+            .query_row(
+                "SELECT COALESCE(body, '') FROM pages WHERE abs_path = ?1",
+                [abs_path.as_str()],
+                |r| r.get(0),
+            )
+            .map_err(|e| (format!("body lookup for {abs_path}: {e}"), EXIT_ERR))?;
+        let links = annotated_links(&body, &corpus_pages);
+        render_links_list(&abs_path, &links, json);
+        return Ok(EXIT_OK);
+    }
+
+    // ---- edge-set path (default) ----
     // Load the corpus once — used both to resolve the *current* page's forward
     // wikilinks (so a `[[B]]` in this page's body is shown as the page it
     // points to, not the raw "B") and to build the true backlink set (pages
     // whose extracted forward links resolve to `abs_path`).
-    let corpus_pages = load_corpus(&db)?;
     let abs_index: std::collections::HashMap<String, &resolver::Page> =
         corpus_pages.iter().map(|p| (p.abs_path.clone(), p)).collect();
 
@@ -117,6 +137,87 @@ pub(crate) fn cmd_links(dbpath: Option<&Path>, target: &str, json: bool) -> Kb {
     Ok(EXIT_OK)
 }
 
+
+/// Render a page's per-occurrence link list in the requested format
+/// (shared by `kb links --list` human + `--list --json` paths, so the two
+/// can never disagree — same input, same field order).
+///
+/// `list` is *numbered* in document order: the agent can refer back to
+/// `links[i].line` / `links[i].target` without disambiguating by target
+/// (which, per the §4 contract, may collide).
+fn render_links_list(
+    abs_path: &str,
+    links: &[crate::AnnotatedLink],
+    json: bool,
+) {
+    if json {
+        let items: Vec<String> = links
+            .iter()
+            .enumerate()
+            .map(|(idx, l)| {
+                let style = l.style.as_str();
+                let mut o = JObject::new();
+                o.i("n", idx as i64);
+                o.i("line", l.line as i64);
+                o.i("col", l.col as i64);
+                o.s("context", &l.context);
+                o.s("target", &l.target);
+                o.s("style", style);
+                o.opt("resolves_to", &l.resolves_to);
+                if !l.candidates.is_empty() {
+                    o.raw("candidates", inline_array(&l.candidates));
+                }
+                if let Some((typ, slug)) = &l.resolved_id {
+                    o.s("resolved_id", &format!("{typ}:{slug}"));
+                }
+                o.render()
+            })
+            .collect();
+        let mut o = JObject::new();
+        o.s("page", abs_path);
+        o.i("count", links.len() as i64);
+        o.raw("links", block_array(&items));
+        println!("{}", o.render());
+    } else {
+        println!("page: {abs_path}");
+        if links.is_empty() {
+            println!("\nlinks: none");
+            return;
+        }
+        println!("\nlink list ({}):", links.len());
+        for (idx, l) in links.iter().enumerate() {
+            let style = l.style.as_str();
+            let annotated = match l.resolves_to.as_deref() {
+                Some(abs) => {
+                    let id = l
+                        .resolved_id
+                        .as_ref()
+                        .map(|(t, s)| format!("{t}:{s}"))
+                        .unwrap_or_else(|| abs.to_string());
+                    format!("  → {id}")
+                }
+                None => {
+                    if l.candidates.len() > 1 {
+                        let n = l.candidates.len();
+                        let first = l
+                            .candidates
+                            .first()
+                            .map(|c| c.rsplit('/').next().unwrap_or(c))
+                            .unwrap_or("")
+                            .to_string();
+                        format!("  ({} candidates — first: {first})", n)
+                    } else {
+                        "  (unresolved)".to_string()
+                    }
+                }
+            };
+            // Show the line (1-based) and context so a user reading in a
+            // pager can `grep -n` / `sed -n Np` to jump.
+            println!("  [{idx}] L{} [ {style} ] {target}{annotated}", l.line + 1, target = l.target);
+            println!("        └─ {}", l.context.chars().take(140).collect::<String>());
+        }
+    }
+}
 
 /// Render a resolved page's forward + backlink set in the requested format.
 /// JSON (stdout exactly-one-document) and the human layout both flow off the
