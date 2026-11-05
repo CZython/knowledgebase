@@ -531,6 +531,7 @@ kb replace <file> --find X --new Y [--scope REF] [--count N] <flags>
 | **M7b** ✅ | **Cross-page link resolution** — the §4 5-stage waterfall moved from a shell-string hack into a pure, *verified* kb-core primitive (`kb-core::resolve`: `Page`, `Resolution`, `resolve(query,pages)`, `split_type_slug`, `path_matches`), so the same corpus-identity logic powers all three verbs that need it (`resolve`, `links` forward-annotation, `links` true-backlink) rather than three different SQL queries that happened to disagree. The `resolve` verb now returns **`type:slug`** display ids (not paths); a bare-slug collision renders a candidate list (no hard error — §4 contract); a type-qualified id disambiguates to a unique page. `cmd_links` now *resolves* each forward edge's raw `to_path` against the corpus (rendering `→ type:slug` for a hit, `(unresolved)` for a dead link), and the **backlink set is computed by inverting resolved edges** — i.e. a page B appears as a backlink of A only when one of A's forward targets *resolves to* B's `abs_path`, not when the raw stored text happens to string-match. **17 further proofs** verified via `verus` (`resolve_spec.rs`: 3-way outcome partition, stage-1 / stage-2 precedence, determinism, candidate-set well-formedness, empty-outcome total). 6 new integration tests in `kb/tests/m7_multifile.rs` (wikilink-backlinks-resolve, resolve-type-qualified-unique, resolve-bare-slug-collision, resolve-bare-slug-unique, resolve-substring-unique-and-ambiguous, resolve-missing-slug-is-empty-no-error). `cargo test --workspace` **green, 0 failures** (297 total). `./verify.sh` **334 verified / 0 errors**. **All green — see §13j.** |
 | **M7c** ✅ | **Tag-alias import/export (recovery table)** — the M8 "(optional) export/import `tag_aliases` to a file to recover alias knowledge after a DB wipe" item, landed early as the M7b namespace's one *non-derivable* state pathway (§2: `roots` + `tag_aliases` are the only DB-resident state that does not rebuild from the tree). A new pure, **verified** kb-core module owns the byte↔row codec so the shell only owns the file + the DB: `kb-core::aliases` — `to_text` (export: sort by `(alias,canonical)`, dedup, `alias\tcanonical` per line, empty set → empty string, deterministic over the set not the row order), `parse_line` (split on *first* tab, trim, reject empty fields, `None` = per-line skip not fatal), `line_is_ignorable` (blank / `#`-comment), `from_text` (import: last-wins on a repeated alias **matching the `--add` upsert**, first-occurrence order of survivors preserved). New CLI surface on `tag-alias`: `--export` (to `--file`, or **stdout** so `kb tag-alias --export > backup.tsv` works), `--import` (from `--file`, or **stdin** so `kb tag-alias --import < backup.tsv` works), with the skip count (blank/comment/malformed) reported on import so a partially-typed backup is never silently truncated. **16 new proofs** in `spec/alias_spec.rs` (separator is a real single token distinct from the newline terminator; data line decomposes as `alias ++ TAB ++ canonical ++ NL` with the alias a recoverable *prefix* and the canonical a recoverable *suffix*; alias is a strict prefix of the line so a line never degenerates to a bare alias; the export contains the separator; the per-line partition is clean+disjoint of ignorable vs data vs candidate; well-formed-pair guard; empty-set export is the empty sequence). 4 new integration tests in `kb/tests/m7_multifile.rs` (export-then-**wipe-the-DB**-then-import recovers the map and the alias still *resolves*; export-empty renders to the empty byte string and importing it is a no-op; import is idempotent / no row duplication; import skips malformed + blank + comment lines without losing the good rows). `cargo test --workspace` **green, 0 failures**. `./verify.sh` **350 verified / 0 errors** (14 spec files). **All green — see §13k.** |
 | **M8** | **Interactive TUI** — `kb tui`, an in-process ratatui + crossterm surface over the same `Db` / `kb-core` / `kb-db` the CLI uses (single binary; shares the connection, no fork, no IPC). Split into four increments: **M8.0** scaffold + *browse* ✅ (`App` state machine, event loop + raw-mode/alt-screen restore via a `Drop` guard, key bindings ↑↓/jk/Home-End, `/`/`Enter`/`a` reserved-but-reported, a colored status bar, `list_pages` snapshot) — **see §13l**. **M8.1** *read* + *filter* ✅ (open a page by `abs_path` in a scrollable two-pane view — body left, `heading_of` outline right — with `PgUp`/`PgDn`/`g`/`G` scroll; `/` opens a case-insensitive substring filter over `id`/`title`/`rel_path` — **see §13m**). **M8.2** *edit* + *autocomplete* ✅ (`e` opens a page's frontmatter into `Edit` mode over the verified `kb-core::frontmatter` ops — `title` / `description` in-place scalars, `tags` / `search_required_phrase` lists with **tab-autocomplete** (`suggestions_for` substring-filtering the corpus's known tokens) and `x` remove-tail live preview; the render's "pending plan" and the commit both call the *same* `build_ops` so they cannot diverge; commit = on-disk hash-guard → `apply_op` → same `atomic_write` as the CLI → single-page re-index + browse refresh → green `StatusKind::Success`) — **see §13n**. **M8.3** *alias + roots* manager ✅ (`a`/`r` open the `tag_aliases` + `roots` registries; a shared "form vs. list" `Tab` contract — type into the add form (`Enter` upsert / registers) or move the list selection (`x` removes / drops) — reusing the *same* `Db::add_root` / `drop_root` + `ON CONFLICT(alias) DO UPDATE` + `kb-db::refresh` as `cmd_add` / `cmd_tag_alias` / `cmd_drop_root`) — **see §13o**. **M8 complete — every `kb tui` binding (Browse, Read, Edit, alias, roots) lands.** |
+  | **M8.5** ✅ | **Link-picker + `kb links --list`** — follow links inline (TUI) and enumerate them with stable per-occurrence positions (agent). Pure core shared by both: `AnnotatedLink` + `annotated_links(body, pages)` (reuses verified `kb-core::links` classification + `kb-core::resolve` waterfall — no new proof obligation) and total `nearest_link_index()` (pure over `(line,col)` pairs). TUI `l` (Read mode) opens `Mode::Links` — numbered picker of the page's links (position + context + inline resolution `→ type:slug` / `N candidates` / `unresolved`); `Enter` on a unique hit opens the linked page, `Esc`/`x` pops back (one level of return-stack: `links_return` + `read_return`, by design). Find-aware: `l` while find is armed pre-selects the link **nearest** the highlighted hit (one-keystroke "I just finished `f`, follow this" path). CLI `kb links --list` — additive numbered per-occurrence report, human + JSON same field order; both surfaces read the same `annotated_links()` output so they cannot disagree. **140** `kb-user` TUI tests (round-trip + capture-order regressions) + 2 `--list` JSON-shape integration tests; `bash gate.sh` **7/7 green**; `./verify.sh` unchanged. **M8 fully closed — see §13r.** |
  | **M9** ✅ | **Agent-facing surface** — Part A (every TUI feature has a plain-CLI bypass), Part B (**every** CLI verb carries `--json`, with the JSON the *only* thing on stdout), Part C (`--db` global flag, already present — now re-asserted for the write path). **Part A**: browse→`browse`, read→`show`, filter→`search`, edit→`section … fm.<key>`/`replace`, alias→`tag-alias`, roots→`add`/`roots`/`drop-root`, cron→`cron` (all already CLI). **Part B**: new `--json` on `add`, `roots`, `drop-root`, `refresh`, `full-rebuild`, `browse`, `tag`, `tag-alias` (`--list`/`--add`/`--rm`/`--import`; `--export` stays the TSV recovery codec), `links`, `resolve`, `info`, `stats`, `cron`, plus the whole write path (`section …` + `replace` + `section edit` rejected). **All 25 CLI verbs** are now `--json`-able (the only exception is `tui`, which is inherently terminal-only). Hand-rolled JSON (zero serde): list verbs emit `[...]`, record/mutation verbs emit `{...}`, one top-level value, nothing else on stdout; human noise (diffs, "applied" notes) is *routed to stderr* under `--json`. New `PageJson` + `jbool` helpers + a `commit(...)` path that forces non-interactive and emits `{file,changed,dry_run,applied,bytes_before,bytes_after,diff}`. **12 integration tests** in `kb/tests/m9_agent_surface.rs` (binary-as-subprocess; each verb's stdout parsed by `python3 json` for shape + required keys, incl. an empty-`[]`/empty-`{}` fallthrough and `section edit --json` clean-reject). `cargo test --workspace` **green, 0 failures** (356 total at M9 close, up from 344). `./verify.sh` **350 verified / 0 errors** (unchanged — M9 is shell). **All green — see §13p.** |
  | **M9.5** ✅ | **`kb patch` — import an external unified diff** — the last single-file-namespace verb parked in §13f as *"~20 lines of `main.rs`: the parser + applier are already built and pinned"*. `Cmd::Patch` takes a target `FILE` plus a 3-way patch source (exactly one of `--patch-file [PATH|-]`, `--patch-stdin`, `--patch-text` — `allow_hyphen_values` on `--patch-text` so a `--- ...` leading line isn't misread as a flag); the shared write contract (`--dry-run` / `--yes` / `--if-unchanged` / `--json`) is inherited via the same `WriteFlags` + `commit()` as `section` / `replace`. The pure core does the work: `diff::apply_patch` consumes the *exact* standard unified diff output (cross-tested against GNU `patch(1)` on `testdata/standard.diff`; the `parse_unified` / `apply_patch` pair is unchanged this milestone). Result: a standard `diff -u` or `git diff` hunk is *consumed*, not re-derived — the write path closes the loop (every write verb already emits standard `diff -u` via `--diff`; `patch` imports that byte-identically). **8 new integration tests** in `kb/tests/section_cli.rs` (binary-as-subprocess over `testdata/*`: real `diff -u` byte-identical output vs. `section_new.md`, `--patch-stdin` via a pipe, `--patch-text` inline, `--dry-run` no-write, `--json` well-formed uniform envelope, 0-source / 2-source clean-reject, identity patch = "no changes" no-op). `--json` sweep extended from **25** to **26** verbs (all valid JSON). `cargo test --workspace` **green, 0 failures** (368 total, up from 360). **All green — see §13q.** |
 
@@ -2437,15 +2438,101 @@ _json_roundtrip` (append + `--dry-run` non-write), `replace_op_json_roundtrip`
  now listed; its `--json` output parses as the same uniform envelope the
  other write verbs produce).
 
- **M9.5 is now complete.** The single-file agent surface now closes the
- generate → *import* loop: every write verb already emits standard
- `diff -u` (via `--dry-run` or under `--diff`), and `kb patch` consumes
- a standard `diff -u` byte-identically. The round-trip
- `kb patch --patch-file <(kb replace … --dry-run)` therefore composes
- with any external patch producer (`diff -u`, `git diff`, a LLM's
- patch, `sed -n 'l' … | diff -u`). §13f's last parked single-file item
- is now resolved; the next parked single-file item is `--out` (write
- elsewhere than the source), which is explicitly marked as not a
- v1-contract change.
+  **M9.5 is now complete.** The single-file agent surface now closes the
+  generate → *import* loop: every write verb already emits standard
+  `diff -u` (via `--dry-run` or under `--diff`), and `kb patch` consumes
+  a standard `diff -u` byte-identically. The round-trip
+  `kb patch --patch-file <(kb replace … --dry-run)` therefore composes
+  with any external patch producer (`diff -u`, `git diff`, a LLM's
+  patch, `sed -n 'l' … | diff -u`). §13f's last parked single-file item
+  is now resolved; the next parked single-file item is `--out` (write
+  elsewhere than the source), which is explicitly marked as not a
+  v1-contract change.
+
+ ### 13r. M8.5 results — Link-picker (TUI) + `kb links --list` (built + tested)
+
+ **Scope.** M8 closes with two interlocking halves that share **one** pure
+ resolution core, so the TUI's "open the link I clicked" and the CLI's
+ "show me the link list" can never disagree:
+
+ - **The pure core** (`kb/main.rs`):
+   - `AnnotatedLink` — the per-occurrence link shape: `line`, `col`,
+     `context` (the trimmed raw line), `target` (the written token),
+     `style` (`links::LinkStyle`), `resolves_to` (the *unique* target's
+     `abs_path`), `candidates` (sorted `abs_path` set when ambiguous), and
+     `resolved_id` (`(type, slug)` of the unique hit, for display).
+   - `annotated_links(body, pages)` — scans a body **in document order**,
+     *reusing* the already-verified `kb-core::links::extract_links`
+     classification (a `[[ … ]]` span is one wikilink target; surrounding
+     whitespace-delimited tokens are path tokens only when
+     `links::is_pathlike` accepts them), and resolves each occurrence
+     against the corpus via the M7b-verified `kb-core::resolve` waterfall.
+     Pure over `(body, pages)`, no IO, no SQL — unit-tested for wikilink
+     position, relative/absolute path tokens, multiple links on a line,
+     multi-line, unresolved, and ambiguous cases.
+   - `nearest_link_index(links, anchor_line, anchor_col)` — a **total**
+     pure function over `(line, col)` pairs (not a concrete link type):
+     `|line − anchor|` primary, `|col − anchor|` tiebreak, `None` for an
+     empty list. Reusable by any consumer of a positioned link list;
+     unit-tested for empty / closest-line / column-tiebreak.
+
+ - **The TUI half** (`kb/tui/`, behind the `tui` feature — `kb-user`
+   only, like the rest of M8): `l` in Read mode opens a numbered
+   **Link-picker** (`Mode::Links`) of every link on the page — position,
+   context, and inline resolution (`→ type:slug`, `N candidates`,
+   `unresolved`). `Enter` on a *unique* hit opens the linked page's
+   reader (`links_open_selected` → `open_linked`); `Esc`/`x` pop back to
+   the origin Read. **Two return-stack slots** (`links_return` parked by
+   `open_links` and consumed by `close_links`; `read_return` parked by
+   `open_linked` and consumed by `close_read` *before* `search_return`)
+   give **one level** of backtracking by design — the CLI `--list` is the
+   "deep backstack" surface, not the TUI. **Find-aware:** with a find
+   session armed, a dedicated `l` arm in `handle_find_input` (captured
+   *before* the generic `Char(c)` typing arm) opens the picker anchored
+   on the highlighted hit, so the cursor pre-selects the link **nearest**
+   the anchor (`nearest_link_index`). This makes the "I just finished
+   `f`, now follow this" path a one-keystroke follow-through.
+
+ - **The CLI half** (`kb/cli/links.rs`): `kb links --list` — an
+   additive, per-occurrence numbered report (human + JSON share the same
+   field order: `line`, `col`, `context`, `target`, `style`,
+   `resolves_to`, `resolved_id`, `candidates`). Agents refer to
+   `links[i].line` / `links[i].target` to disambiguate a collision the
+   TUI refuses to guess; both surfaces read the **same**
+   `annotated_links()` output.
+
+ **Design notes.** `LinksEntry` (the TUI row) was deliberately kept
+ distinct from the CLI JSON: it carries `resolved: Option<String>`
+ (the pre-joined `type:slug` display id) and `abs_path:
+ Option<String>` (the navigation target), a strict subset of the CLI
+ contract's fields — no dead `#[allow(dead_code)]` fields remain. The
+ picker's `Enter`-on-ambiguous is a *no-op with a status note* (points
+ at `kb links --list {page}`), never a guess — the §4 "a collision is
+ legal, never a hard error" contract, applied to the navigation path.
+
+ **Gate.** `bash gate.sh` **7/7 green** (build · one-pkg · clippy
+ `--workspace --all-targets -- -D warnings` · tests · verus · behavior ·
+ dep-tree). `kb-user` TUI suite **140 tests** (up from the M8.0–M8.3
+ baseline), incl. the new link-picker round-trip tests
+ (`open_links` parks `links_return` and clears a stale `read_return`;
+ unique-target open, ambiguous no-op, `close_links` pops the parked Read,
+ the full A→B→C backtrack, `links_picker_is_a_distinct_mode_not_read`,
+ and `open_links_with_find_anchor_preselects_nearest`), plus the two
+ `--list` JSON-shape integration tests
+ (`links_list_json_shape`, `links_list_json_empty_is_well_formed`) and the
+ input-layer capture-order regressions
+ (`find_armed_l_opens_picker_not_typed`,
+ `read_armed_l_opens_picker_without_find`). `./verify.sh` unchanged
+ (no new `kb-core` proofs — `annotated_links` / `nearest_link_index` are
+ pure shell over the already-verified `links` / `resolve` core).
+ Render + input affordances updated: the Read + find body-pane titles now
+ advertise `f find` and `l links` (previously find-only).
+
+ **M8.5 is now complete.** The TUI can *follow* a link inline (not just
+ read the page) and the agent can *enumerate* a page's links with stable
+ per-occurrence positions over the JSON surface. **M8 is therefore
+ fully closed** — every `kb tui` binding (Browse, Read, Filter, Edit,
+ alias, roots, Search, **Link-picker**) has shipped.
+
 
 

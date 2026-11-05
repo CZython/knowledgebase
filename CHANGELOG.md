@@ -7,6 +7,40 @@ the API is still moving; breaking changes are called out explicitly.
 ## [Unreleased]
 
 ### Added
+- **`l` — the Link-picker (M8.5) in the TUI reader.** Pressing `l`
+  while in Read mode opens a numbered picker of every link on the page
+  (wikilink and path tokens, in document order), each annotated with its
+  line/column, a context snippet, and its inline resolution status
+  (`→ type:slug`, `N candidates`, or `unresolved`). `Enter` on a *unique*
+  hit opens the linked page's reader; `Esc`/`x` pops back to the origin
+  Read (one level of return-stack, by design — the CLI `kb links --list`
+  is the "deep backstack" surface). The picker is **find-aware**: with a
+  find session armed, `l` opens the picker with the cursor pre-selected
+  on the link **nearest** the highlighted hit (`nearest_link_index`:
+  `|line|` primary, `|col|` tiebreak), so the "I just finished `f`, now
+  follow this" path is a one-keystroke follow-through.
+- **`kb links --list` — the agent-friendly link surface.** The existing
+  `kb links` verb gains a `--list` mode that emits a *numbered* per-
+  occurrence report (both a human-readable form and a stable JSON
+  envelope sharing the same field order: `line`, `col`, `context`,
+  `target`, `style`, `resolves_to`, `resolved_id`, `candidates`). Agents
+  can refer to `links[i].line` / `links[i].target` to disambiguate a
+  collision that the TUI refuses to guess. The pure `annotated_links()`
+  (kb/main.rs) is the single source of truth shared by the TUI picker
+  and this CLI, so the two can never disagree on resolution.
+- **`nearest_link_index()` — pure, generic.** A total, side-effect-free
+  function over `(line, col)` pairs (not a concrete link type), so it is
+  reusable by any consumer of a positioned link list. Unit-tested for
+  empty / tiebreak / column-tiebreak cases.
+- **TUI polish and affordance.** The Read-mode body pane title now names
+  both `f find` and `l links` (previously find-only), and the
+  find-armed title names `l links`. `LinksEntry` was reshaped to drop a
+  dead `resolved_id` field and merge the display id into a single
+  `resolved: Option<String>` (the pre-joined `type:slug` form); `abs_path`
+  keeps its navigation-target meaning. 140 TUI tests total; the new
+  `find_armed_l_opens_picker_not_typed` and `read_armed_l_opens_picker_without_find`
+  pin the capture order of the `l` arm.
+
 - **`D7` — the package identity is now a `const` in the shared body.**
   `kb/main.rs` defines `pub const VARIANT: &str = "user" | "hardened"` once,
   and the existing `Cli` derive (`name = …`, `version = …`) now reads
