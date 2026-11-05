@@ -292,8 +292,10 @@ fn handle_read(app: &mut App, ev: KeyEvent) -> bool {
         // recent find hit (if any) so the "I just finished `f`" follow-up
         // path starts at the right place rather than at line 0.
         //
-        // **Only when find is not armed** (the `handle_find_input` branch
-        // at the top captures all keys including `l` while find is live).
+        // **Reachable whether or not find is armed**: with find armed, a
+        // dedicated `l` arm in `handle_find_input` (below) also opens the
+        // picker — using the currently-highlighted find hit as the anchor
+        // — so `f` → navigate → `l` is a one-keystroke follow-through.
         KeyCode::Char('l') => {
             if let Err((msg, _)) = app.open_links() {
                 app.set_error(msg);
@@ -421,7 +423,18 @@ fn handle_find_input(app: &mut App, ev: KeyEvent) -> bool {
             false
         }
 
-        // Type / delete the needle.
+        // Type / delete the needle. `l` is special: it opens the
+        // Link-picker (M8.5) anchored on the currently-highlighted find
+        // hit — the "I just finished `f`, now follow the closest link"
+        // fast path. `l` is a rare needle character, and the design
+        // (user constraint #2) is that the picker *pre-selects nearest* on
+        // find-armed entry, so it must NOT be typed into the needle here.
+        KeyCode::Char('l') => {
+            if let Err((msg, _)) = app.open_links() {
+                app.set_error(msg);
+            }
+            false
+        }
         KeyCode::Backspace => {
             app.find_backspace();
             let note = app.find_note().unwrap_or_default();
@@ -1147,6 +1160,131 @@ mod tests {
                 _ => panic!(),
             };
             assert_eq!(fs.needle, "jknn", "'n' is typed verbatim -> 'jknn'");
+        }
+    }
+
+    /// While find is armed (Read mode), the dedicated `l` arm in
+    /// `handle_find_input` (M8.5) must be captured and open the
+    /// Link-picker — NOT typed into the needle (the design constraint
+    /// that `l` is a one-keystroke follow-through: `f` → navigate → `l`).
+    /// Regression: a generic `Char(c)` arm that pre-dates the `l` arm
+    /// would have swallowed the character and the picker would never
+    /// have pre-selected the nearest link.
+    #[test]
+    fn find_armed_l_opens_picker_not_typed() {
+        let db = crate::tui::Db::open_in_memory_test().unwrap();
+        db.migrate().unwrap();
+        let body = String::from("first see [[b]]\nanchor line\nsecond\n[[c]] last\n");
+        db.conn
+            .execute(
+                "INSERT INTO pages (abs_path, id, type, title, root, rel_path, search_required_phrase, body, frontmatter_text, mtime_ns, content_hash)
+                 VALUES ('/root/l.md', 'note:lk', 'note', 'L Test', '/root', 'l.md', NULL, ?1, '---', 0, 'x')",
+                rusqlite::params![body],
+            )
+            .unwrap();
+        for (name, title) in [("b", "LB"), ("c", "LC")] {
+            db.conn
+                .execute(
+                    "INSERT INTO pages (abs_path, id, type, title, root, rel_path, search_required_phrase, body, frontmatter_text, mtime_ns, content_hash)
+                     VALUES (?1, ?2, 'note', ?3, '/root', ?4, NULL, 'x body\n', '---', 0, 'x')",
+                    rusqlite::params![
+                        format!("/root/{name}.md"),
+                        format!("note:{name}"),
+                        title,
+                        format!("{name}.md"),
+                    ],
+                )
+                .unwrap();
+        }
+        let mut app = App::new(db).unwrap();
+        app.selected = app.view.iter().position(|r| r.id == "note:lk").unwrap();
+        app.open_read().unwrap();
+
+        // Arm find with a needle that matches one specific line,
+        // giving us a known anchor.
+        app.find_activate();
+        for c in "anchor".chars() {
+            assert!(!handle_event(&mut app, key(c)));
+        }
+        {
+            let fs = match &app.mode {
+                crate::tui::Mode::Read(r) => r.find.as_ref().expect("find state"),
+                _ => panic!(),
+            };
+            assert_eq!(fs.needle, "anchor", "needle 'anchor' before l");
+            assert_eq!(fs.matches.len(), 1);
+            assert_eq!(fs.cursor, 0);
+        }
+
+        // Now `l` must open the picker, not append to the needle.
+        assert!(!handle_event(&mut app, key('l')));
+        assert!(
+            matches!(app.mode, crate::tui::Mode::Links(_)),
+            "'l' while find armed opens the Link-picker"
+        );
+        // The needle on the parked Read must still be "anchor"
+        // (NOT "anchorl", proving the capture arm ran first).
+        // The parked state is `links_return` (pop target on Esc).
+        if let Some(rs) = &app.links_return {
+            let fs = rs.find.as_ref().expect("find still armed in parked Read");
+            assert_eq!(
+                fs.needle, "anchor",
+                "'l' was NOT typed into the needle"
+            );
+        } else {
+            panic!("open_links must park the source Read so Esc can return to it");
+        }
+        // The picker cursor must reflect the find anchor (line 1) — the
+        // closest link is line 0 ([[b]]) by `|line-1|` tiebreak with line 3.
+        if let crate::tui::Mode::Links(l) = &app.mode {
+            assert_eq!(l.links.len(), 2, "two wiki links on the page");
+            // |0-1|=1, |3-1|=2 → index 0 (line 0) is nearest.
+            assert_eq!(l.cursor, 0, "cursor pre-selected at link closest to anchor (line 1)");
+        }
+    }
+
+    /// `l` NOT in find-armed Read: the same key in plain Read also
+    /// opens the picker (anchor = None → cursor 0). Guards against a
+    /// refactor that scopes `l` only to the find-armed branch.
+    #[test]
+    fn read_armed_l_opens_picker_without_find() {
+        let db = crate::tui::Db::open_in_memory_test().unwrap();
+        db.migrate().unwrap();
+        // One `execute` per page (rusqlite's `execute` is single-statement).
+        let body = String::from("see [[q]]\nand [[r]]\n");
+        db.conn
+            .execute(
+                "INSERT INTO pages (abs_path, id, type, title, root, rel_path, search_required_phrase, body, frontmatter_text, mtime_ns, content_hash)
+                 VALUES ('/root/p.md', 'note:rl', 'note', 'R L', '/root', 'p.md', NULL, ?1, '---', 0, 'x')",
+                rusqlite::params![body],
+            )
+            .unwrap();
+        for (name, title) in [("q", "LQ"), ("r", "Lr")] {
+            db.conn
+                .execute(
+                    "INSERT INTO pages (abs_path, id, type, title, root, rel_path, search_required_phrase, body, frontmatter_text, mtime_ns, content_hash)
+                     VALUES (?1, ?2, 'note', ?3, '/root', ?4, NULL, 'x body\n', '---', 0, 'x')",
+                    rusqlite::params![
+                        format!("/root/{name}.md"),
+                        format!("note:{name}"),
+                        title,
+                        format!("{name}.md"),
+                    ],
+                )
+                .unwrap();
+        }
+        let mut app = App::new(db).unwrap();
+        app.selected = app.view.iter().position(|r| r.id == "note:rl").unwrap();
+        app.open_read().unwrap();
+        // Find NOT armed.
+        assert!(!app.find_armed());
+        assert!(!handle_event(&mut app, key('l')));
+        assert!(
+            matches!(app.mode, crate::tui::Mode::Links(_)),
+            "'l' in plain Read opens the Link-picker"
+        );
+        if let crate::tui::Mode::Links(l) = &app.mode {
+            assert_eq!(l.cursor, 0, "no anchor → cursor 0 (first link)");
         }
     }
 

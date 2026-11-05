@@ -247,11 +247,16 @@ pub struct SearchState {
 /// `[[…]]` among repeats) and its resolution (so the user sees where it
 /// points *before* they open it).
 ///
-/// `resolves_to` / `candidates` mirror the §4 contract on the CLI side:
-/// exactly one of `resolves_to` and `candidates.len() > 1` is `Some` /
-/// non-empty when the target is ambiguous or multi-page; both are `None` /
-/// empty when it is a dead `[[…]]` (the shell may display it as
-/// unresolved).
+/// `resolved` / `candidates` mirror the §4 contract on the CLI side:
+/// exactly one of `resolved` and `candidates` is `Some` / non-empty depending
+/// on whether the target resolved uniquely vs ambiguously; both are `None`
+/// / empty when the target is a dead `[[…]]`.
+///
+/// `resolved` is the *display id* (`type:slug`, e.g. `note:Transformer`)
+/// for the unique hit — exactly the string the picker shows ("→ note:Transformer").
+/// It is the *tuple* of the CLI-side `AnnotatedLink.resolved_id`; the
+/// `type:slug` format is the user-facing form, while the navigation identity
+/// (the absolute path `open_linked` consumes) lives in `abs_path`.
 ///
 /// `abs_path` is the *target* page the link points at (NOT the page the
 /// user is reading) — the value `links_open` uses as the `abs_path` of the
@@ -269,20 +274,16 @@ pub struct LinksEntry {
     pub context: String,
     /// The written target (wikilink inner text, or a path token).
     pub target: String,
-    /// `Some((type, slug))` of the *unique* page the target resolves to.
-    /// `None` = ambiguous (see `candidates`) or unresolved.
-    pub resolves_to: Option<(String, String)>,
+    /// The *display id* (`type:slug`) of the unique hit — for the
+    /// "→ {id}" render. `None` when ambiguous (see `candidates`) or
+    /// unresolved.
+    pub resolved: Option<String>,
     /// The collision set (absolute paths, sorted) when resolution was
     /// ambiguous. Empty when the link is unique or unresolved.
     pub candidates: Vec<String>,
     /// The resolved `abs_path` the `Enter` key will navigate to (only set
     /// for a *unique* hit; `None` otherwise).
     pub abs_path: Option<String>,
-    /// The target page's `id` (`type:slug`) — the display string the
-    /// picker shows in the list ("→ wiki:LLM"). `None` when ambiguous or
-    /// unresolved.
-    #[allow(dead_code)]
-    pub resolved_id: Option<String>,
 }
 
 /// The **Link-picker** state (M8.5). Holds the full per-occurrence list of
@@ -1291,13 +1292,9 @@ impl App {
                 col: al.col,
                 context: al.context,
                 target: al.target,
-                resolves_to: al.resolved_id.as_ref().map(|(t, s)| (t.clone(), s.clone())),
+                resolved: al.resolved_id.as_ref().map(|(t, s)| format!("{t}:{s}")),
                 candidates: al.candidates,
                 abs_path: al.resolves_to,
-                resolved_id: al
-                    .resolved_id
-                    .as_ref()
-                    .map(|(t, s)| format!("{t}:{s}")),
             })
             .collect();
 
@@ -1454,11 +1451,13 @@ impl App {
             self.set_info("link-picker — no links on this page");
             return;
         };
-        let status = match (&entry.resolves_to, entry.candidates.len()) {
-            (Some((t, s)), 0) => format!("→ {t}:{s} — Enter opens"),
-            (None, n) if n > 1 => format!("({n} candidates — open from the CLI to disambiguate)"),
-            (None, _) => "unresolved — dead link".to_string(),
-            _ => "?".into(),
+        let status = match &entry.resolved {
+            Some(id) => format!("→ {id} — Enter opens"),
+            None if entry.candidates.len() > 1 => format!(
+                "({} candidates — open from the CLI to disambiguate)",
+                entry.candidates.len()
+            ),
+            None => String::from("unresolved — dead link"),
         };
         self.set_info(format!(
             "link {cursor_plus} of {total} · L{line} {status} · {context}",
@@ -6991,7 +6990,7 @@ mod tests {
         };
         assert_eq!(ls.links.len(), 1, "exactly one wikilink in the body");
         // The link must be ambiguous (two slug matches → Candidates(2)).
-        assert!(ls.links[0].resolves_to.is_none(), "not unique → resolves_to is None");
+        assert!(ls.links[0].resolved.is_none(), "not unique → resolved is None");
         assert_eq!(ls.links[0].candidates.len(), 2, "two candidate abs_paths");
         app.links_open_selected().unwrap();
         // We must still be in Links (no navigation).
@@ -7121,8 +7120,53 @@ mod tests {
         );
     }
 
-    /// The `l` key in `handle_read` is only reachable when find is not
-    /// armed. The *input* dispatch (`handle_event`) routes `Mode::Links(_)`
+    /// `l` in `handle_find_input` opens the picker anchored on the current
+    /// find hit — the "I just finished `f`, now follow the closest link"
+    /// fast path. These tests exercise `open_links()` with a live find
+    /// state (the same path `handle_find_input`'s `l` arm takes) and verify
+    /// the picker cursor is pre-selected at the link **nearest** the find
+    /// anchor, not at index 0.
+    #[test]
+    fn open_links_with_find_anchor_preselects_nearest() {
+        let db = Db::open_in_memory_test().unwrap();
+        db.migrate().unwrap();
+        // Link B at line 0, link C at line 5 (lines 1–4 are filler).
+        // Needle matches on line 4 → nearest link is C (line 5), index 1.
+        let body = String::from(
+            "see [[b]]\nfiller 1\nfiller 2\nfiller 3\nanchor here\nthen [[c]]\n"
+        );
+        insert_page(&db, "a", "A", &body);
+        insert_page(&db, "b", "B", "b body\n");
+        insert_page(&db, "c", "C", "c body\n");
+        let mut app = App::new(db).unwrap();
+        app.selected = 0;
+        app.open_read().unwrap();
+
+        app.find_activate();
+        for c in "anchor".chars() {
+            app.find_input(c);
+        }
+        // Anchor is at line 4.
+        {
+            let rs = match &app.mode { Mode::Read(r) => r, _ => panic!() };
+            let fs = rs.find.as_ref().unwrap();
+            assert_eq!(fs.matches.len(), 1);
+            assert!(
+                fs.matches[0].0 == 4,
+                "anchor on line 4, got {:?}",
+                fs.matches[0]
+            );
+        }
+
+        app.open_links().unwrap();
+        let ls = match &app.mode { Mode::Links(l) => l, _ => panic!() };
+        assert_eq!(ls.links.len(), 2);
+        // Link B at line 0: |0 - 4| = 4
+        // Link C at line 5: |5 - 4| = 1 ← nearest
+        assert_eq!(ls.cursor, 1, "cursor pre-selected at nearest (C, not B)");
+    }
+
+    /// The `*input*` dispatch (`handle_event`) routes `Mode::Links(_)`
     /// to `handle_links` — a unit-test of the full path would need
     /// `KeyEvent` plumbing, but we can at least verify that the *mode*
     /// reaches `handle_links` by observing that pressing `Esc` from the

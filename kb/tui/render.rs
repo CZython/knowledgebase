@@ -337,12 +337,12 @@ fn draw_read(f: &mut Frame, app: &App, rs: &ReadState, area: ratatui::layout::Re
         let m = fs.matches.len();
         let pos = fs.cursor.min(m - 1) + 1;
         format!(
-            " body — find '{}': {pos} of {m} · ↑/↓ move · Esc close",
+            " body — find '{}': {pos} of {m} · ↑/↓ move · l links · Esc close",
             fs.needle
         )
     } else {
         format!(
-            " body — row {} of {} (jk/PgUp/Dn, g/G, Esc back)",
+            " body — row {} of {} (jk/PgUp/Dn, g/G, f find, l links, Esc back)",
             rs.scroll_top + 1,
             total_rows,
         )
@@ -1761,14 +1761,13 @@ fn draw_links(f: &mut ratatui::Frame, app: &App, ls: &LinksState, area: Rect) {
         .enumerate()
         .map(|(i, e)| {
             // Status span — role-mapped to the palette (no inline colors).
-            let status = match (&e.resolves_to, e.candidates.len()) {
-                (Some((t, sl)), 0) => Span::styled(format!("→ {t}:{sl}"), app.palette.success),
-                (None, n) if n > 1 => Span::styled(
-                    format!("({n} candidates — disambiguate from the CLI)"),
+            let status = match &e.resolved {
+                Some(id) => Span::styled(format!("→ {id}"), app.palette.success),
+                None if e.candidates.len() > 1 => Span::styled(
+                    format!("({} candidates — disambiguate from the CLI)", e.candidates.len()),
                     app.palette.hint,
                 ),
-                (None, _) => Span::styled("(unresolved — dead link)", app.palette.error),
-                _ => Span::styled("?", app.palette.dim),
+                None => Span::styled("(unresolved — dead link)", app.palette.error),
             };
             let on = i == ls.cursor;
             let style = if on {
