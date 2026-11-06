@@ -7,6 +7,27 @@ the API is still moving; breaking changes are called out explicitly.
 ## [Unreleased]
 
 ### Added
+- **`kb verify <FILE>` — target-driven page lint (DESIGN-verify.md, Phases 1+2).**
+  Scriptable one-file check answering "is this a well-formed kb page, clean
+  exit code, every link resolves, and (for a label) does it still name real
+  files?" Checks (a) valid markdown extension, (b) frontmatter framing, (c)
+  required `type:` + `slug:` + `description:` length, (d) link resolution
+  (dead-vs-ambiguous vs resolved) and (e) the `type: label` files/folder
+  target — reusing the already-verified `kb-core` primitives
+  (`frontmatter::parse`, `identity::resolve_slug`, `identity::find_h1`,
+  `annotated_links`, `labels::classify`) with no new proof obligations.
+  Phase 2's dead/ambiguous/link findings and missing-label-file findings are
+  **warnings** (not errors): `--strict` escalates them → exit 1 (CI mode),
+  without it they stay exit 0 (human-friendly). `--json` emits a single JSON
+  document on stdout with the full shape `DESIGN-verify.md` locks (file,
+  verdict, exit, per-check `pass`/`frame`/`value`/`source`, the `links`
+  block — `total`/`resolved`/`external` + `dead[]` / `ambiguous[]` — and the
+  `label` block — `type`/`applies` + `files`/`missing` or `entries` — plus
+  top-level `errors[]` / `warnings[]` arrays only when non-empty). Exit
+  contract: 0 = ok / non-strict warning · 1 = error / strict-escalated ·
+  2 = usage (directory, missing file). 11 in-file tests + 26 integration
+  tests in `kb-user/tests/verify_cli.rs` (both render paths, every check,
+  every exit code, `--strict`, and JSON shape pin).
 - **`l` — the Link-picker (M8.5) in the TUI reader.** Pressing `l`
   while in Read mode opens a numbered picker of every link on the page
   (wikilink and path tokens, in document order), each annotated with its

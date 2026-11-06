@@ -283,6 +283,20 @@ pub(crate) enum Cmd {
         #[command(flatten)]
         args: CreateArgs,
     },
+    /// Page lint + link check: is this a well-formed kb page? (DESIGN-verify.md)
+    /// Phase 1: checks (a) markdown ext, (b) frontmatter framing, (c) required
+    /// fields. Phase 2 adds (d) links and (e) label files.
+    Verify {
+        /// One file to check (a directory is a usage error).
+        #[arg(value_name = "FILE")]
+        file: PathBuf,
+        /// Treat warnings as fatal (escalates `ok-with-warnings` → exit 1).
+        #[arg(long)]
+        strict: bool,
+        /// Emit the single JSON verdict document on stdout.
+        #[arg(long)]
+        json: bool,
+    },
 
     // ==================== multi-file namespace (M7) ====================
     /// Register a root and (re)index it. `--ext` adds extensions to the
@@ -630,6 +644,7 @@ pub(crate) fn main() {
         "tag-alias", "links", "resolve", "info", "stats", "cron",
         "tui",
         "create",
+        "verify",
         // `complete` is only present when the `completions` feature is on
         // (ON by default in `kb-user`; OFF in `kb-hardened`). Listing it
         // unconditionally mirrors the `tui`/`edit` entries: in the hardened
@@ -714,6 +729,9 @@ pub(crate) fn run(cli: &Cli) -> i32 {
             flags,
         } => cmd_patch(file, patch_file.as_deref(), *patch_stdin, patch_text.as_deref(), flags),
         Cmd::Create { filename, args } => cmd_create(cli.db.as_deref(), filename, args),
+        Cmd::Verify { file, strict, json } => {
+            cmd_verify(file, *strict, *json, cli.db.as_deref())
+        }
         // ---- multi-file namespace (M7) ----
         Cmd::Add { path, ext, include_hidden, json } =>
             cmd_add(cli.db.as_deref(), path, ext, *include_hidden, *json),

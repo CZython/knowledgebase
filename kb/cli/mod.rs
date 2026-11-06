@@ -17,6 +17,7 @@ pub(crate) mod section;
 pub(crate) mod show;
 pub(crate) mod tag;
 pub(crate) mod textsrc;
+pub(crate) mod verify;
 pub(crate) mod writeops;
 
 pub(crate) use browse::*;
@@ -34,4 +35,5 @@ pub(crate) use section::*;
 pub(crate) use show::*;
 pub(crate) use tag::*;
 pub(crate) use textsrc::*;
+pub(crate) use verify::*;
 pub(crate) use writeops::*;
