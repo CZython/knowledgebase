@@ -155,7 +155,7 @@ fn render_links_list(
             .iter()
             .enumerate()
             .map(|(idx, l)| {
-                let style = l.style.as_str();
+                let style = l.kind.style_str(&l.target);
                 let mut o = JObject::new();
                 o.i("n", idx as i64);
                 o.i("line", l.line as i64);
@@ -163,6 +163,12 @@ fn render_links_list(
                 o.s("context", &l.context);
                 o.s("target", &l.target);
                 o.s("style", style);
+                if let Some(label) = &l.label {
+                    o.s("label", label);
+                }
+                if let Some(section) = &l.section {
+                    o.s("section", section);
+                }
                 o.opt("resolves_to", &l.resolves_to);
                 if !l.candidates.is_empty() {
                     o.raw("candidates", inline_array(&l.candidates));
@@ -186,7 +192,11 @@ fn render_links_list(
         }
         println!("\nlink list ({}):", links.len());
         for (idx, l) in links.iter().enumerate() {
-            let style = l.style.as_str();
+            let style = l.kind.style_str(&l.target);
+            let target = match l.label.as_deref() {
+                Some(label) => format!("{label}  ({})", l.target),
+                None => l.target.clone(),
+            };
             let annotated = match l.resolves_to.as_deref() {
                 Some(abs) => {
                     let id = l
@@ -194,7 +204,11 @@ fn render_links_list(
                         .as_ref()
                         .map(|(t, s)| format!("{t}:{s}"))
                         .unwrap_or_else(|| abs.to_string());
-                    format!("  → {id}")
+                    let section = match l.section.as_deref() {
+                        Some(sec) => format!("  [#{sec}]"),
+                        None => String::new(),
+                    };
+                    format!("  → {id}{section}")
                 }
                 None => {
                     if l.candidates.len() > 1 {
@@ -211,9 +225,17 @@ fn render_links_list(
                     }
                 }
             };
+            // For `External` / `Current` the *target* is the whole thing (a bare
+            // URI, or a `#section` anchor) — there is no page to resolve to, so
+            // no `→ <page>` annotation.
+            let show_resolution = matches!(
+                l.kind,
+                kb_core::links::LinkKind::Db | kb_core::links::LinkKind::Path
+            );
+            let annotated = if show_resolution { annotated } else { String::new() };
             // Show the line (1-based) and context so a user reading in a
             // pager can `grep -n` / `sed -n Np` to jump.
-            println!("  [{idx}] L{} [ {style} ] {target}{annotated}", l.line + 1, target = l.target);
+            println!("  [{idx}] L{} [ {style} ] {target}{annotated}", l.line + 1);
             println!("        └─ {}", l.context.chars().take(140).collect::<String>());
         }
     }

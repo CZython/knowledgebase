@@ -1082,15 +1082,30 @@ pub(crate) fn resolve_target(pages: &[resolver::Page], target: &str) -> Option<S
 /// `{target, style}`), this carries:
 ///
 /// - `line` / `col` — the *raw* body coordinate (0-based line index + byte
-///   offset into the line where the reference starts). This is the
-///   `link_anchor` the TUI uses to pre-select "the link nearest my find hit"
-///   (the find hit's `(line_idx, byte_offset)` lives in the same row/col
-///   space, so the two are comparable for nearest-neighbor).
+///   offset into the line where the **reference** starts, including its
+///   open bracket). This is the `link_anchor` the TUI uses to pre-select
+///   "the link nearest my find hit" (the find hit's `(line_idx, byte_offset)`
+///   lives in the same row/col space, so the two are comparable for
+///   nearest-neighbor).
 /// - `context` — the containing raw line, trimmed. Kept because a page often
 ///   repeats a target (`[[LLM]]` in three sections); the context is what lets
 ///   a user (or agent) pick the occurrence they want when targets collide.
-/// - `resolves_to` — the page `abs_path` the target points at (`None` when it
-///   is unresolved or ambiguous).
+/// - `target` — the raw written target (inner text of `[[…]]`, the
+///   parenthesized part of `[…](…)`, the bracketed text of `[…]`, URI inner
+///   text of `<…>`). The *written* form, not the post-classification text.
+/// - `kind` — the *classification* of the target (Db / Path / External /
+///   Current), decided by `kb_core::links::classify_target`. Drives the
+///   resolver behaviour (skip for External/Current, resolve for Db/Path) and
+///   the render (`style_str()` → palette + `links.style` column).
+/// - `label` — the optional display text (the inline label). `None` for
+///   `[[X]]`, `[X]`, `<url>`; `Some(…)` for `[label](…)`. The renderer
+///   uses this verbatim as the visible text on a *resolved* link.
+/// - `section` — the `#section` (if any) on the target. Orthogonal to the
+///   kind — a db target can have a section, a path target can have one,
+///   and a *current-page* anchor is `kind=Current` + a section. Renderer
+///   renders it as `  #  <section>` after the visible text.
+/// - `resolves_to` — the page `abs_path` the target points at (`None` when
+///   it is unresolved or ambiguous, or for `External`/`Current`).
 /// - `candidates` — the collision set (`§4` "a collision is legal, never a
 ///   hard error"), sorted + dedup'd, when two or more pages match.
 ///
@@ -1102,14 +1117,19 @@ pub(crate) fn resolve_target(pages: &[resolver::Page], target: &str) -> Option<S
 pub struct AnnotatedLink {
     /// 0-based index of the raw body line the reference starts on.
     pub line: usize,
-    /// Byte offset within that line where the reference starts (the `col`).
+    /// Byte offset within that line where the reference (including its
+    /// wrappers) starts.
     pub col: usize,
     /// The containing raw line, trimmed — one-line surrounding context.
     pub context: String,
-    /// The written target (wikilink inner text, or a path token).
+    /// The raw written target (per the form it was written as).
     pub target: String,
-    /// How it was written (mirrors `links.style`).
-    pub style: links::LinkStyle,
+    /// The classification of the target (decides how it resolves + renders).
+    pub kind: links::LinkKind,
+    /// Optional display text (the inline label).
+    pub label: Option<String>,
+    /// Optional `#section` on the target.
+    pub section: Option<String>,
     /// The page it resolves to, when a unique match exists.
     pub resolves_to: Option<String>,
     /// The candidate `abs_path`s (sorted) when the target is ambiguous.
@@ -1118,89 +1138,90 @@ pub struct AnnotatedLink {
     pub resolved_id: Option<(String, String)>,
 }
 
-/// Extract every link in `body`, **in document order**, each annotated with
-/// its position + resolution against `pages`.
+/// Extract every **written link** in `body`, in document order, each
+/// annotated with its position + resolution against `pages`.
 ///
-/// Classification mirrors `kb_core::links::extract_links` exactly (a `[[ … ]]`
-/// span is one *wikilink* target — its inner text, *never* further split even
-/// if it contains `/`; surrounding tokens are split on whitespace and a token
-/// is a *path* link only when `links::is_pathlike` accepts it). What it adds
-/// on top is the per-occurrence position (`line`, `col`), the surrounding
-/// `context`, and the resolution (`resolves_to` / `candidates` /
-/// `resolved_id`), which `extract_links` leaves to the caller.
+/// The *scanner* is `kb_core::links::detect_refs` (syntax only: `[[…]]`,
+/// `[…]`, `[…](…)`, `<…>`). The *classifier* is
+/// `kb_core::links::classify_target` (the target's *kind* — Db / Path /
+/// External / Current — plus an `#section` if one). Both are pure, and both
+/// are already unit-tested + spec-proved in kb-core.
 ///
 /// `pages` is the full corpus (every resolved page, e.g. from
-/// [`load_corpus`]); it is read-only.
+/// [`load_corpus`]); it is read-only. A bare path token (a `notes/todo.md`
+/// sitting in prose) is **not** a link under the new grammar — it is the
+/// v1 heuristic, retired as part of the rework (DESIGN-links.md).
 pub fn annotated_links(body: &str, pages: &[resolver::Page]) -> Vec<AnnotatedLink> {
     let mut out: Vec<AnnotatedLink> = Vec::new();
     for (li, line) in body.lines().enumerate() {
         let context = line.trim().to_string();
-        let bytes = line.as_bytes();
-        let mut i = 0usize;
-        while i < bytes.len() {
-            if bytes[i] == b'[' && i + 1 < bytes.len() && bytes[i + 1] == b'[' {
-                i += 2;
-                let start = i;
-                while i < bytes.len()
-                    && !(bytes[i] == b']' && i + 1 < bytes.len() && bytes[i + 1] == b']')
-                {
-                    i += 1;
-                }
-                if i < bytes.len() && bytes[i] == b']' && i + 1 < bytes.len() && bytes[i + 1] == b']'
-                {
-                    let target = line[start..i].trim().to_string();
-                    if !target.is_empty() {
-                        push_annotated(&mut out, li, start, &context, target, links::LinkStyle::Wikilink, pages);
-                    }
-                    i += 2;
-                } else {
-                    // no closing `]]`: decorative — continue scanning
-                }
-            } else {
-                let token_start = i;
-                while i < bytes.len() && !bytes[i].is_ascii_whitespace() {
-                    i += 1;
-                }
-                if token_start < i {
-                    let token = &line[token_start..i];
-                    if let Some(style) = classify_path_token(token) {
-                        push_annotated(&mut out, li, token_start, &context, token.to_string(), style, pages);
-                    }
-                }
-                while i < bytes.len() && bytes[i].is_ascii_whitespace() {
-                    i += 1;
-                }
-            }
+        for raw in links::detect_refs(line) {
+            push_annotated(&mut out, li, raw.start, &context, &raw, pages);
         }
     }
     out
 }
 
-/// Classify a bare path token (a path link iff path-like; absolute iff it
-/// starts with `/`). The inverse is `None` (skip the token).
-fn classify_path_token(token: &str) -> Option<links::LinkStyle> {
-    if links::is_pathlike(token) {
-        Some(if token.starts_with('/') {
-            links::LinkStyle::Absolute
-        } else {
-            links::LinkStyle::Relative
-        })
-    } else {
-        None
-    }
-}
-
-/// Resolve `target` against `pages` and record a single `AnnotatedLink`.
+/// Classify a raw detected reference, resolve the page-part of the target,
+/// and record one `AnnotatedLink`. `External` / `Current` skip the resolver
+/// (they have no page to look up); `Db` / `Path` funnel through the *same*
+/// `resolver::resolve` waterfall (the §4 contract) so a bare-title link and
+/// a path link that both hit the same page cannot disagree.
 fn push_annotated(
     out: &mut Vec<AnnotatedLink>,
     line: usize,
     col: usize,
     context: &str,
-    target: String,
-    style: links::LinkStyle,
+    raw: &links::RawLink,
     pages: &[resolver::Page],
 ) {
-    let (resolves_to, candidates, resolved_id) = match resolver::resolve(&target, pages) {
+    let cls = links::classify_target(raw);
+    let base = AnnotatedLink {
+        line,
+        col,
+        context: context.to_string(),
+        target: cls.target.clone(),
+        kind: cls.kind,
+        label: cls.label.clone(),
+        section: cls.section.clone(),
+        resolves_to: None,
+        candidates: Vec::new(),
+        resolved_id: None,
+    };
+    // `External` / `Current` are informational (the bare URI, or the page's
+    // own `#section`); there is no page to resolve.
+    if cls.kind == links::LinkKind::External
+        || cls.kind == links::LinkKind::Current
+    {
+        out.push(base);
+        return;
+    }
+    // The resolver consumes the *page-part* of the target: any `#section`
+    // suffix is split off first (classify_target already split on the *first*
+    // `#`, so the `#<section>` tail is an exact suffix of the written
+    // target), and then — for the `[X]` inline form — the *inner* brackets
+    // are unwrapped (classify_target kept the brackets on `target` as the
+    // raw written form, but the resolver matches on slug/path; the brackets
+    // are a *wrapper*, not part of the target).
+    let pre_section = match &cls.section {
+        Some(sec) => {
+            let marker = format!("#{sec}");
+            cls.target
+                .strip_suffix(&marker)
+                .unwrap_or(cls.target.as_str())
+                .to_string()
+        }
+        None => cls.target.clone(),
+    };
+    let page_part = {
+        let t = pre_section.trim();
+        if t.len() >= 2 && t.starts_with('[') && t.ends_with(']') {
+            t[1..t.len() - 1].trim().to_string()
+        } else {
+            t.to_string()
+        }
+    };
+    let (resolves_to, candidates, resolved_id) = match resolver::resolve(&page_part, pages) {
         resolver::Resolution::Unique(abs) => {
             let id = pages
                 .iter()
@@ -1212,14 +1233,10 @@ fn push_annotated(
         resolver::Resolution::Empty => (None, Vec::new(), None),
     };
     out.push(AnnotatedLink {
-        line,
-        col,
-        context: context.to_string(),
-        target,
-        style,
         resolves_to,
         candidates,
         resolved_id,
+        ..base
     });
 }
 
@@ -1651,41 +1668,97 @@ mod links_tests {
         assert_eq!(links.len(), 1, "must extract exactly one wikilink");
         let l = &links[0];
         assert_eq!(l.line, 0, "single line → index 0");
-        assert_eq!(l.col, 6, "col is where the *target text* begins (after [[)");
+        assert_eq!(l.col, 4, "col is where the *reference* (the `[[`) begins");
         assert_eq!(l.target, "attention");
         assert_eq!(l.resolves_to.as_deref(), Some("/data/wiki/attention.md"));
         assert!(l.candidates.is_empty(), "unique hit → no candidate set");
         assert_eq!(l.context, body, "single-line body → whole line is the context");
-        match l.style {
-            links::LinkStyle::Wikilink => {}
-            _ => panic!("wikilink target must be classified as Wikilink"),
-        }
+        assert!(matches!(l.kind, links::LinkKind::Db), "wikilink classifies as a Db ref");
+        assert_eq!(l.kind.style_str(&l.target), "wikilink");
     }
 
     #[test]
-    fn annotated_links_extracts_relative_path() {
+    fn annotated_links_bare_path_token_is_not_a_link() {
+        // The v1 heuristic (`is_pathlike`: `/`-in-token or known ext) is
+        // retired — a bare path in prose is not a reference under the
+        // DESIGN-links.md grammar. (DESIGN-links.md §non-goals: `` `…` `` /
+        // bare tokens are inline code / prose, not links.)
         let pages = vec![page("/data/notes/todo.md", "todo", "note")];
         let body = "See notes/todo.md for the next step.";
         let links = annotated_links(body, &pages);
-        assert_eq!(links.len(), 1);
-        assert_eq!(links[0].target, "notes/todo.md");
-        match links[0].style {
-            links::LinkStyle::Relative => {}
-            _ => panic!("notes/todo.md must be classified as Relative"),
-        }
+        assert!(links.is_empty(), "bare path token must not be a link");
     }
 
     #[test]
-    fn annotated_links_extracts_absolute_path() {
+    fn annotated_links_plain_bracket_is_path() {
         let pages = vec![page("/data/a/b/c.md", "c", "note")];
-        let body = "Full: /data/a/b/c.md end.";
+        let body = "Full: [ /data/a/b/c.md ] end.";
         let links = annotated_links(body, &pages);
         assert_eq!(links.len(), 1);
-        assert_eq!(links[0].target, "/data/a/b/c.md");
-        match links[0].style {
-            links::LinkStyle::Absolute => {}
-            _ => panic!("/data/a/b/c.md must be classified as Absolute"),
-        }
+        let l = &links[0];
+        assert_eq!(l.target, "/data/a/b/c.md");
+        assert!(matches!(l.kind, links::LinkKind::Path), "bracketed path classifies as Path");
+        assert_eq!(l.kind.style_str(&l.target), "absolute");
+        assert_eq!(l.resolves_to.as_deref(), Some("/data/a/b/c.md"));
+    }
+
+    #[test]
+    fn annotated_links_inline_labeled_path() {
+        let pages = vec![page("/data/a/b/c.md", "c", "note")];
+        let body = "Full: [ the c page ]( /data/a/b/c.md ) end.";
+        let links = annotated_links(body, &pages);
+        assert_eq!(links.len(), 1);
+        let l = &links[0];
+        assert_eq!(l.target, "/data/a/b/c.md");
+        let label = l.label.as_deref().expect("inline form must carry the label");
+        assert_eq!(label, "the c page");
+        assert!(matches!(l.kind, links::LinkKind::Path));
+        assert_eq!(l.resolves_to.as_deref(), Some("/data/a/b/c.md"));
+    }
+
+    #[test]
+    fn annotated_links_inline_labeled_db() {
+        let pages = vec![page("/data/wiki/attention.md", "attention", "wiki")];
+        let body = "see [ the note ]( [ attention ] ) for detail";
+        let links = annotated_links(body, &pages);
+        assert_eq!(links.len(), 1);
+        assert!(matches!(links[0].kind, links::LinkKind::Db));
+        assert_eq!(links[0].label.as_deref(), Some("the note"));
+        assert_eq!(links[0].resolves_to.as_deref(), Some("/data/wiki/attention.md"));
+    }
+
+    #[test]
+    fn annotated_links_external_uri_is_not_resolved() {
+        let pages = vec![page("/data/wiki/attention.md", "attention", "wiki")];
+        let body = "paper: < https://arxiv.org/abs/1706.03762 > is a real URI";
+        let links = annotated_links(body, &pages);
+        assert_eq!(links.len(), 1);
+        assert!(matches!(links[0].kind, links::LinkKind::External));
+        assert!(links[0].resolves_to.is_none(), "external is informational");
+        assert!(links[0].candidates.is_empty());
+    }
+
+    #[test]
+    fn annotated_links_current_section() {
+        let body = "see [ # Cost / result ] for detail";
+        let links = annotated_links(body, &[]);
+        assert_eq!(links.len(), 1);
+        assert!(matches!(links[0].kind, links::LinkKind::Current));
+        assert_eq!(links[0].section.as_deref(), Some("Cost / result"));
+    }
+
+    #[test]
+    fn annotated_links_other_page_with_section_splits_and_resolves() {
+        let pages = vec![page("/data/wiki/attention.md", "attention", "wiki")];
+        let body = "see [[attention#Decoder]] and [x](/data/wiki/attention.md#Encoder)";
+        let links = annotated_links(body, &pages);
+        assert_eq!(links.len(), 2);
+        let a = &links[0];
+        assert_eq!(a.section.as_deref(), Some("Decoder"));
+        assert_eq!(a.resolves_to.as_deref(), Some("/data/wiki/attention.md"), "page-part must resolve");
+        let b = &links[1];
+        assert_eq!(b.section.as_deref(), Some("Encoder"));
+        assert_eq!(b.resolves_to.as_deref(), Some("/data/wiki/attention.md"));
     }
 
     #[test]

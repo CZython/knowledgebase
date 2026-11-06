@@ -1778,13 +1778,23 @@ fn draw_links(f: &mut ratatui::Frame, app: &App, ls: &LinksState, area: Rect) {
         .enumerate()
         .map(|(i, e)| {
             // Status span — role-mapped to the palette (no inline colors).
-            let status = match &e.resolved {
-                Some(id) => Span::styled(format!("→ {id}"), app.palette.success),
-                None if e.candidates.len() > 1 => Span::styled(
-                    format!("({} candidates — `Enter` to pick)", e.candidates.len()),
-                    app.palette.hint,
-                ),
-                None => Span::styled("(unresolved — dead link)", app.palette.error),
+            // External / Current are *informational*: there is no page to
+            // resolve, so no "→ id" / candidate / dead status — just a marker.
+            let status: Span = match (&e.resolved, e.kind) {
+                (Some(id), _) => Span::styled(format!("→ {id}"), app.palette.success),
+                (None, kb_core::links::LinkKind::External) => Span::styled("(external)", app.palette.info),
+                (None, kb_core::links::LinkKind::Current) => Span::styled("(this page)", app.palette.info),
+                (None, kb_core::links::LinkKind::Db | kb_core::links::LinkKind::Path)
+                    if e.candidates.len() > 1 =>
+                {
+                    Span::styled(
+                        format!("({} candidates — `Enter` to pick)", e.candidates.len()),
+                        app.palette.hint,
+                    )
+                }
+                (None, kb_core::links::LinkKind::Db | kb_core::links::LinkKind::Path) => {
+                    Span::styled("(unresolved — dead link)", app.palette.error)
+                }
             };
             let on = i == ls.cursor;
             let style = if on {
@@ -1799,15 +1809,28 @@ fn draw_links(f: &mut ratatui::Frame, app: &App, ls: &LinksState, area: Rect) {
             let n_str = format!("{:>3}  ", i + 1);
             let line_str = format!("L{}  ", e.line + 1);
             let style_str = format!("[{}]", e_style_str(e));
+            // The *label* (the display text of an inline form) — when present,
+            // it is what the reader sees; show it ahead of the raw target.
+            let shown_target = match &e.label {
+                Some(l) => format!("{l}  ({})", e.target),
+                None => e.target.clone(),
+            };
             let header_line = Line::from(vec![
                 Span::styled(n_str, style),
                 Span::styled(line_str, style),
                 Span::styled(format!("{style_str}  "), style),
-                Span::styled(e.target.clone(), style),
+                Span::styled(shown_target, style),
                 Span::styled("  ", style),
                 status,
             ]);
-            let context_line = if e.context.is_empty() {
+            // A trailing `#section` is a *section* hint, not part of the
+            // target — keep it on the context line below so the header stays
+            // one line (the `target` / `label` can be long).
+            let ctx_note = match &e.section {
+                Some(s) => format!("  [#{s}]"),
+                None => String::new(),
+            };
+            let context_line = if e.context.is_empty() && ctx_note.is_empty() {
                 Line::from("")
             } else {
                 let ctx_style = if on {
@@ -1815,9 +1838,10 @@ fn draw_links(f: &mut ratatui::Frame, app: &App, ls: &LinksState, area: Rect) {
                 } else {
                     app.palette.dim
                 };
+                let ctx_text = format!("{}{}", e.context, ctx_note);
                 Line::from(vec![
                     Span::styled("      ", ctx_style),
-                    Span::styled(truncate(&e.context, 96), ctx_style),
+                    Span::styled(truncate(&ctx_text, 110), ctx_style),
                 ])
             };
             ListItem::new(vec![header_line, context_line])
@@ -2002,19 +2026,20 @@ fn draw_link_candidates(
     f.render_stateful_widget(list, chunks[1], &mut state);
 }
 
-/// The `LinkStyle` as a short display tag (the CLI uses the same
-/// `as_str()` from `kb_core::links`).
+/// The `LinkKind` as a short display tag (the CLI renders the same enum via
+/// `kb_core::links::LinkKind::style_str`).
 fn e_style_str(e: &crate::tui::LinksEntry) -> &'static str {
-    // The enum lives in `kb_core::links`; `LinksEntry` only stores a clone
-    // of the *style* — but we did not persist the enum here (we dropped it
-    // in favor of the target + resolution). Display by convention: a
-    // wikilink target is a slug; a relative/absolute target is a path.
-    if e.target.starts_with('/') {
-        "abs"
-    } else if e.target.contains('/') {
-        "rel"
-    } else {
-        "wik"
+    match e.kind {
+        kb_core::links::LinkKind::Db => "wik",
+        kb_core::links::LinkKind::Path => {
+            if e.target.starts_with('/') {
+                "abs"
+            } else {
+                "rel"
+            }
+        }
+        kb_core::links::LinkKind::External => "ext",
+        kb_core::links::LinkKind::Current => "cur",
     }
 }
 #[cfg(test)]

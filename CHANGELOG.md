@@ -7,6 +7,23 @@ the API is still moving; breaking changes are called out explicitly.
 ## [Unreleased]
 
 ### Added
+- **`[ label ]( [ target ] )` / `< https://… >` / `# section` reference
+  grammar, shell end-to-end (DESIGN-links.md phase 1, rewire).** The shell
+  (`kb`) is now rewired onto the unified reference grammar
+  (`kb-core::links::detect_refs` + `classify_target`, commit `a9e1add`):
+  `AnnotatedLink` carries `kind` / `label` / `section`, and the three surfaces
+  that read it — the TUI `l` picker, `kb links --list` (JSON now
+  `style = kind.style_str` + `label` + `section`), and `kb verify` check d
+  (new `links_current` key; `External`/`Current` links are counted, never
+  dead) — all read the one `annotated_links()` source of truth. The TUI
+  `LinksEntry` / `draw_links` / `links_open_selected` are kind-aware
+  (`(external)` / `(this page)` / candidate / dead-link hints). **Breaking:**
+  a bare path token in prose is no longer a reference — the retired v1
+  `is_pathlike` heuristic is removed; only the bracket forms
+  (`[[ db ]]`, `[ path ]`, `[ label ]( path|… )`, `< uri >`) are. Padding
+  around the inner content is trimmed before classification, so
+  `[# link-test]` ≡ `[ # link-test ]` and `[lang-test.md]` ≡ `[ lang-test.md ]`.
+  Status addendum + verification log: `DESIGN-links-rewire.md`.
 - **`kb verify <FILE>` — target-driven page lint (DESIGN-verify.md, Phases 1+2).**
   Scriptable one-file check answering "is this a well-formed kb page, clean
   exit code, every link resolves, and (for a label) does it still name real

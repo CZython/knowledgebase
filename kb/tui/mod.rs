@@ -272,8 +272,17 @@ pub struct LinksEntry {
     pub col: usize,
     /// The containing raw line, trimmed (for context display).
     pub context: String,
-    /// The written target (wikilink inner text, or a path token).
+    /// The written target (the raw text as the user typed it).
     pub target: String,
+    /// The optional display text (`[ label ]( target )` form). `None` for the
+    /// `[[X]]`, `[ X ]`, `< url>` forms.
+    pub label: Option<String>,
+    /// The `#section` (if the target carried one), kept verbatim.
+    pub section: Option<String>,
+    /// The *kind* the target was classified as (Db / Path / External /
+    /// Current) — the TUI renders the status column off this (External /
+    /// Current have no page to resolve, so no "→ id" / candidate / dead status).
+    pub kind: kb_core::links::LinkKind,
     /// The *display id* (`type:slug`) of the unique hit — for the
     /// "→ {id}" render. `None` when ambiguous (see `candidates`) or
     /// unresolved.
@@ -1356,6 +1365,9 @@ impl App {
                 col: al.col,
                 context: al.context,
                 target: al.target,
+                label: al.label,
+                section: al.section,
+                kind: al.kind,
                 resolved: al.resolved_id.as_ref().map(|(t, s)| format!("{t}:{s}")),
                 candidates: al.candidates,
                 abs_path: al.resolves_to,
@@ -1583,9 +1595,15 @@ impl App {
             ));
             return Ok(());
         }
-        // Unresolved — dead link.
+        // Unresolved — dead link (or an informational External / Current
+        // ref: those have no page to open, so there is nothing to navigate to).
+        let kind_note = match entry.kind {
+            kb_core::links::LinkKind::External => " (external URI — informational)",
+            kb_core::links::LinkKind::Current => " (this page's section — nothing to open)",
+            _ => " (no matching page)",
+        };
         self.set_info(format!(
-            "link {} of {} is unresolved (no matching page) — {target}",
+            "link {} of {} is unresolved{kind_note} — {target}",
             cursor + 1,
             total,
             target = entry.target

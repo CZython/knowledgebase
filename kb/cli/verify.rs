@@ -127,21 +127,32 @@ pub(crate) fn cmd_verify(
     let corpus = annotated_links(&parsed.body, &pages);
 
     let mut links_resolved: usize = 0;
-    let mut links_dead: Vec<(usize, usize, &kb_core::links::LinkStyle, &str)> = Vec::new();
+    let mut links_external: usize = 0;
+    let mut links_current: usize = 0;
+    let mut links_dead: Vec<(usize, usize, String, String)> = Vec::new();
     let mut links_ambiguous: Vec<(usize, &str, Vec<String>)> = Vec::new();
     for l in &corpus {
-        if l.resolves_to.is_some() {
-            links_resolved += 1;
-        } else if l.candidates.is_empty() {
-            links_dead.push((l.line, l.col, &l.style, l.target.as_str()));
-            warnings.push("dead-link".into());
-        } else {
-            links_ambiguous.push((l.line, l.target.as_str(), l.candidates.clone()));
-            warnings.push("ambiguous-link".into());
+        match l.kind {
+            kb_core::links::LinkKind::External => {
+                links_external += 1; // informational — never a dead/ambiguous page ref
+            }
+            kb_core::links::LinkKind::Current => {
+                links_current += 1; // the page's own #section — nothing to resolve here
+            }
+            kb_core::links::LinkKind::Db | kb_core::links::LinkKind::Path => {
+                if l.resolves_to.is_some() {
+                    links_resolved += 1;
+                } else if l.candidates.is_empty() {
+                    links_dead.push((l.line, l.col, l.kind.style_str(&l.target).to_string(), l.target.clone()));
+                    warnings.push("dead-link".into());
+                } else {
+                    links_ambiguous.push((l.line, l.target.as_str(), l.candidates.clone()));
+                    warnings.push("ambiguous-link".into());
+                }
+            }
         }
     }
     let links_total: usize = corpus.len();
-    let links_external: usize = 0; // v1 `annotated_links` yields no `<url>` refs
 
     // ---- check e: `type: label` — what does it point at? (Phase 2) --------
     let is_label = matches!(parsed.page_type, Some(NoteType::Label));
@@ -240,13 +251,14 @@ pub(crate) fn cmd_verify(
         lk.i("total", links_total as i64);
         lk.i("resolved", links_resolved as i64);
         lk.i("external", links_external as i64);
+        lk.i("current", links_current as i64);
         let dead_items: Vec<String> = links_dead
             .iter()
             .map(|(line, col, style, target)| {
                 let mut e = JObject::new();
                 e.i("line", *line as i64);
                 e.i("col", *col as i64);
-                e.s("style", style.as_str());
+                e.s("style", style);
                 e.s("target", target);
                 e.render_compact()
             })
@@ -317,14 +329,14 @@ pub(crate) fn cmd_verify(
     }
 
     println!(
-        "  links:         {links_total} link(s) — {links_resolved} resolved, {links_external} external, {} dead, {} ambiguous",
+        "  links:         {links_total} link(s) — {links_resolved} resolved, {links_external} external, {links_current} current, {} dead, {} ambiguous",
         links_dead.len(),
         links_ambiguous.len()
     );
     for (line, col, style, target) in &links_dead {
         println!(
             "  warn:  dead link L{line} [{}] '{target}' → no page in the corpus",
-            style.as_str()
+            style
         );
         let _ = col;
     }

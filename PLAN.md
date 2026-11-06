@@ -33,7 +33,12 @@ Source-comment cross-refs throughout the workspace cite these numbers (e.g. `PLA
 | [13l](#13l-m80-results--kb-tui-scaffold--browse-built--tested) | 13l — M8.0 results (TUI scaffold + browse) |
 | [13m](#13m-m81-results--kb-tui-read--filter-built--tested) | 13m — M8.1 results (TUI read + filter) |
 | [13n](#13n-m82-results--kb-tui-edit--autocomplete-built--tested) | 13n — M8.2 results (TUI edit + autocomplete) |
-| [13o](#13o-m83-results--kb-tui-alias--roots-manager-built--tested) | 13o — M8.3 results (TUI alias + roots) |
+ | [13o](#13o-m83-results--kb-tui-alias--roots-manager-built--tested) | 13o — M8.3 results (TUI alias + roots) |
+ | [13p](#13p-m9-results--the-agent-facing-surface-built--tested) | 13p — M9 results (agent-facing surface) |
+ | [13q](#13q-m95-results--kb-patch-the-parked-item-built--tested) | 13q — M9.5 results (`kb patch`) |
+ | [13r](#13r-m85-results--link-picker-tui--kb-links---list-built--tested) | 13r — M8.5 results (Link-picker + `kb links --list`) |
+ | [13s](#13s-m102-results--the-shell-rewired-onto-the-unified-reference-grammar-built--tested) | 13s — M10.2 results (shell rewire onto the unified reference grammar) |
+
 
 ## 1. What it is
 
@@ -535,6 +540,7 @@ kb replace <file> --find X --new Y [--scope REF] [--count N] <flags>
  | **M9** ✅ | **Agent-facing surface** — Part A (every TUI feature has a plain-CLI bypass), Part B (**every** CLI verb carries `--json`, with the JSON the *only* thing on stdout), Part C (`--db` global flag, already present — now re-asserted for the write path). **Part A**: browse→`browse`, read→`show`, filter→`search`, edit→`section … fm.<key>`/`replace`, alias→`tag-alias`, roots→`add`/`roots`/`drop-root`, cron→`cron` (all already CLI). **Part B**: new `--json` on `add`, `roots`, `drop-root`, `refresh`, `full-rebuild`, `browse`, `tag`, `tag-alias` (`--list`/`--add`/`--rm`/`--import`; `--export` stays the TSV recovery codec), `links`, `resolve`, `info`, `stats`, `cron`, plus the whole write path (`section …` + `replace` + `section edit` rejected). **All 25 CLI verbs** are now `--json`-able (the only exception is `tui`, which is inherently terminal-only). Hand-rolled JSON (zero serde): list verbs emit `[...]`, record/mutation verbs emit `{...}`, one top-level value, nothing else on stdout; human noise (diffs, "applied" notes) is *routed to stderr* under `--json`. New `PageJson` + `jbool` helpers + a `commit(...)` path that forces non-interactive and emits `{file,changed,dry_run,applied,bytes_before,bytes_after,diff}`. **12 integration tests** in `kb/tests/m9_agent_surface.rs` (binary-as-subprocess; each verb's stdout parsed by `python3 json` for shape + required keys, incl. an empty-`[]`/empty-`{}` fallthrough and `section edit --json` clean-reject). `cargo test --workspace` **green, 0 failures** (356 total at M9 close, up from 344). `./verify.sh` **350 verified / 0 errors** (unchanged — M9 is shell). **All green — see §13p.** |
   | **M9.5** ✅ | **`kb patch` — import an external unified diff** — the last single-file-namespace verb parked in §13f as *"~20 lines of `main.rs`: the parser + applier are already built and pinned"*. `Cmd::Patch` takes a target `FILE` plus a 3-way patch source (exactly one of `--patch-file [PATH|-]`, `--patch-stdin`, `--patch-text` — `allow_hyphen_values` on `--patch-text` so a `--- ...` leading line isn't misread as a flag); the shared write contract (`--dry-run` / `--yes` / `--if-unchanged` / `--json`) is inherited via the same `WriteFlags` + `commit()` as `section` / `replace`. The pure core does the work: `diff::apply_patch` consumes the *exact* standard unified diff output (cross-tested against GNU `patch(1)` on `testdata/standard.diff`; the `parse_unified` / `apply_patch` pair is unchanged this milestone). Result: a standard `diff -u` or `git diff` hunk is *consumed*, not re-derived — the write path closes the loop (every write verb already emits standard `diff -u` via `--diff`; `patch` imports that byte-identically). **8 new integration tests** in `kb/tests/section_cli.rs` (binary-as-subprocess over `testdata/*`: real `diff -u` byte-identical output vs. `section_new.md`, `--patch-stdin` via a pipe, `--patch-text` inline, `--dry-run` no-write, `--json` well-formed uniform envelope, 0-source / 2-source clean-reject, identity patch = "no changes" no-op). `--json` sweep extended from **25** to **26** verbs (all valid JSON). `cargo test --workspace` **green, 0 failures** (368 total, up from 360). **All green — see §13q.** |
    | **M10.1** ✅ | **`kb verify <FILE>` — target-driven page lint (Phases 1+2)** — DESIGN-verify.md, both increments landed. A single, scriptable check answering "is *this one file* a well-formed kb page, do its links resolve, and (for a label) does it still name real files?" with a meaningful exit code, so an agent or CI gate can decide "done or not" in one shot. Phase 1: checks (a) markdown extension, (b) frontmatter framing, (c) required fields (`type:` present + known, `slug:` resolvable via `identity::resolve_slug`, `description:` ≤ 255). Phase 2: check (d) link resolution — dead-vs-ambiguous-vs-resolved via the *same* `annotated_links()` the TUI picker uses (external `<url>` spans are informational, never flagged), and (e) the `type: label` target — `labels::classify` → `Files` (each ref must exist on disk) / `Folder` (entry count). **All reused from the already-verified `kb-core`** (`frontmatter::parse` / `identity::resolve_slug` / `identity::find_h1` / `meta::NoteType` / `labels::classify`) + the existing `annotated_links`, so **zero new proof obligations** and `./verify.sh` is unchanged. Phase 2's dead/ambiguous + missing-label-file findings are **warnings** (not errors); exit contract: `0` = ok or non-strict warning, `1` = error or strict-escalated warning, `2` = usage (directory, missing file). `--strict` only *upgrades* `ok-with-warnings` → exit 1; it never creates new findings. `--json` emits exactly one JSON document on stdout (the `JObject` single-owner, zero-serde contract; `dead[]` / `ambiguous[]` as `block_array` raw objects, string arrays as `inline_array`) with `errors[]` / `warnings[]` arrays only when non-empty, so a `python3 -c 'json.loads(sys.stdin.read())'` round-trips. **11 in-file tests** (kb/cli/verify.rs) + **26 integration tests** in `kb-user/tests/verify_cli.rs` (binary-as-subprocess, per-test `XDG_DATA_HOME` isolation: both render paths, every check, every exit code, `--strict`, `--db`, JSON shape pinned against DESIGN-verify.md). `bash gate.sh` **7/7 green**. |
+| **M10.2** ✅ | **Link rewire — the shell now runs the unified reference grammar (DESIGN-links.md phase 1).** Rewires the `kb` shell off the retired v1 extractor (bare-path `is_pathlike` heuristic + wikilink only) onto the core grammar landed in `a9e1add` (`kb-core::links::detect_refs` + `classify_target`, `LinkKind`/`RawLink`/`Ref`). The three link surfaces — TUI `l` picker, `kb links --list` (JSON: `style = kind.style_str` + new `label`/`section`), `kb verify` check d (new `links_current`; `External`/`Current` counted, never dead) — all read the one `annotated_links()` source of truth. `AnnotatedLink` gains `kind`/`label`/`section`; TUI `LinksEntry`/`draw_links`/`links_open_selected` are kind-aware (`(external)`/`(this page)`/candidate/dead-link hints). **Breaking:** bare path tokens in prose are no longer references — only the bracket forms (`[[ db ]]`, `[ path ]`, `[ label ]( path|… )`, `< uri >`) are; inner padding is trimmed before classification (`[# link-test]` ≡ `[ # link-test ]`). **15 unit tests** in `kb/main.rs` (rewritten for the bracket grammar: bare-token=empty, plain/inlined/labelled path, labelled db, external, current, section-split-resolve, no-padding forms) + the `m9` `links_list_json_shape` pin moved to `[ notes/missing.md ]`; `bash gate.sh` **7/7 green**. **All green — see §13s + `DESIGN-links-rewire.md`.** |
 
 ## 13. M0 open items to settle (non-blocking for the design)
 
@@ -2557,6 +2563,54 @@ _json_roundtrip` (append + `--dry-run` non-write), `replace_op_json_roundtrip`
   fully closed** — every `kb tui` binding (Browse, Read, Filter, Edit,
   alias, roots, Search, **Link-picker with inline candidate disambiguation**)
   has shipped.
+
+### 13s. M10.2 results — the shell rewired onto the unified reference grammar (built + tested)
+
+**Scope.** DESIGN-links.md phase 1: the shell stops recognising the two v1
+shapes (a `[[ … ]]` wikilink and a bare whitespace-bounded path-token caught
+by the `is_pathlike` = `contains('/')`-or-known-extension heuristic) and runs
+the one grammar locked in the design — bracket forms only. Core is unchanged
+this increment: `detect_refs` + `classify_target` shipped in `a9e1add`; this
+is the shell-side rewire onto it, so there are **no new `kb-core` proofs** and
+`./verify.sh` is untouched (12 spec files, all already verified).
+
+**The rewire (6 files).** `AnnotatedLink` (kb/main.rs) gains `kind: LinkKind`,
+`label: Option<String>`, `section: Option<String>`; `style` stays but is now
+derived from `kind` at render time (`kind.style_str(&target)`).
+`push_annotated` classifies each `RawLink`; on a `#section` suffix it strips
+the `#sec` off the tail, peels the inline-`[ … ]` db wrapper, and feeds the
+page-part to `resolver::resolve`; the `External` / `Current` arms return early
+(they are informational, never navigable). The three link surfaces read the
+one `annotated_links()` source of truth and therefore cannot diverge:
+- `kb links --list` (kb/cli/links.rs): JSON `style` is now
+  `kind.style_str`, plus new `label` / `section`; the human render shows the
+  label ahead of the target, the section as an annotation, and skips the
+  resolution annotation for `External` / `Current`.
+- `kb verify` check d (kb/cli/verify.rs): kind dispatch — `External`/`Current`
+  counted, never dead; `Db`/`Path` feed the dead/ambiguous/resolved partition;
+  new `links_current` JSON key.
+- TUI (kb/tui/mod.rs + render.rs): `LinksEntry` carries `kind` / `label` /
+  `section`; `e_style_str` matches on `kind`; `draw_links` renders a kind-aware
+  status line (`(external)` / `(this page)` / candidate / dead-link hint);
+  `links_open_selected` prints a kind-aware dead-link message.
+
+**Breaking.** A bare path token in prose is no longer a reference. The
+grammar is now: `[[ target ]]` (db) · `[ path ]` · `[ label ]( path|… )`
+· `# section` · `< https://… >` (external). **Padding is trimmed before
+classification** — so `[# link-test]` ≡ `[ # link-test ]` (current) and
+`[lang-test.md]` ≡ `[ lang-test.md ]` (relative path) parse to the *same*
+`Ref` as their padded forms.
+
+**Tests.** 15 in-file unit tests in kb/main.rs rewritten for the bracket
+grammar (bare path-token now asserts **empty**; new: plain-bracket path,
+inline labelled path, inline labelled db, external URI, current section,
+section-split-resolve, no-padding forms). The `m9` integration pin
+(`links_list_json_shape`) moved its dead-path body from a bare token to
+`[ notes/missing.md ]`. Live corpus demo at
+`/mnt/ARIA/knowledgebase/link-test.md` — 17 links: 10 resolved, 2 external,
+3 current, 2 dead (two intentional stubs), 0 ambiguous; `verify` verdict
+`ok-with-warnings` (exit 0). `bash gate.sh` **7/7 green**; `./verify.sh`
+unchanged. **M10.2 complete — the shell and the design are now the same rule.**
 
 
 

@@ -399,13 +399,15 @@ fn links_list_json_shape() {
     let s = Setup::new("linklist");
     let root = s.root.to_string_lossy().into_owned();
     // `a` is the page under test; its body carries two wikilinks (one to a
-    // unique page, one to a nonexistent page) + a bare path token, on two
-    // distinct lines so `line`/`col` are non-trivial.
+    // unique page, one to a nonexistent page) + a bracketed path (a
+    // non-resolving path link), on three distinct lines so `line`/`col` are
+    // non-trivial. (v1 treated bare path tokens as links; the new grammar
+    // requires brackets, so this body uses the `[ X ]` plain form.)
     write_page(
         &s,
         "a.md",
         "type: note\ntitle: Source-A\n",
-        "intro\nsee [[B]] and notes/missing.md\n\n[[Nobody]] on line 4\n",
+        "intro\nsee [[B]] and [ notes/missing.md ]\n\n[[Nobody]] on line 4\n",
     );
     write_page(&s, "b.md", "type: note\ntitle: Page-B\n", "b body\n");
     let (code, _, _) = run(&s, &["add", &root]);
