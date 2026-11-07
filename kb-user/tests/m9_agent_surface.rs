@@ -375,14 +375,14 @@ fn resolve_info_links_json() {
     }
     // links
     {
-        let (code, out, _) = run(&s, &["links", "note:Unique-Slug-A", "--json"]);
+        let (code, out, _) = run(&s, &["links", "note:Unique-Slug-A", "--dedup", "--json"]);
         assert_eq!(code, 0);
         assert_json(&out, "links", false, true);
         assert!(
             out.contains("\"page\"")
                 && out.contains("\"forward\"")
                 && out.contains("\"backlinks\""),
-            "links --json must carry page/forward/backlinks; got: {out}"
+            "links --dedup --json must carry page/forward/backlinks; got: {out}"
         );
     }
 }
@@ -413,8 +413,9 @@ fn links_list_json_shape() {
     let (code, _, _) = run(&s, &["add", &root]);
     assert_eq!(code, 0);
 
-    let (code, out, _) = run(&s, &["links", "note:Source-A", "--list", "--json"]);
-    assert_eq!(code, 0, "links --list --json must exit 0; got: {out}");
+    let (code, out, _) =
+        run(&s, &["links", "note:Source-A", "--json"]);
+    assert_eq!(code, 0, "links --json must exit 0; got: {out}");
     assert_json(&out, "links-list", false, true);
     // Top-level envelope: page + count + a links array.
     for k in ["page", "count", "links"] {
@@ -464,8 +465,8 @@ fn links_list_json_empty_is_well_formed() {
     let (code, _, _) = run(&s, &["add", &root]);
     assert_eq!(code, 0);
 
-    let (code, out, _) = run(&s, &["links", "note:Plain-P", "--list", "--json"]);
-    assert_eq!(code, 0, "empty --list --json must exit 0; got: {out}");
+    let (code, out, _) = run(&s, &["links", "note:Plain-P", "--json"]);
+    assert_eq!(code, 0, "links --json must exit 0; got: {out}");
     assert_json(&out, "links-list-empty", false, true);
     assert!(
         out.contains("\"count\": 0"),

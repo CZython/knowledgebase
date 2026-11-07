@@ -68,9 +68,20 @@ use crate::tui::palette::Palette;
 pub fn draw(f: &mut Frame, app: &mut App) {
     let area = f.area();
     // Write the body-pane inner width to `app` (used by scroll mutators).
-    // Done before the immutable match below so there is no borrow conflict.
+    // In Links mode the body pane is the *left* 60% panel (the right 40%
+    // holds the target info), so its effective inner width is narrower
+    // than the full Read body. We approximate it at dispatch time and the
+    // render pass (`draw_links`) refines it from the layout split.
+    let in_links = matches!(&app.mode, Mode::Links(_));
     let has_outline = matches!(&app.mode, Mode::Read(rs) if !rs.outline.is_empty());
-    app.body_pane_width = body_inner_width(area, has_outline);
+    let base = body_inner_width(area, has_outline);
+    app.body_pane_width = if in_links {
+        // 60% of the *content* area (the body pane is the 60% column
+        // minus its ALL-side borders — 2 rows × 4 = ~4 cols).
+        (base * 6 / 10).saturating_sub(4).max(1)
+    } else {
+        base
+    };
     // Write the body-pane inner height to `app` (used by find-centering math).
     // The body pane's height = total area height minus the bordered rows (2),
     // minus the header (1), minus the status (1). `draw_read` overwrites this
@@ -1745,7 +1756,10 @@ fn draw_links(f: &mut ratatui::Frame, app: &App, ls: &LinksState, area: Rect) {
         ])
         .split(area);
 
-    // Header: identity + hint.
+    // Find-style rework (T2): the body lives in the left pane and the
+    // focused link is highlighted on its source line (all other link
+    // occurrences on the page are highlighted lighter). The right pane
+    // shows the focused link's target info.
     let header = format!(
         "kb tui — links · {} link(s) on {} · ↑↓/jk move · Enter open · Esc back",
         ls.links.len(),
@@ -1769,103 +1783,260 @@ fn draw_links(f: &mut ratatui::Frame, app: &App, ls: &LinksState, area: Rect) {
         return;
     }
 
-    // Build the ratatui list items — one item per link (header + context
-    // folded into a single `ListItem` of two `Line`s so `ListState::selected`
-    // highlights the whole pair).
-    let items: Vec<ListItem> = ls
-        .links
-        .iter()
-        .enumerate()
-        .map(|(i, e)| {
-            // Status span — role-mapped to the palette (no inline colors).
-            // External / Current are *informational*: there is no page to
-            // resolve, so no "→ id" / candidate / dead status — just a marker.
-            let status: Span = match (&e.resolved, e.kind) {
-                (Some(id), _) => Span::styled(format!("→ {id}"), app.palette.success),
-                (None, kb_core::links::LinkKind::External) => Span::styled("(external)", app.palette.info),
-                (None, kb_core::links::LinkKind::Current) => Span::styled("(this page)", app.palette.info),
-                (None, kb_core::links::LinkKind::Db | kb_core::links::LinkKind::Path)
-                    if e.candidates.len() > 1 =>
-                {
-                    Span::styled(
-                        format!("({} candidates — `Enter` to pick)", e.candidates.len()),
-                        app.palette.hint,
-                    )
-                }
-                (None, kb_core::links::LinkKind::Db | kb_core::links::LinkKind::Path) => {
-                    Span::styled("(unresolved — dead link)", app.palette.error)
-                }
-            };
-            let on = i == ls.cursor;
-            let style = if on {
-                // The selected row is emphasized: brighter than `default`
-                // (which we use for unselected). `active` + BOLD matches
-                // the highlight_symbol color, so the row + the `▶` read as
-                // one unit.
-                app.palette.active.add_modifier(Modifier::BOLD)
-            } else {
-                app.palette.default
-            };
-            let n_str = format!("{:>3}  ", i + 1);
-            let line_str = format!("L{}  ", e.line + 1);
-            let style_str = format!("[{}]", e_style_str(e));
-            // The *label* (the display text of an inline form) — when present,
-            // it is what the reader sees; show it ahead of the raw target.
-            let shown_target = match &e.label {
-                Some(l) => format!("{l}  ({})", e.target),
-                None => e.target.clone(),
-            };
-            let header_line = Line::from(vec![
-                Span::styled(n_str, style),
-                Span::styled(line_str, style),
-                Span::styled(format!("{style_str}  "), style),
-                Span::styled(shown_target, style),
-                Span::styled("  ", style),
-                status,
-            ]);
-            // A trailing `#section` is a *section* hint, not part of the
-            // target — keep it on the context line below so the header stays
-            // one line (the `target` / `label` can be long).
-            let ctx_note = match &e.section {
-                Some(s) => format!("  [#{s}]"),
-                None => String::new(),
-            };
-            let context_line = if e.context.is_empty() && ctx_note.is_empty() {
-                Line::from("")
-            } else {
-                let ctx_style = if on {
-                    app.palette.info
-                } else {
-                    app.palette.dim
-                };
-                let ctx_text = format!("{}{}", e.context, ctx_note);
-                Line::from(vec![
-                    Span::styled("      ", ctx_style),
-                    Span::styled(truncate(&ctx_text, 110), ctx_style),
-                ])
-            };
-            ListItem::new(vec![header_line, context_line])
-        })
-        .collect();
+    // Two-pane layout: body (60%) | target info (40%).
+    let panes = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([Constraint::Percentage(60), Constraint::Percentage(40)])
+        .split(chunks[1]);
 
-    // ratatui 0.29: `List::new(items).highlight_symbol("▶").highlight_style(...)`.
-    let list = RatList::new(items)
-        .highlight_symbol("▶ ")
-        .highlight_style(app.palette.active)
+    // ----- Left pane: body with find-style highlight ----------------------
+    let p = &app.palette;
+    let rendered = rendered_lines(p, &ls.source_body);
+    let pane_w = (panes[0].width.saturating_sub(2)) as usize;
+    let pane_h = (panes[0].height.saturating_sub(2)) as usize;
+    let content_rows = rendered_row_count(&rendered, pane_w);
+    let focused = ls.cursor.min(ls.links.len() - 1);
+    let focused_e = ls.links.get(focused);
+    let focused_line = focused_e.map(|e| e.line).unwrap_or(0);
+    // First rendered row of the focused line = the sum of row counts of the
+    // lines above it (ratatui's own `WordWrapper`).
+    let focused_row = if focused_line < rendered.len() {
+        rendered_row_count(&rendered[..focused_line], pane_w)
+    } else {
+        content_rows.saturating_sub(1)
+    };
+    let fp = crate::tui::find_padding(focused_row, content_rows, pane_h);
+    let (pad_above, pad_below) = (fp.above, fp.below);
+
+    // Build the per-line patch list. Patches are (start, end, style) byte
+    // offsets into the *rendered* line.
+    let mut patches_by_line: std::collections::HashMap<usize, Vec<(usize, usize, Style)>> =
+        std::collections::HashMap::new();
+    for (i, e) in ls.links.iter().enumerate() {
+        let is_focused = i == focused;
+        let style = if is_focused { p.find_current } else { p.find_match };
+        if let Some(rendered_line) = rendered.get(e.line) {
+            let needle = e.label.clone().unwrap_or_else(|| e.target.clone());
+            let (rs, re) = raw_to_rendered_span(rendered_line, &needle);
+            if rs < re {
+                patches_by_line
+                    .entry(e.line)
+                    .or_default()
+                    .push((rs, re, style));
+            }
+        }
+    }
+
+    let blank = Line::from(vec![Span::styled(String::new(), p.default)]);
+    let mut body_lines: Vec<Line<'static>> = Vec::with_capacity(
+        pad_above + ls.source_body.lines().count() + pad_below,
+    );
+    for _ in 0..pad_above {
+        body_lines.push(blank.clone());
+    }
+    for (li, raw) in ls.source_body.lines().enumerate() {
+        let base = read_line(p, raw);
+        if let Some(patches) = patches_by_line.get(&li) {
+            body_lines.push(apply_find_patched(base, patches));
+        } else {
+            body_lines.push(base);
+        }
+    }
+    for _ in 0..pad_below {
+        body_lines.push(blank.clone());
+    }
+
+    let title = if focused_e.is_some() {
+        format!(
+            " body — {focused} of {total} · L{line} · Enter open · Esc back",
+            focused = focused + 1,
+            total = ls.links.len(),
+            line = focused_line + 1,
+        )
+    } else {
+        " body — ↑/↓ move".to_string()
+    };
+    let body_widget = Paragraph::new(body_lines)
         .block(
             Block::default()
                 .borders(Borders::ALL)
-                .title(format!(
-                    "links on {} · {} of {}",
-                    ls.source_abs_path,
-                    ls.cursor + 1,
-                    ls.links.len()
-                )),
-        );
-    let mut state = ListState::default();
-    state.select(Some(ls.cursor));
-    f.render_stateful_widget(list, chunks[1], &mut state);
+                .title(title),
+        )
+        .wrap(Wrap { trim: false })
+        .scroll((fp.scroll_top as u16, 0));
+    f.render_widget(body_widget, panes[0]);
+
+    // ----- Right pane: target info for the focused link -------------------
+    if let Some(e) = focused_e {
+        draw_link_target_info(f, app, e, ls.source_body.lines().nth(e.line).unwrap_or(""), panes[1]);
+    } else {
+        let note = Paragraph::new(vec![
+            Line::from(""),
+            Line::from(vec![Span::styled(
+                "   no focused link — ↑/↓ to move",
+                app.palette.info,
+            )]),
+        ]);
+        f.render_widget(note, panes[1]);
+    }
 }
+
+/// Find a link's visible text in the rendered line and return the
+/// `(rendered_start, rendered_end)` byte offsets to highlight, or
+/// `(0, 0)` to skip.
+///
+/// `text_to_find` is what the user actually reads — `label` when the
+/// link has one (the `[ label ](target)` form), else the raw
+/// `target` (wikilinks show `target` verbatim inside `[[…]]`, so it is
+/// present in the rendered line as-is).
+///
+/// We deliberately do NOT try to paint the full reference span
+/// (`[[target]]` or `[label](target)`). The user's visual model is the
+/// *inner* text — that is what the reader sees and what `kb links`
+/// shows in the target column. `render_markdown_text` strips emphasis
+/// delimiters around that text (if any), so a plain string search on
+/// the rendered line is both correct and robust.
+fn raw_to_rendered_span(
+    rendered_line: &str,
+    text_to_find: &str,
+) -> (usize, usize) {
+    let needle = text_to_find;
+    if needle.is_empty() {
+        return (0, 0);
+    }
+    // Prefer the first occurrence in the rendered line. (A link's inner
+    // text appearing twice in the same line is rare; the first is the
+    // user's intent.)
+    rendered_line.find(needle).map(|s| (s, s + needle.len())).unwrap_or((0, 0))
+}
+
+/// Draw the right-hand **target info** pane for the focused link: the
+/// resolved page (id/type/title/tags), a rendered section (if any), and a
+/// distinct callout for dead / ambiguous / external / current.
+fn draw_link_target_info(
+    f: &mut ratatui::Frame,
+    app: &App,
+    e: &crate::tui::LinksEntry,
+    raw_line: &str,
+    area: Rect,
+) {
+    let p = &app.palette;
+    let mut lines: Vec<Line<'static>> = Vec::new();
+    // Header: the raw line (one-line context, highlighted where the focused
+    // link's visible text is) so the user can verify the source. We reuse
+    // the same string-search strategy the body pane uses to find the
+    // link's inner text (`label` or `target`) in the raw line.
+    let t = raw_line.trim();
+    if !t.is_empty() {
+        let needle = e.label.clone().unwrap_or_else(|| e.target.clone());
+        let (s, en) = raw_to_rendered_span(t, &needle);
+        if en > s {
+            let before = t[..s].to_string();
+            let mid = t[s..en].to_string();
+            let after = t[en..].to_string();
+            lines.push(Line::from(vec![
+                Span::styled(" source ", p.label),
+                Span::styled(truncate(&before, 20), p.dim),
+                Span::styled(truncate(&mid, 40), p.find_current),
+                Span::styled(truncate(&after, 20), p.dim),
+            ]));
+        } else {
+            lines.push(Line::from(vec![
+                Span::styled(" source ", p.label),
+                Span::styled(truncate(t, 60), p.dim),
+            ]));
+        }
+        lines.push(Line::from(""));
+    }
+    // Kind (short tag + the full word, so it reads even with a custom palette).
+    let kind_word = match e.kind {
+        kb_core::links::LinkKind::Db => "wikilink",
+        kb_core::links::LinkKind::Path => if e.target.starts_with('/') { "abs-path" } else { "rel-path" },
+        kb_core::links::LinkKind::External => "external",
+        kb_core::links::LinkKind::Current => "current",
+    };
+    lines.push(Line::from(vec![
+        Span::styled(" kind     ", p.label),
+        Span::styled(format!("[{}] {}", e_style_str(e), kind_word), p.info),
+    ]));
+    // Target.
+    if let Some(lbl) = &e.label {
+        lines.push(Line::from(vec![
+            Span::styled(" label    ", p.label),
+            Span::styled(lbl.clone(), p.default),
+        ]));
+    }
+    lines.push(Line::from(vec![
+        Span::styled(" target   ", p.label),
+        Span::styled(e.target.clone(), p.default),
+    ]));
+    if let Some(sec) = &e.section {
+        lines.push(Line::from(vec![
+            Span::styled(" section  ", p.label),
+            Span::styled(format!("#{sec}"), p.info),
+        ]));
+    }
+    lines.push(Line::from(""));
+    // Resolution status.
+    match (&e.resolved, e.kind, !e.candidates.is_empty()) {
+        (Some(id), _, false) => {
+            lines.push(Line::from(vec![
+                Span::styled(" resolves ", p.label),
+                Span::styled("→ ".to_string(), p.success),
+                Span::styled(id.clone(), p.success.add_modifier(Modifier::BOLD)),
+            ]));
+            lines.push(Line::from(""));
+            lines.push(Line::from(vec![Span::styled(" status   ", p.label), Span::styled("resolved".to_string(), p.success)]));
+        }
+        (None, kb_core::links::LinkKind::External, _) => {
+            lines.push(Line::from(vec![
+                Span::styled(" status   ", p.label),
+                Span::styled("(external — not a kb page)".to_string(), p.info),
+            ]));
+        }
+        (None, kb_core::links::LinkKind::Current, _) => {
+            lines.push(Line::from(vec![
+                Span::styled(" status   ", p.label),
+                Span::styled("(points to this page)".to_string(), p.info),
+            ]));
+        }
+        (None, _, true) => {
+            lines.push(Line::from(vec![
+                Span::styled(" status   ", p.label),
+                Span::styled(
+                    format!("(ambiguous — {} candidates)", e.candidates.len()),
+                    p.hint,
+                ),
+            ]));
+            lines.push(Line::from(""));
+            lines.push(Line::from(vec![Span::styled(" candidates", p.label)]));
+            for (i, cand) in e.candidates.iter().enumerate() {
+                let disp = format!("  {}. {cand}", i + 1);
+                lines.push(Line::from(vec![Span::styled(disp, p.dim)]));
+            }
+        }
+        (&Some(_), _, true) | (None, _, false) => {
+            lines.push(Line::from(vec![
+                Span::styled(" status   ", p.label),
+                Span::styled("(unresolved — no page by that name)".to_string(), p.error),
+            ]));
+        }
+    }
+
+    // The right pane's title is informational only — the left pane's title
+    // already reports "N of M". We keep the right title stable: the focused
+    // entry index (the caller passed the focused entry in).
+    let widget = Paragraph::new(lines)
+        .block(
+            Block::default()
+                .borders(Borders::ALL)
+                .title(" target info "),
+        )
+        .wrap(Wrap { trim: false })
+        .style(Style::default());
+    f.render_widget(widget, area);
+}
+
 
 /// Build the row of spans for **one** candidate option in the inline
 /// candidate picker's list. `idx` is the 0-based position in the list
@@ -2784,5 +2955,38 @@ mod tests {
         let on = candidate_row_text(0, &o, true);
         let off = candidate_row_text(0, &o, false);
         assert_eq!(on, off, "the same option renders the same text whether or not it is highlighted");
+    }
+
+    // ---- T2: `raw_to_rendered_span` (find-style highlight helper) --------
+
+    /// The needle is present → the span is its byte range (start, start+len).
+    #[test]
+    fn span_finds_first_occurrence() {
+        let line = "see [[transformer]] for how it works";
+        let (s, e) = raw_to_rendered_span(line, "transformer");
+        assert_eq!(&line[s..e], "transformer");
+        assert_eq!(e, s + "transformer".len());
+    }
+
+    /// No needle (e.g. label form where the label is not in the line) → `(0, 0)`
+    /// so the caller skips the highlight rather than painting the whole line.
+    #[test]
+    fn span_missing_needle_is_zero_span() {
+        let line = "plain prose with no link";
+        assert_eq!(raw_to_rendered_span(line, "transformer"), (0, 0));
+    }
+
+    /// Empty needle → `(0, 0)` (never paints an empty span).
+    #[test]
+    fn span_empty_needle_is_zero_span() {
+        assert_eq!(raw_to_rendered_span("any text here", ""), (0, 0));
+    }
+
+    /// Whitespace / multi-word needles match verbatim when present in the line.
+    #[test]
+    fn span_whole_phrase_matches_verbatim() {
+        let line = "a watchmaker keeps a [[watchmaking guide]] on the shelf";
+        let (s, e) = raw_to_rendered_span(line, "watchmaking guide");
+        assert_eq!(&line[s..e], "watchmaking guide");
     }
 }

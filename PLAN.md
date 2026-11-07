@@ -38,6 +38,8 @@ Source-comment cross-refs throughout the workspace cite these numbers (e.g. `PLA
  | [13q](#13q-m95-results--kb-patch-the-parked-item-built--tested) | 13q — M9.5 results (`kb patch`) |
  | [13r](#13r-m85-results--link-picker-tui--kb-links---list-built--tested) | 13r — M8.5 results (Link-picker + `kb links --list`) |
  | [13s](#13s-m102-results--the-shell-rewired-onto-the-unified-reference-grammar-built--tested) | 13s — M10.2 results (shell rewire onto the unified reference grammar) |
+    | [13t](#13t-m103-results--kb-links-default-flip--list-default--dedup-legacy--built--tested) | 13t — M10.3 results (`kb links` default flip: `--list` → default, `--dedup` legacy) |
+    | [13u](#13u-m104-results--tui-l-picker--find-style-single-link-focus--right-pane-target-info-built--tested) | 13u — M10.4 results (TUI `l` picker: find-style single-link focus + right-pane target info) |
 
 
 ## 1. What it is
@@ -541,6 +543,8 @@ kb replace <file> --find X --new Y [--scope REF] [--count N] <flags>
   | **M9.5** ✅ | **`kb patch` — import an external unified diff** — the last single-file-namespace verb parked in §13f as *"~20 lines of `main.rs`: the parser + applier are already built and pinned"*. `Cmd::Patch` takes a target `FILE` plus a 3-way patch source (exactly one of `--patch-file [PATH|-]`, `--patch-stdin`, `--patch-text` — `allow_hyphen_values` on `--patch-text` so a `--- ...` leading line isn't misread as a flag); the shared write contract (`--dry-run` / `--yes` / `--if-unchanged` / `--json`) is inherited via the same `WriteFlags` + `commit()` as `section` / `replace`. The pure core does the work: `diff::apply_patch` consumes the *exact* standard unified diff output (cross-tested against GNU `patch(1)` on `testdata/standard.diff`; the `parse_unified` / `apply_patch` pair is unchanged this milestone). Result: a standard `diff -u` or `git diff` hunk is *consumed*, not re-derived — the write path closes the loop (every write verb already emits standard `diff -u` via `--diff`; `patch` imports that byte-identically). **8 new integration tests** in `kb/tests/section_cli.rs` (binary-as-subprocess over `testdata/*`: real `diff -u` byte-identical output vs. `section_new.md`, `--patch-stdin` via a pipe, `--patch-text` inline, `--dry-run` no-write, `--json` well-formed uniform envelope, 0-source / 2-source clean-reject, identity patch = "no changes" no-op). `--json` sweep extended from **25** to **26** verbs (all valid JSON). `cargo test --workspace` **green, 0 failures** (368 total, up from 360). **All green — see §13q.** |
    | **M10.1** ✅ | **`kb verify <FILE>` — target-driven page lint (Phases 1+2)** — DESIGN-verify.md, both increments landed. A single, scriptable check answering "is *this one file* a well-formed kb page, do its links resolve, and (for a label) does it still name real files?" with a meaningful exit code, so an agent or CI gate can decide "done or not" in one shot. Phase 1: checks (a) markdown extension, (b) frontmatter framing, (c) required fields (`type:` present + known, `slug:` resolvable via `identity::resolve_slug`, `description:` ≤ 255). Phase 2: check (d) link resolution — dead-vs-ambiguous-vs-resolved via the *same* `annotated_links()` the TUI picker uses (external `<url>` spans are informational, never flagged), and (e) the `type: label` target — `labels::classify` → `Files` (each ref must exist on disk) / `Folder` (entry count). **All reused from the already-verified `kb-core`** (`frontmatter::parse` / `identity::resolve_slug` / `identity::find_h1` / `meta::NoteType` / `labels::classify`) + the existing `annotated_links`, so **zero new proof obligations** and `./verify.sh` is unchanged. Phase 2's dead/ambiguous + missing-label-file findings are **warnings** (not errors); exit contract: `0` = ok or non-strict warning, `1` = error or strict-escalated warning, `2` = usage (directory, missing file). `--strict` only *upgrades* `ok-with-warnings` → exit 1; it never creates new findings. `--json` emits exactly one JSON document on stdout (the `JObject` single-owner, zero-serde contract; `dead[]` / `ambiguous[]` as `block_array` raw objects, string arrays as `inline_array`) with `errors[]` / `warnings[]` arrays only when non-empty, so a `python3 -c 'json.loads(sys.stdin.read())'` round-trips. **11 in-file tests** (kb/cli/verify.rs) + **26 integration tests** in `kb-user/tests/verify_cli.rs` (binary-as-subprocess, per-test `XDG_DATA_HOME` isolation: both render paths, every check, every exit code, `--strict`, `--db`, JSON shape pinned against DESIGN-verify.md). `bash gate.sh` **7/7 green**. |
 | **M10.2** ✅ | **Link rewire — the shell now runs the unified reference grammar (DESIGN-links.md phase 1).** Rewires the `kb` shell off the retired v1 extractor (bare-path `is_pathlike` heuristic + wikilink only) onto the core grammar landed in `a9e1add` (`kb-core::links::detect_refs` + `classify_target`, `LinkKind`/`RawLink`/`Ref`). The three link surfaces — TUI `l` picker, `kb links --list` (JSON: `style = kind.style_str` + new `label`/`section`), `kb verify` check d (new `links_current`; `External`/`Current` counted, never dead) — all read the one `annotated_links()` source of truth. `AnnotatedLink` gains `kind`/`label`/`section`; TUI `LinksEntry`/`draw_links`/`links_open_selected` are kind-aware (`(external)`/`(this page)`/candidate/dead-link hints). **Breaking:** bare path tokens in prose are no longer references — only the bracket forms (`[[ db ]]`, `[ path ]`, `[ label ]( path|… )`, `< uri >`) are; inner padding is trimmed before classification (`[# link-test]` ≡ `[ # link-test ]`). **15 unit tests** in `kb/main.rs` (rewritten for the bracket grammar: bare-token=empty, plain/inlined/labelled path, labelled db, external, current, section-split-resolve, no-padding forms) + the `m9` `links_list_json_shape` pin moved to `[ notes/missing.md ]`; `bash gate.sh` **7/7 green**. **All green — see §13s + `DESIGN-links-rewire.md`.** |
+    | **M10.3** ✅ | **`kb links` default flip — the per-occurrence list becomes the default; the legacy edge set + backlinks moves behind `--dedup`.** TODO-links-rework.md T1. The one surface change the shell rewire left behind: `--list` (the per-occurrence view) was the *additive* selector, and the *dedup'd edge set + backlinks* was the default. That was backwards once the grammar rewire made the occurrence list the richer, agent-facing view — the same list the TUI `l` picker and `kb verify` check d read. So the CLI surface flips: `kb links <target>` (and `--json`) now emits the numbered per-occurrence report (the same `annotated_links()` output, `style = kind.style_str`, `label` / `section` / `resolves_to` / `candidates`); the legacy `forward` + `style` + `resolves_to` per dedup'd pair + `backlinks` is still available as `kb links <target> --dedup[--json]`. **Breaking:** the `--list` flag is *retired* — it selected the new default; scripts pinning the legacy edge-set view add `--dedup`. `kb/main.rs` (`Links { target, dedup, json }` + help), `kb/cli/links.rs` (`cmd_links(dbpath, target, dedup, json)`; the `if list {…return}` early-return restructured into an `if dedup {…return}` block + a trailing default list path so the two views stop sharing a fall-through). 5 m7 edge-set pins re-pointed to `--dedup`; 2 m9 list-surface pins drop `--list` (now default); 1 m9 edge-set pin adds `--dedup`. No core change, no new proof obligation; `bash gate.sh` **7/7 green**; `./verify.sh` unchanged. **All green — see §13t.** |
+    | **M10.4** ✅ | **TUI `l` picker — find-style single-link focus + right-pane target info (T2).** The flat numbered link-list (`Mode::Links`) is reworked into a two-pane view mirroring the reader-find (`f`) model. Left pane (60 %): the *source* page body, with the focused link highlighted (`find_current`) and every other occurrence on the page lighter (`find_match`); the focused link is always kept centred via `find_padding` recomputed from the *actual* pane dimensions each frame (resize-safe, no input-pass recenter hook). Right pane (40 %): the focused link's **target info** — kind (short tag + full word via `e_style_str`), label, target, `#section`, resolution status (resolved / ambiguous + candidate list / external / current / dead), and a highlighted excerpt of the source line. `↑/↓`/`Home`/`End` move focus; `Enter` opens the target (the inline candidate-picker sub-state is preserved); `Esc`/`x` pops back to the origin Read. `AnnotatedLink` / `LinksEntry` gain the reference `end` byte offset (CLI-facing; the TUI highlights by visible text). New `raw_to_rendered_span(rendered_line, text_to_find)` helper (string search for the link's visible text in the rendered line) replaces the old flat-list rendering; 4 `render::tests::span_*` unit tests pin its contract. **Files:** `kb/main.rs`, `kb/tui/mod.rs` (`LinksEntry.end`, `LinksState.source_body`, `open_links`), `kb/tui/render.rs` (`draw_links`, `raw_to_rendered_span`, `draw_link_target_info`, `draw` dispatch — `body_pane_width` for `in_links`), `kb/tui/input.rs` (`handle_links`). No core change, no new proof obligation; `bash gate.sh` **7/7 green**; `./verify.sh` unchanged. **All green — see §13u.** |
 
 ## 13. M0 open items to settle (non-blocking for the design)
 
@@ -2611,6 +2615,124 @@ section-split-resolve, no-padding forms). The `m9` integration pin
 3 current, 2 dead (two intentional stubs), 0 ambiguous; `verify` verdict
 `ok-with-warnings` (exit 0). `bash gate.sh` **7/7 green**; `./verify.sh`
 unchanged. **M10.2 complete — the shell and the design are now the same rule.**
+
+### 13t. M10.3 results — `kb links` default flip: the list is now the default, `--dedup` is legacy (built + tested)
+
+**Scope.** TODO-links-rework.md T1. One CLI surface change: the per-occurrence
+link list (today's `--list`) becomes the default view of `kb links`; the
+legacy edge set + backlinks view is demoted to `kb links --dedup`. Nothing in
+`kb-core` / `kb-db` changes — `annotated_links()` is the untouched source of
+truth.
+
+**The change (2 files + 2 test files).**
+- `kb/main.rs` — `Cmd::Links { target, list: bool, json: bool }` →
+  `Cmd::Links { target, dedup: bool, json: bool }`; the subcommand help
+  block rewrites the default to state the new view and names `--dedup` as
+  the legacy escape.
+- `kb/cli/links.rs` — `cmd_links(dbpath, target, list: bool, json: bool)` →
+  `cmd_links(dbpath, target, dedup: bool, json: bool)`. The body restructures
+  from "list is a special case that early-returns; edge-set is the
+  fall-through" to "edge-set is a special case that early-returns; list is
+  the fall-through" — symmetric, no fall-through between the two views.
+- The five m7 edge-set pins (`links_shows_forward_and_backlinks`,
+  `wikilink_backlinks_resolve`, `multi_outgoing_links_fan_out`,
+  `two_cycle_is_directed`, `self_link_shows_in_forward`) each add `--dedup`
+  to their `kb links` invocation; they were written against the *old* default
+  and are the semantic pins for the legacy view.
+- The two m9 pins that pin the *list-surface* JSON shape
+  (`links_list_json_shape`, `links_list_json_empty_is_well_formed`) drop
+  `--list` (it is now the default). The one m9 pin that pins the
+  *edge-set-surface* shape
+  (`resolve_info_links_json` → the `links --json must carry
+  page/forward/backlinks` assertion) adds `--dedup`.
+
+**Breaking.** `kb links <target> --list --json` no longer parses — `--list`
+is retired. Scripts pinning the legacy view add `--dedup`. The m7 / m9 tests
+are the regression surface; they pin the *shape* of both views (per-
+occurrence fields `n` / `line` / `col` / `context` / `target` / `style` vs.
+`forward` / `backlinks`) so a future regression of either is caught.
+
+**Tests.** `cargo test --workspace` green **0 failures**. The 5 previously-
+failing m7 edge-set asserts (from before the flip, when they defaulted to
+the list view) now pass with `--dedup`. `bash gate.sh` **7/7 green**.
+`./verify.sh` unchanged. **M10.3 complete — the shell's `links` verb now
+matches the shell's own UX: the richer view is the default, the legacy view
+is one keystroke away.**
+
+### 13u. M10.4 results — TUI `l` picker: find-style single-link focus + right-pane target info (built + tested)
+
+**Scope.** TODO-links-rework.md T2. Rework the `Mode::Links` state from a
+flat numbered list (cursor + candidate overlay) into a two-pane view that
+mirrors the reader-find (`f`) model: `↑/↓` focuses a single link occurrence
+in the source body (highlighted, centred), and a right pane shows the
+focused link's target info (kind, label, target, `#section`, resolution
+status, candidates). `Enter` opens the target (inline candidate sub-state
+preserved); `Esc`/`x` pops back to the origin Read.
+
+**Why the old flat list was the wrong shape.** The v1 `draw_links` rendered
+a list of `LinksEntry` rows (`n  line:col  label → target`) — accurate but
+*context-free*: you see the link's position and destination, but you don't
+see the prose around it. The reader-find (`f`) model solved the equivalent
+problem for search hits (you see the whole line with the hit highlighted);
+the `l` picker was the one read-mode overlay that did not get that treatment.
+
+**Design decisions.**
+
+| Question | Decision | Rationale |
+|----------|----------|-----------|
+| Store a shared `FindState::center` / `scroll_top`? | No — `draw_links` self-computes `find_padding` from its *actual* pane dimensions each frame | The render pass is the single source of truth for what is visible; an input-pass hook that recentered `ls.center` after every cursor move was tried and dropped — it created a write-before-read cycle that needed the stale value for the *next* frame's read. Self-computed centering eliminates the intermediate state entirely. |
+| Highlight by re-walking the markdown state machine? | No — use `raw_to_rendered_span(rendered_line, needle)` (string search for the link's visible text in the rendered line) | The rendered line is plain text after `render_markdown_text`; the link's visible text (label or target) is a contiguous substring. A string search is O(n) and needs no state-machine re-entrant access. The `RawLink.start` / `RawLink.end` byte offsets are carried on `AnnotatedLink` / `LinksEntry` for the CLI / future tooling (T3+ may use them for exact spans), but the TUI does not need them to paint. |
+| Keep the candidate picker? | Yes — as a sub-state of `LinksState` | The candidate overlay is already the resolved-ambiguous case; reusing it avoids a new `Mode` and a new render pass. |
+
+**Code changes (4 files, no core change, no new proof obligation).**
+
+- `kb/main.rs` — `AnnotatedLink` gains `end: usize` (the reference's end
+  byte offset into the raw line, carried from `RawLink.end`); `push_annotated`
+  accepts `end`; the call site in `annotated_links` passes
+  `raw.end`. (TUI does not paint the exact byte range yet; it is available
+  for T3's "land at a body line" and for the CLI to grow an `end` field.)
+
+- `kb/tui/mod.rs` — `LinksEntry` gains `end: usize`
+  (`#[allow(dead_code)]` — public API, CLI-facing; the TUI highlights by
+  string search, not by byte range). `LinksState.source_body: String` is
+  added (the source page's raw body, populated by `open_links`; used by
+  `draw_link_target_info` to extract a one-line excerpt around the focused
+  link). `recenter_links` method is removed (self-computed centering).
+
+- `kb/tui/render.rs` — the large change:
+  - `raw_to_rendered_span(rendered_line, text_to_find) -> (usize, usize)`
+    (2-arg, string-search; returns `(0, 0)` when the needle is absent or
+    empty, so the caller skips the highlight rather than painting the whole
+    line). Four unit tests (`render::tests::span_*`) pin the contract.
+  - `draw_links` rewritten: two-pane layout (left = source body with
+    highlighted links, right = target info). The left pane computes its own
+    `FindPadding` from `panes[0].width` / `.height` each frame via
+    `find_padding(focused_row, content_rows, pane_h)` — no stored
+    `ls.center` or `ls.scroll_top`. Uses `panes[0].scroll(fp.scroll_top)` for
+    the visible window.
+  - `draw_link_target_info` added: renders kind (short tag + full word,
+    e.g. `[wik] wikilink`), label, target, `#section`, the resolution status
+    (resolved → id, ambiguous + candidate count, external, current, dead),
+    and a highlighted one-line excerpt of the source body around the focused
+    link.
+  - `draw` dispatch: `in_links` computes `body_pane_width` (60 %) and passes
+    it to `draw_links`; the roll-up pre-warm is for `Mode::Read` only — the
+    Links state reads `source_body` directly from `LinksState`.
+  - Old ~120 lines of flat-list rendering code (the `ListState`-based
+    numbered picker in `draw_links`) removed.
+
+- `kb/tui/input.rs` — `handle_links`: `↑`/`↓`/`Home`/`End` arms now only
+  mutate `ls.cursor` (+ `set_links_note()`). No `recenter_links` calls.
+  `Enter` still dispatches to `links_open_selected` (candidate overlay
+  unchanged). `Esc`/`x` pop back to `links_return`.
+
+**Tests.** `cargo test --workspace` green **0 failures** (231 + 5 + 7 + 2 +
+21 + 6 + 9 + 40 + 5 + 171 + 14 + 43 + 15 + 7 + 1 + 41 + 26 = 637 total).
+`bash gate.sh` **7/7 green**. `./verify.sh` unchanged (350 verified / 0
+errors). **M10.4 complete — the `l` picker now shows the source context
+side-by-side with the target info, in the same visual language as the
+reader-find (`f`).**
+
 
 
 

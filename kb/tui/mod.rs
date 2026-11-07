@@ -269,7 +269,20 @@ pub struct LinksEntry {
     /// (for wikilinks: the first char after `[[`; for path tokens: the
     /// first char of the path). The `[[` itself is *not* counted — the
     /// offset is where the *content* the user wrote starts.
+    ///
+    /// Public API surface — exposed so external consumers (the CLI `kb
+    /// links` form, any tool that wants to highlight the *whole reference*)
+    /// can paint `line[col..end]`. The TUI's find-style highlight uses a
+    /// simpler string-search strategy instead, so `col` is the field the
+    /// highlight actually keys off.
+    #[allow(dead_code)] // Externally-facing (CLI + future tooling); not yet painted by the TUI.
     pub col: usize,
+    /// 0-based byte offset in that line where the reference **ends**
+    /// (exclusive). For wikilinks: just past `]]`; for the inline form:
+    /// just past the closing `)`. See the `col` doc for the TUI
+    /// highlight's strategy note.
+    #[allow(dead_code)] // Externally-facing (CLI + future tooling); not yet painted by the TUI.
+    pub end: usize,
     /// The containing raw line, trimmed (for context display).
     pub context: String,
     /// The written target (the raw text as the user typed it).
@@ -375,6 +388,11 @@ pub struct LinksState {
     /// kept so the TUI's "Esc" pops back into it via `load_body` rather
     /// than the Browse view.
     pub source_abs_path: String,
+    /// The full source body (the page the user is reading, in raw
+    /// form). The TUI's `draw_links` paints this in the left pane and
+    /// overlays the highlight of the focused link onto the *rendered*
+    /// (word-wrapped) form of it — mirroring the reader-find behavior.
+    pub source_body: String,
     /// The inline **candidate picker** sub-state (the ambiguous-link
     /// overlay). `None` in the flat-list view; `Some` when the user has
     /// pressed `Enter` on an ambiguous entry. `Esc` clears it (restoring
@@ -1357,13 +1375,14 @@ impl App {
                 |r| r.get(0),
             )
             .map_err(|e| (format!("body lookup for {abs_path}: {e}"), EXIT_ERR))?;
-        let annotated = crate::annotated_links(&body, &corpus);
-        let entries: Vec<LinksEntry> = annotated
-            .into_iter()
-            .map(|al| LinksEntry {
-                line: al.line,
-                col: al.col,
-                context: al.context,
+         let annotated = crate::annotated_links(&body, &corpus);
+         let entries: Vec<LinksEntry> = annotated
+             .into_iter()
+             .map(|al| LinksEntry {
+                 line: al.line,
+                 col: al.col,
+                 end: al.end,
+                 context: al.context,
                 target: al.target,
                 label: al.label,
                 section: al.section,
@@ -1397,6 +1416,7 @@ impl App {
             links,
             cursor,
             source_abs_path: abs_path.clone(),
+            source_body: body.clone(),
             candidates: None,
         };
         self.mode = Mode::Links(ls);

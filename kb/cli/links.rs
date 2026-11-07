@@ -33,7 +33,7 @@ fn resolve_target_path(
 }
 
 
-pub(crate) fn cmd_links(dbpath: Option<&Path>, target: &str, list: bool, json: bool) -> Kb {
+pub(crate) fn cmd_links(dbpath: Option<&Path>, target: &str, dedup: bool, json: bool) -> Kb {
     let db = open_db(dbpath)?;
 
     let Some(abs_path) = resolve_target_path(&db, target)? else {
@@ -42,105 +42,109 @@ pub(crate) fn cmd_links(dbpath: Option<&Path>, target: &str, list: bool, json: b
 
     let corpus_pages = load_corpus(&db)?;
 
-    // `--list` is the per-occurrence view: it reads the page's body directly
-    // (not the `links` table, which is the dedup'd edge set) and resolves
-    // every occurrence against the corpus. It does NOT compute backlinks
-    // (a list is about forward edges; the edge-set path owns backlinks).
-    if list {
-        let body: String = db
-            .conn
-            .query_row(
-                "SELECT COALESCE(body, '') FROM pages WHERE abs_path = ?1",
-                [abs_path.as_str()],
-                |r| r.get(0),
-            )
-            .map_err(|e| (format!("body lookup for {abs_path}: {e}"), EXIT_ERR))?;
-        let links = annotated_links(&body, &corpus_pages);
-        render_links_list(&abs_path, &links, json);
+    // `--dedup` is the legacy per-edge view: the `links` table (dedup'd
+    // `(target, style)` pair set) plus backlinks. The *default* (below) is
+    // the per-occurrence view, which reads the page's body directly
+    // (not the `links` table) and resolves every occurrence against the
+    // corpus; it does NOT compute backlinks (a list is about forward edges;
+    // the edge-set path owns backlinks).
+    if dedup {
+        // Load the corpus once — used both to resolve the *current* page's
+        // forward wikilinks (so a `[[B]]` in this page's body is shown as
+        // the page it points to, not the raw "B") and to build the true
+        // backlink set (pages whose extracted forward links resolve to
+        // `abs_path`).
+        let abs_index: std::collections::HashMap<String, &resolver::Page> =
+            corpus_pages.iter().map(|p| (p.abs_path.clone(), p)).collect();
+
+        // forward links — resolve raw wikilink/path targets to their page id.
+        // Collect into (to_path, style, Some(resolved_abs) | None) so the
+        // human + JSON renderers share the exact same resolution.
+        let mut fwd_stmt = db.conn
+            .prepare("SELECT to_path, style FROM links WHERE from_path = ?1 ORDER BY to_path, style")
+            .map_err(|e| (format!("prepare fwd: {e}"), EXIT_ERR))?;
+        let forward_raw: Vec<(String, String)> = fwd_stmt
+            .query_map(rusqlite::params![abs_path], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))
+            .map_err(|e| (format!("fwd query: {e}"), EXIT_ERR))?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|e| (format!("fwd rows: {e}"), EXIT_ERR))?;
+        let forward: Vec<(String, String, Option<String>)> = forward_raw
+            .iter()
+            .map(|(to_path, style)| {
+                let resolved = resolve_target(&corpus_pages, to_path);
+                (to_path.clone(), style.clone(), resolved)
+            })
+            .collect();
+
+        // backlinks — pages whose forward edge *resolves to* this page. We
+        // must iterate the corpus (not `WHERE to_path = ?` as the old SQL
+        // did) because a wikilink's raw written target text is stored, not
+        // the page's abs_path. A raw target text that fails to resolve is a
+        // *dead* link and does NOT contribute a backlink (§4 collision is
+        // legal; §8 says the indexer leaves to_path as a pending ref).
+        // SECURITY_REPORT 3.17: load ALL forward edges once (one `prepare` +
+        // one full-scan) into a `BTreeMap<from_path, Vec<to_path>>` instead
+        // of re-preparing the statement per corpus page (N prepares for N
+        // pages).
+        let edges_by_from: std::collections::BTreeMap<String, Vec<String>> = {
+            let mut e = db.conn
+                .prepare("SELECT from_path, to_path FROM links")
+                .map_err(|e| (format!("prepare back-edge: {e}"), EXIT_ERR))?;
+            let rows = e.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))
+                .map_err(|e| (format!("back-edge query: {e}"), EXIT_ERR))?;
+            let mut map: std::collections::BTreeMap<String, Vec<String>> = std::collections::BTreeMap::new();
+            for row in rows {
+                let (from, to) = row.map_err(|e| (format!("back-edge rows: {e}"), EXIT_ERR))?;
+                map.entry(from).or_default().push(to);
+            }
+            map
+        };
+        let mut back: Vec<String> = Vec::new();
+        for (from_abs, _p) in corpus_pages
+            .iter()
+            .map(|p| (p.abs_path.clone(), p))
+            .filter(|(src,_)| *src != abs_path)
+        {
+            // look up this page's forward edges (already loaded) and check if
+            // any resolve to abs_path.
+            let edges = edges_by_from.get(&from_abs);
+            let mut hit = false;
+            if let Some(targets) = edges {
+                for target_text in targets {
+                    if resolve_target(&corpus_pages, target_text).as_deref() == Some(abs_path.as_str()) {
+                        hit = true;
+                        break;
+                    }
+                }
+            }
+            if hit { back.push(from_abs.clone()); }
+        }
+        back.sort();
+        back.dedup();
+
+        // ---- JSON + human renderers share the same resolution (A2 extraction) --
+        render_links(&abs_path, &forward, &back, &abs_index, json);
         return Ok(EXIT_OK);
     }
 
-    // ---- edge-set path (default) ----
-    // Load the corpus once — used both to resolve the *current* page's forward
-    // wikilinks (so a `[[B]]` in this page's body is shown as the page it
-    // points to, not the raw "B") and to build the true backlink set (pages
-    // whose extracted forward links resolve to `abs_path`).
-    let abs_index: std::collections::HashMap<String, &resolver::Page> =
-        corpus_pages.iter().map(|p| (p.abs_path.clone(), p)).collect();
-
-    // forward links — resolve raw wikilink/path targets to their page id.
-    // Collect into (to_path, style, Some(resolved_abs) | None) so the human +
-    // JSON renderers share the exact same resolution.
-    let mut fwd_stmt = db.conn
-        .prepare("SELECT to_path, style FROM links WHERE from_path = ?1 ORDER BY to_path, style")
-        .map_err(|e| (format!("prepare fwd: {e}"), EXIT_ERR))?;
-    let forward_raw: Vec<(String, String)> = fwd_stmt
-        .query_map(rusqlite::params![abs_path], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))
-        .map_err(|e| (format!("fwd query: {e}"), EXIT_ERR))?
-        .collect::<Result<Vec<_>, _>>()
-        .map_err(|e| (format!("fwd rows: {e}"), EXIT_ERR))?;
-    let forward: Vec<(String, String, Option<String>)> = forward_raw
-        .iter()
-        .map(|(to_path, style)| {
-            let resolved = resolve_target(&corpus_pages, to_path);
-            (to_path.clone(), style.clone(), resolved)
-        })
-        .collect();
-
-    // backlinks — pages whose forward edge *resolves to* this page. We must
-    // iterate the corpus (not `WHERE to_path = ?` as the old SQL did) because
-    // a wikilink's raw written target text is stored, not the page's
-    // abs_path. A raw target text that fails to resolve is a *dead* link and
-    // does NOT contribute a backlink (§4 collision is legal; §8 says the
-    // indexer leaves to_path as a pending ref).
-    // SECURITY_REPORT 3.17: load ALL forward edges once (one `prepare` + one
-    // full-scan) into a `BTreeMap<from_path, Vec<to_path>>` instead of
-    // re-preparing the statement per corpus page (N prepares for N pages).
-    let edges_by_from: std::collections::BTreeMap<String, Vec<String>> = {
-        let mut e = db.conn
-            .prepare("SELECT from_path, to_path FROM links")
-            .map_err(|e| (format!("prepare back-edge: {e}"), EXIT_ERR))?;
-        let rows = e.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))
-            .map_err(|e| (format!("back-edge query: {e}"), EXIT_ERR))?;
-        let mut map: std::collections::BTreeMap<String, Vec<String>> = std::collections::BTreeMap::new();
-        for row in rows {
-            let (from, to) = row.map_err(|e| (format!("back-edge rows: {e}"), EXIT_ERR))?;
-            map.entry(from).or_default().push(to);
-        }
-        map
-    };
-    let mut back: Vec<String> = Vec::new();
-    for (from_abs, _p) in corpus_pages
-        .iter()
-        .map(|p| (p.abs_path.clone(), p))
-        .filter(|(src,_)| *src != abs_path)
-    {
-        // look up this page's forward edges (already loaded) and check if any
-        // resolve to abs_path.
-        let edges = edges_by_from.get(&from_abs);
-        let mut hit = false;
-        if let Some(targets) = edges {
-            for target_text in targets {
-                if resolve_target(&corpus_pages, target_text).as_deref() == Some(abs_path.as_str()) {
-                    hit = true;
-                    break;
-                }
-            }
-        }
-        if hit { back.push(from_abs.clone()); }
-    }
-    back.sort();
-    back.dedup();
-
-    // ---- JSON + human renderers share the same resolution (A2 extraction) --
-    render_links(&abs_path, &forward, &back, &abs_index, json);
+    // ---- default: the per-occurrence annotated list ----
+    let body: String = db
+        .conn
+        .query_row(
+            "SELECT COALESCE(body, '') FROM pages WHERE abs_path = ?1",
+            [abs_path.as_str()],
+            |r| r.get(0),
+        )
+        .map_err(|e| (format!("body lookup for {abs_path}: {e}"), EXIT_ERR))?;
+    let links = annotated_links(&body, &corpus_pages);
+    render_links_list(&abs_path, &links, json);
     Ok(EXIT_OK)
 }
 
 
 /// Render a page's per-occurrence link list in the requested format
-/// (shared by `kb links --list` human + `--list --json` paths, so the two
-/// can never disagree — same input, same field order).
+/// (shared by `kb links` human + `--json` paths — the default view — so the
+/// two can never disagree: same input, same field order).
 ///
 /// `list` is *numbered* in document order: the agent can refer back to
 /// `links[i].line` / `links[i].target` without disambiguating by target

@@ -7,6 +7,27 @@ the API is still moving; breaking changes are called out explicitly.
 ## [Unreleased]
 
 ### Added
+- **TUI `l` picker reworked to find-style single-link focus (T2).** The link
+  picker (`l` in Read) is no longer a flat numbered list. It is now a
+  two-pane view mirroring the reader-find (`f`) model: a left body pane
+  (60%) renders the *source* page with the focused link highlighted
+  (`find_current`) and every other occurrence on the page lighter
+  (`find_match`), always kept scrolled so the focused link is centered; a
+  right pane (40%) shows the focused link's **target info** — kind (short
+  tag + full word), label, target, `#section`, the resolution status
+  (resolved → id, ambiguous + candidate list, external, current, or dead),
+  and a highlighted excerpt of the source line. `↑/↓`/`Home`/`End` move the
+  focus; `Enter` opens the target (the inline candidate picker is preserved
+  as the ambiguity overlay); `Esc`/`x` pops back to the Read it was opened
+  from. The rework is self-contained: `draw_links` recomputes its own
+  centering from its *actual* layout-split pane dimensions each frame (via
+  the existing `find_padding`), so it is resize-safe and needs no input-pass
+  recenter hook. Highlighting uses a new `raw_to_rendered_span` helper (a
+  string search for the link's visible text in the rendered line) rather than
+  re-walking the markdown state machine. `AnnotatedLink`/`LinksEntry` now
+  also carry the reference `end` byte offset (CLI-facing; the TUI highlights
+  by the visible text). Four `render::tests::span_*` unit tests pin the
+  highlight-helper contract. See `TODO-links-rework.md` (T2).
 - **`[ label ]( [ target ] )` / `< https://… >` / `# section` reference
   grammar, shell end-to-end (DESIGN-links.md phase 1, rewire).** The shell
   (`kb`) is now rewired onto the unified reference grammar
@@ -186,6 +207,22 @@ the API is still moving; breaking changes are called out explicitly.
   asserting a fresh DB is a no-op.
 
 ### Changed
+- **`kb links` now shows the per-occurrence link list by default; the old
+  edge set + backlinks view moves behind `--dedup`.** `kb links <target>`
+  (and `kb links <target> --json`) now emits the numbered per-occurrence
+  report — position (`line`/`col`), context, kind (`style`), `label`,
+  `section`, and §4 resolution — the same list the TUI `l` picker and the
+  agent's "follow the link next to my text" workflow consume. It is now the
+  view the dedup'd edge set cannot express, so it is the default. The legacy
+  edge set + backlinks is still available as
+  `kb links <target> --dedup[--json]` (`forward` + `style` + `resolves_to`
+  per dedup'd `(target, style)` pair, plus `backlinks`); it was the default
+  before this change. The `--list` flag is retired (it was a no-op selector
+  of the new default — `kb links X --list X --json` no longer parses).
+  `kb links` help text rewritten to state the new default. m7 edge-set
+   regression pins re-pointed at `--dedup`; the m9 JSON-surface pins now
+   omit `--list` (default) and use `--dedup` for the forward/backlinks
+   shape. See `TODO-links-rework.md` (T1).
 - **`kb-hardened` (the agent build) no longer special-cases a bare `.md` file
   to `info`** — a bare positional token always routes to `search`.
   Previously the pre-parse entry point in `main.rs` probed

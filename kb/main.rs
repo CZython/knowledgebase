@@ -410,26 +410,27 @@ pub(crate) enum Cmd {
         #[arg(long)]
         json: bool,
     },
-    /// Forward links (raw targets + style) and backlinks for one page.
+    /// Per-occurrence link list for one page (default), or the dedup'd
+    /// edge set + backlinks with `--dedup`.
     ///
-    /// Default: the *edge set* — one row per dedup'd `(target, style)` pair,
-    /// with raw backlinks. `--list`: the *occurrence set* — one numbered row
-    /// per link occurrence in the page's body, in document order, each with
-    /// its position (`line`/`col`), surrounding context, and its §4
-    /// resolution (`resolves_to` + `candidates`). `--list` is what the TUI's
-    /// link-picker and the agent's "follow the link next to my text" workflow
-    /// consume; it is the per-occurrence view the dedup'd edge set cannot
-    /// express.
+    /// Default: the *occurrence set* — one numbered row per link occurrence
+    /// in the page's body, in document order, each with its position
+    /// (`line`/`col`), surrounding context, and its §4 resolution
+    /// (`resolves_to` + `candidates`). This is what the TUI's link-picker
+    /// and the agent's "follow the link next to my text" workflow consume;
+    /// it is the per-occurrence view the dedup'd edge set cannot express.
+    /// `--dedup`: the legacy *edge set* — one row per dedup'd
+    /// `(target, style)` pair, with raw backlinks (the pre-rewire default).
     Links {
         /// A page path (absolute) or display id (`wiki:slug`).
         target: String,
-        /// Per-occurrence link list (numbered, with position + context +
-        /// resolution). Implies the JSON / human link list rather than the
-        /// edge set + backlinks.
+        /// The legacy edge-set view: one row per dedup'd `(target, style)`
+        /// pair, plus backlinks. Without it, the per-occurrence list (the
+        /// default; the old `--list`).
         #[arg(long)]
-        list: bool,
-        /// Emit a JSON object (forward links + backlinks, or the link list
-        /// when `--list` is set).
+        dedup: bool,
+        /// Emit a JSON object (the link list, or forward links + backlinks
+        /// with `--dedup`).
         #[arg(long)]
         json: bool,
     },
@@ -756,7 +757,7 @@ pub(crate) fn run(cli: &Cli) -> i32 {
             },
             *json,
         ),
-        Cmd::Links { target, list, json } => cmd_links(cli.db.as_deref(), target, *list, *json),
+        Cmd::Links { target, dedup, json } => cmd_links(cli.db.as_deref(), target, *dedup, *json),
         Cmd::Resolve { query, json } => cmd_resolve(cli.db.as_deref(), query, *json),
         Cmd::Info { path, json } => cmd_info(cli.db.as_deref(), path, *json),
         Cmd::Stats { json } => cmd_stats(cli.db.as_deref(), *json),
@@ -1120,6 +1121,11 @@ pub struct AnnotatedLink {
     /// Byte offset within that line where the reference (including its
     /// wrappers) starts.
     pub col: usize,
+    /// Byte offset within that line where the reference (including its
+    /// wrappers) ends (exclusive). Used by the TUI to paint the whole
+    /// reference (e.g. `[[wiki/target]]`) rather than just the inner
+    /// target substring.
+    pub end: usize,
     /// The containing raw line, trimmed — one-line surrounding context.
     pub context: String,
     /// The raw written target (per the form it was written as).
@@ -1156,7 +1162,7 @@ pub fn annotated_links(body: &str, pages: &[resolver::Page]) -> Vec<AnnotatedLin
     for (li, line) in body.lines().enumerate() {
         let context = line.trim().to_string();
         for raw in links::detect_refs(line) {
-            push_annotated(&mut out, li, raw.start, &context, &raw, pages);
+            push_annotated(&mut out, li, raw.start, raw.end, &context, &raw, pages);
         }
     }
     out
@@ -1171,6 +1177,7 @@ fn push_annotated(
     out: &mut Vec<AnnotatedLink>,
     line: usize,
     col: usize,
+    end: usize,
     context: &str,
     raw: &links::RawLink,
     pages: &[resolver::Page],
@@ -1179,6 +1186,7 @@ fn push_annotated(
     let base = AnnotatedLink {
         line,
         col,
+        end,
         context: context.to_string(),
         target: cls.target.clone(),
         kind: cls.kind,

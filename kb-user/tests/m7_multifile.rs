@@ -797,13 +797,13 @@ fn links_shows_forward_and_backlinks() {
     write_page(&s, "b.md", "type: note\ntitle: B\n", "the target\n");
     add(&s);
     // forward links for A: the wikilink target is stored as its raw text "B".
-    let (code, out, err) = run(&s, &["links", "note:A"]);
+    let (code, out, err) = run(&s, &["links", "note:A", "--dedup"]);
     assert_eq!(code, 0, "stderr: {err}");
     assert!(out.contains("forward links"), "fwd header: {out}");
     assert!(out.contains("B"), "fwd target: {out}");
     // the backlinks view also renders (may be empty for a raw-text wikilink
     // target, but the header must be present — that's the shell contract).
-    let (code, out, err) = run(&s, &["links", "note:B"]);
+    let (code, out, err) = run(&s, &["links", "note:B", "--dedup"]);
     assert_eq!(code, 0, "stderr: {err}");
     assert!(out.contains("backlinks"), "back header: {out}");
 }
@@ -942,7 +942,7 @@ fn wikilink_backlinks_resolve() {
     write_page(&s, "a.md", "type: note\ntitle: A\n", "see [[B]]\n");
     write_page(&s, "b.md", "type: note\ntitle: B\n", "the target\n");
     add(&s);
-    let (code, out, err) = run(&s, &["links", "note:B"]);
+    let (code, out, err) = run(&s, &["links", "note:B", "--dedup"]);
     assert_eq!(code, 0, "stderr: {err}");
     assert!(
         out.contains("backlinks (") || out.contains("backlinks (1)"),
@@ -1308,14 +1308,14 @@ fn multi_outgoing_links_fan_out_to_each_target_and_backlink() {
 
     // A's forward view: both targets, each with a style tag (the `wikilink`
     // style in this case).
-    let (code, out, err) = run(&s, &["links", "note:A"]);
+    let (code, out, err) = run(&s, &["links", "note:A", "--dedup"]);
     assert_eq!(code, 0, "stderr: {err}");
     assert!(out.contains("forward links (2)"), "A has exactly two outbound links: {out}");
     assert!(out.contains("[ wikilink ]  B"), "B in A's forward list: {out}");
     assert!(out.contains("[ wikilink ]  C"), "C in A's forward list: {out}");
 
     // B's backlinks: exactly A.
-    let (code, out, err) = run(&s, &["links", "note:B"]);
+    let (code, out, err) = run(&s, &["links", "note:B", "--dedup"]);
     assert_eq!(code, 0, "stderr: {err}");
     assert!(
         out.contains("backlinks (1)") && (out.contains("a.md") || out.contains("note:A")),
@@ -1324,7 +1324,7 @@ fn multi_outgoing_links_fan_out_to_each_target_and_backlink() {
     assert!(!out.contains("note:C"), "C must not appear in B's backlinks: {out}");
 
     // C's backlinks: exactly A.
-    let (code, out, err) = run(&s, &["links", "note:C"]);
+    let (code, out, err) = run(&s, &["links", "note:C", "--dedup"]);
     assert_eq!(code, 0, "stderr: {err}");
     assert!(
         out.contains("backlinks (1)") && (out.contains("a.md") || out.contains("note:A")),
@@ -1349,7 +1349,7 @@ fn two_cycle_is_directed_with_no_self_loop() {
 
     // A's forward: exactly B. A's backlinks: exactly B (the reverse edge
     // of the cycle). No self-loop (A does not link to A).
-    let (code, out, err) = run(&s, &["links", "note:A"]);
+    let (code, out, err) = run(&s, &["links", "note:A", "--dedup"]);
     assert_eq!(code, 0, "stderr: {err}");
     assert!(
         out.contains("forward links (1)") && out.contains("[ wikilink ]  B"),
@@ -1361,7 +1361,7 @@ fn two_cycle_is_directed_with_no_self_loop() {
     );
 
     // B mirrors this: forward = A, backlinks = A.
-    let (code, out, err) = run(&s, &["links", "note:B"]);
+    let (code, out, err) = run(&s, &["links", "note:B", "--dedup"]);
     assert_eq!(code, 0, "stderr: {err}");
     assert!(
         out.contains("forward links (1)") && out.contains("[ wikilink ]  A"),
@@ -1389,7 +1389,7 @@ fn self_link_shows_in_forward_but_is_filtered_from_backlinks() {
     write_page(&s, "a.md", "type: note\ntitle: A\n", "self-reference: [[A]]\n");
     add(&s);
 
-    let (code, out, err) = run(&s, &["links", "note:A"]);
+    let (code, out, err) = run(&s, &["links", "note:A", "--dedup"]);
     assert_eq!(code, 0, "stderr: {err}");
     // The self-link *is* visible in A's forward view (the forward query
     // has no self-loop filter — only the backlinks view has one).

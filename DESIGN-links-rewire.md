@@ -17,6 +17,8 @@ core-touching piece that is still isolated (it touches `resolve`).
 |---|---|---|
 | **Phase 1 — core grammar** (`kb-core::links::detect_refs` + `classify_target`, `LinkKind`, `RawLink`, `Ref`) | ✅ shipped | `a9e1add` |
 | **Phase 1 — shell rewire** (`annotated_links`, `kb links --list`, `kb verify` check d, TUI `LinksEntry` + render) | ✅ shipped | (this rewire) |
+| **Phase 1 — `kb links` default flip** (the per-occurrence list is now the **default** view; the legacy edge set + backlinks demoted to `kb links --dedup`; the `--list` flag retired) | ✅ shipped | (T1, TODO-links-rework.md) |
+| **Phase 1 — TUI `l` picker UX rework** (find-style single-link focus with source context + right-pane target info; self-computed centering; `raw_to_rendered_span` highlight helper) | ✅ shipped | (T2, TODO-links-rework.md, PLAN §13u) |
 | **Phase 2 — `#section` jumpable anchor** (core: `Resolution::Unique → Anchor{page,section}` via `kb_core::section::resolve`) | ⏳ isolated | — |
 
 ## What the Phase 1 shell rewire did (vs. the v1 extractor it replaced)
