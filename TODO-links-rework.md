@@ -54,15 +54,24 @@ computes its own centering from its *actual* layout-split pane dimensions each
 frame (via `find_padding`) rather than reading a shared `FindState::center`,
 so it is resize-safe and needs no input-pass recenter hook (`recenter_links`
 was tried and dropped: the render pass is the single source of truth). The
-highlight uses `raw_to_rendered_span` — a string search for the link's visible
-text (label or target) in the rendered line — rather than re-walking the
-markdown state machine. `LinksEntry.end` is now carried (CLI-facing, not yet
-painted by the TUI). Added `render::tests::span_*` unit tests. Gate 7/7, no
-warnings, `cargo test --workspace` green.
+left body pane **splices** each *alive* link — one that uniquely resolves, or
+an external / `#section` ref — down to just its display text
+(`is_alive_link` + `splice_links_on_line`, splicing high-to-low over
+`col`/`end`), so `[label](path)` reads as `label` with a recoloured span
+(`find_current` focused / `find_match` others) exactly like the reader renders
+`**bold**` / `*italic*`. **Dead** (unresolved) and **ambiguous** links are
+skipped and render as ordinary prose. Highlighting then uses
+`raw_to_rendered_span` — a string search for the link's visible text (label
+or target) in the rendered line — rather than re-walking the markdown state
+machine. `LinksEntry.end` is now carried (CLI-facing). Added
+`render::tests::span_*` (highlight helper) and `splice_*` (splicing, incl.
+multi-link-per-line ordering) unit tests. Gate 7/7, no warnings,
+`cargo test --workspace` green.
 
 **Files touched:** `kb/tui/mod.rs` (`LinksEntry.end`, `LinksState.source_body`,
 `open_links`), `kb/tui/render.rs` (`draw_links` two-pane,
-`raw_to_rendered_span`, `draw_link_target_info`, `draw` dispatch),
+`raw_to_rendered_span`, `is_alive_link`, `splice_links_on_line`,
+`draw_link_target_info`, `draw` dispatch),
 `kb/main.rs` (`AnnotatedLink.end`, `push_annotated`), `kb/tui/input.rs`
 (`handle_links`).
 

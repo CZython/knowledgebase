@@ -1791,7 +1791,39 @@ fn draw_links(f: &mut ratatui::Frame, app: &App, ls: &LinksState, area: Rect) {
 
     // ----- Left pane: body with find-style highlight ----------------------
     let p = &app.palette;
-    let rendered = rendered_lines(p, &ls.source_body);
+
+    // Splice alive (uniquely-resolved) links: replace the full reference
+    // span (e.g. `[label](path/to/page)` or `[[target]]`) with just the
+    // display text (`label` or `target`), so the prose renders as
+    // "see [label](path/to/page) for details" → "see label for details".
+    // Dead (unresolved), ambiguous, External, and Current links are
+    // left as normal text (no special rendering).
+    let spliced_body: Vec<String> = ls
+        .source_body
+        .lines()
+        .enumerate()
+        .map(|(li, raw)| {
+            let alive: Vec<(usize, usize, String)> = ls
+                .links
+                .iter()
+                .filter(|e| e.line == li && is_alive_link(e))
+                .map(|e| (
+                    e.col,
+                    e.end,
+                    e.label
+                        .clone()
+                        .unwrap_or_else(|| e.target.clone()),
+                ))
+                .collect();
+            if alive.is_empty() {
+                raw.to_string()
+            } else {
+                splice_links_on_line(raw, &alive)
+            }
+        })
+        .collect();
+
+    let rendered: Vec<String> = spliced_body.iter().map(|l| rendered_line(p, l)).collect();
     let pane_w = (panes[0].width.saturating_sub(2)) as usize;
     let pane_h = (panes[0].height.saturating_sub(2)) as usize;
     let content_rows = rendered_row_count(&rendered, pane_w);
@@ -1809,11 +1841,15 @@ fn draw_links(f: &mut ratatui::Frame, app: &App, ls: &LinksState, area: Rect) {
     let (pad_above, pad_below) = (fp.above, fp.below);
 
     // Build the per-line patch list. Patches are (start, end, style) byte
-    // offsets into the *rendered* line.
+    // offsets into the *rendered* line. Only alive links are highlighted;
+    // dead/ambiguous links are plain text (no find-patch applied).
     let mut patches_by_line: std::collections::HashMap<usize, Vec<(usize, usize, Style)>> =
         std::collections::HashMap::new();
     for (i, e) in ls.links.iter().enumerate() {
         let is_focused = i == focused;
+        if !is_alive_link(e) {
+            continue;
+        }
         let style = if is_focused { p.find_current } else { p.find_match };
         if let Some(rendered_line) = rendered.get(e.line) {
             let needle = e.label.clone().unwrap_or_else(|| e.target.clone());
@@ -1829,12 +1865,12 @@ fn draw_links(f: &mut ratatui::Frame, app: &App, ls: &LinksState, area: Rect) {
 
     let blank = Line::from(vec![Span::styled(String::new(), p.default)]);
     let mut body_lines: Vec<Line<'static>> = Vec::with_capacity(
-        pad_above + ls.source_body.lines().count() + pad_below,
+        pad_above + spliced_body.len() + pad_below,
     );
     for _ in 0..pad_above {
         body_lines.push(blank.clone());
     }
-    for (li, raw) in ls.source_body.lines().enumerate() {
+    for (li, raw) in spliced_body.iter().enumerate() {
         let base = read_line(p, raw);
         if let Some(patches) = patches_by_line.get(&li) {
             body_lines.push(apply_find_patched(base, patches));
@@ -1879,6 +1915,54 @@ fn draw_links(f: &mut ratatui::Frame, app: &App, ls: &LinksState, area: Rect) {
         ]);
         f.render_widget(note, panes[1]);
     }
+}
+
+/// True when the link is *alive* — a uniquely-resolved, navigable page
+/// reference (Db / Path, `resolved = Some(...)` or `abs_path = Some(...)`,
+/// no candidates). External and Current links are also "alive" in the
+/// sense that they are well-formed; they render with the same display
+/// text (the URL or the `#section`) as normal prose, so they are
+/// included here.
+fn is_alive_link(e: &crate::tui::LinksEntry) -> bool {
+    match e.kind {
+        kb_core::links::LinkKind::Db | kb_core::links::LinkKind::Path => {
+            e.resolved.is_some() && e.candidates.is_empty()
+        }
+        kb_core::links::LinkKind::External
+        | kb_core::links::LinkKind::Current => true,
+    }
+}
+
+/// Splice alive links out of a raw line, replacing each full reference
+/// span (`[label](path)`, `[[target]]`, `<url>`) with just its display
+/// text (the `label` for the inline form, otherwise the `target`),
+/// exactly the way `render_markdown_text` strips `**` / `*` / `~~` /
+/// backticks. Returns the spliced line.
+///
+/// `ranges` is `(col, end, display_text)` — byte offsets into `raw`
+/// (the unmodified line, which is what `col`/`end` were measured on).
+/// The slice is built high-to-low (`col` descending) so that an earlier
+/// splice never invalidates a later range; the result preserves the
+/// surrounding prose exactly.
+fn splice_links_on_line(
+    raw: &str,
+    ranges: &[(usize, usize, String)],
+) -> String {
+    if ranges.is_empty() {
+        return raw.to_string();
+    }
+    // Sort by `col` descending so we splice from the end of the line
+    // first — earlier splice offsets stay valid for later splices.
+    let mut sorted: Vec<&(usize, usize, String)> = ranges.iter().collect();
+    sorted.sort_by_key(|a| std::cmp::Reverse(a.0));
+    let mut out = raw.to_string();
+    for (col, end, display) in sorted {
+        if *col < *end && *col < out.len() {
+            let e = (*end).min(out.len());
+            out.replace_range(*col..e, display);
+        }
+    }
+    out
 }
 
 /// Find a link's visible text in the rendered line and return the
@@ -2988,5 +3072,78 @@ mod tests {
         let line = "a watchmaker keeps a [[watchmaking guide]] on the shelf";
         let (s, e) = raw_to_rendered_span(line, "watchmaking guide");
         assert_eq!(&line[s..e], "watchmaking guide");
+    }
+
+    // ---- T2: `splice_links_on_line` (display-text splicing) -------------
+    // `col..end` is the *whole written reference* (brackets/parens included)
+    // exactly as `detect_refs` reports it; the display text is what stays.
+
+    /// The inline form `[label](target)` splices the full reference down to
+    /// just the label — the prose reads as if the link were plain text.
+    #[test]
+    fn splice_inlink_keeps_label() {
+        let raw = "see [transformers explained](notes/transformer.md) for details";
+        let ranges = [(4, 50, "transformers explained".to_string())];
+        assert_eq!(
+            splice_links_on_line(raw, &ranges),
+            "see transformers explained for details"
+        );
+    }
+
+    /// A wikilink `[[target]]` splices to just the target text (no label).
+    #[test]
+    fn splice_wikilink_keeps_target() {
+        let raw = "read the [[watchmaking guide]] carefully";
+        let ranges = [(9, 30, "watchmaking guide".to_string())];
+        assert_eq!(
+            splice_links_on_line(raw, &ranges),
+            "read the watchmaking guide carefully"
+        );
+    }
+
+    /// An external `< uri >` splices to just the URI.
+    #[test]
+    fn splice_external_keeps_uri() {
+        let raw = "open <https://example.com/x> soon";
+        let ranges = [(5, 28, "https://example.com/x".to_string())];
+        assert_eq!(
+            splice_links_on_line(raw, &ranges),
+            "open https://example.com/x soon"
+        );
+    }
+
+    /// Two links on one line both splice; offsets stay correct because the
+    /// splices run high-to-low (later link first), so earlier ranges are
+    /// never invalidated.
+    #[test]
+    fn splice_two_links_on_one_line() {
+        let raw = "a [alpha](a.md) then [beta](b.md) end";
+        let ranges = vec![
+            (2, 15, "alpha".to_string()),
+            (21, 33, "beta".to_string()),
+        ];
+        assert_eq!(
+            splice_links_on_line(raw, &ranges),
+            "a alpha then beta end"
+        );
+    }
+
+    /// Surrounding prose — including markdown emphasis delimiters — is
+    /// preserved byte-for-byte around the spliced span.
+    #[test]
+    fn splice_preserves_prose() {
+        let raw = "**emph** before  see **[x](y.md)**  after";
+        let ranges = [(23, 32, "x".to_string())];
+        assert_eq!(
+            splice_links_on_line(raw, &ranges),
+            "**emph** before  see **x**  after"
+        );
+    }
+
+    /// Empty ranges is the identity (the caller's fast path).
+    #[test]
+    fn splice_empty_is_identity() {
+        let raw = "no links here";
+        assert_eq!(splice_links_on_line(raw, &[]), raw);
     }
 }

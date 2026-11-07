@@ -10,10 +10,17 @@ the API is still moving; breaking changes are called out explicitly.
 - **TUI `l` picker reworked to find-style single-link focus (T2).** The link
   picker (`l` in Read) is no longer a flat numbered list. It is now a
   two-pane view mirroring the reader-find (`f`) model: a left body pane
-  (60%) renders the *source* page with the focused link highlighted
-  (`find_current`) and every other occurrence on the page lighter
-  (`find_match`), always kept scrolled so the focused link is centered; a
-  right pane (40%) shows the focused link's **target info** — kind (short
+  (60%) renders the *source* page with each **alive** link (uniquely
+  resolved, plus external and `#section`) spliced down to just its display
+  text — `[label](path)` reads as `label` with a recoloured span, exactly as
+  the reader renders `**bold**` / `*italic*` / `~~strike~~` — with the
+  focused link in `find_current` and the others in `find_match`, always kept
+  scrolled so the focused link is centred. **Dead** (unresolved) and
+  **ambiguous** links are *skipped* and render as ordinary prose, matching
+  how the reader leaves unmatched delimiters alone. The splice runs
+  high-to-low over the `col`/`end` offsets so multiple links on one line
+  splice correctly; the right
+  pane (40%) shows the focused link's **target info** — kind (short
   tag + full word), label, target, `#section`, the resolution status
   (resolved → id, ambiguous + candidate list, external, current, or dead),
   and a highlighted excerpt of the source line. `↑/↓`/`Home`/`End` move the
@@ -26,8 +33,9 @@ the API is still moving; breaking changes are called out explicitly.
   string search for the link's visible text in the rendered line) rather than
   re-walking the markdown state machine. `AnnotatedLink`/`LinksEntry` now
   also carry the reference `end` byte offset (CLI-facing; the TUI highlights
-  by the visible text). Four `render::tests::span_*` unit tests pin the
-  highlight-helper contract. See `TODO-links-rework.md` (T2).
+  by the visible text). `render::tests::span_*` (highlight-helper) and
+  `splice_*` (display-text splicing, incl. multi-link-per-line ordering) unit
+  tests pin the contracts. See `TODO-links-rework.md` (T2).
 - **`[ label ]( [ target ] )` / `< https://… >` / `# section` reference
   grammar, shell end-to-end (DESIGN-links.md phase 1, rewire).** The shell
   (`kb`) is now rewired onto the unified reference grammar
