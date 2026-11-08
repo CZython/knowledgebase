@@ -9,11 +9,15 @@ pub(crate) fn cmd_toc(file: &Path, json: bool) -> Kb {
             .iter()
             .map(|s| {
                 format!(
-                    "{{\"ref\":{},\"level\":{},\"title\":{},\"line\":{}}}",
+                    "{{\"ref\":{},\"level\":{},\"title\":{},\"line\":{},\"lines\":{},\"chars\":{},\"body_lines\":{},\"body_chars\":{}}}",
                     jstr(&s.ref_),
                     s.level,
                     jstr(&s.title),
-                    s.start_line + 1
+                    s.start_line + 1,
+                    s.end_line.saturating_sub(s.start_line),
+                    s.end.saturating_sub(s.start),
+                    s.own_end_line.saturating_sub(s.start_line),
+                    s.own_end.saturating_sub(s.start)
                 )
             })
             .collect();
@@ -31,10 +35,12 @@ pub(crate) fn cmd_toc(file: &Path, json: bool) -> Kb {
     for s in &doc.sections {
         let indent = "  ".repeat((s.level.saturating_sub(1)) as usize);
         println!(
-            "{indent}{}   ref {}  (level {})",
+            "{indent}{}   ref {}  (level {})  [{} lines, {} chars]",
             s.title,
             s.ref_,
-            s.level
+            s.level,
+            s.end_line.saturating_sub(s.start_line),
+            s.end.saturating_sub(s.start)
         );
     }
     Ok(EXIT_OK)

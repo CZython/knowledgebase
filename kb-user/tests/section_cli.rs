@@ -97,6 +97,11 @@ fn toc_json_is_well_formed_envelope() {
     assert!(out.contains("\"sections\":[{"), "sections array: {out}");
     assert!(out.contains("\"ref\":\"1\""), "root ref present: {out}");
     assert!(out.contains("\"level\":2"), "level field present: {out}");
+    // T4: per-section metrics (line + char counts, full and body-only spans)
+    assert!(out.contains("\"lines\":"), "lines field present: {out}");
+    assert!(out.contains("\"chars\":"), "chars field present: {out}");
+    assert!(out.contains("\"body_lines\":"), "body_lines present: {out}");
+    assert!(out.contains("\"body_chars\":"), "body_chars present: {out}");
 }
 
 #[test]

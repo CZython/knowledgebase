@@ -17,7 +17,7 @@ Gate: `bash gate.sh` (7 stages, must stay green). Git repo:
 | T1 | `kb links`: default = annotated list; `--dedup` = old edge-set+backlinks view | **done** (shipped) |
 | T2 | TUI links view rework: find-style single-link focus + right-pane target info | **done** (shipped) |
 | T3 | TUI Reader: open at a target body line (so `#section` links land mid-page) | pending |
-| T4 | `kb toc`: per-section line/char counts (section total + body-only) | pending |
+| T4 | `kb toc`: per-section line/char counts (section total + body-only) | **done** (gate green) |
 | T5 | Indexer: switch `extract_links` → `detect_refs` + `classify_target` (v2 grammar) | **done** (gate green) |
 | T6 | All edit pathways: auto-run `kb refresh` after a successful write | pending |
 | T7 | `section_lookup(body, ref) → Option<usize>` — line of section heading | pending |
@@ -100,6 +100,13 @@ via `kb-core` `section` resolve — `kb-core/src/section.rs`).
 **Files:** wherever `cmd_toc` lives (find via `grep toc kb/main.rs`
 `kb/cli/*.rs`), `kb-core/src/section.rs` (spans already carry line bounds —
 verify), JSON + human renderers, tests.
+
+**Done:** `cmd_toc` (`kb/cli/show.rs`) now emits per-section metrics from the
+existing `Section` bounds (no new fields). JSON gains `lines`/`chars` (full
+span incl. subsections) and `body_lines`/`body_chars` (own body only); the
+human view appends `[N lines, M chars]` (whole section). Decision: JSON
+carries **both** spans as the spec suggested. Pinned in
+`kb-user/tests/section_cli.rs::toc_json_is_well_formed_envelope`.
 
 ## T5 — Indexer: v1 → v2 reference grammar
 
