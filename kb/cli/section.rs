@@ -1,6 +1,6 @@
 use crate::*;
 
-pub(crate) fn cmd_section(file: &Path, op: &SectionOp) -> Kb {
+pub(crate) fn cmd_section(dbpath: Option<&Path>, file: &Path, op: &SectionOp) -> Kb {
     match op {
         SectionOp::Set {
             ref_: r,
@@ -15,7 +15,7 @@ pub(crate) fn cmd_section(file: &Path, op: &SectionOp) -> Kb {
                 let orig = read_file(file)?;
                 check_etag_whole(&orig, flags)?;
                 let new = fm::set_scalar(&orig, key, &val).map_err(|e| (e.to_string(), EXIT_SECTION))?;
-                commit(file, orig, new, flags.dry_run, flags.yes, flags.json)
+                commit(dbpath, file, orig, new, flags.dry_run, flags.yes, flags.json)
             } else {
                 let orig = read_file(file)?;
                 let doc = Doc::new(orig.clone());
@@ -24,7 +24,7 @@ pub(crate) fn cmd_section(file: &Path, op: &SectionOp) -> Kb {
                 let new = doc
                     .set_section(r, &text, *keep_heading)
                     .map_err(|e| (e.to_string(), EXIT_SECTION))?;
-                commit(file, orig, new, flags.dry_run, flags.yes, flags.json)
+                commit(dbpath, file, orig, new, flags.dry_run, flags.yes, flags.json)
             }
         }
         SectionOp::Append { ref_: r, text, value, flags } => {
@@ -34,7 +34,7 @@ pub(crate) fn cmd_section(file: &Path, op: &SectionOp) -> Kb {
                 let orig = read_file(file)?;
                 check_etag_whole(&orig, flags)?;
                 let new = fm::append_list_item(&orig, key, &val).map_err(|e| (e.to_string(), EXIT_SECTION))?;
-                commit(file, orig, new, flags.dry_run, flags.yes, flags.json)
+                commit(dbpath, file, orig, new, flags.dry_run, flags.yes, flags.json)
             } else {
                 let orig = read_file(file)?;
                 let doc = Doc::new(orig.clone());
@@ -43,7 +43,7 @@ pub(crate) fn cmd_section(file: &Path, op: &SectionOp) -> Kb {
                 let new = doc
                     .append_section(r, &text)
                     .map_err(|e| (e.to_string(), EXIT_SECTION))?;
-                commit(file, orig, new, flags.dry_run, flags.yes, flags.json)
+                commit(dbpath, file, orig, new, flags.dry_run, flags.yes, flags.json)
             }
         }
         SectionOp::Insert {
@@ -63,7 +63,7 @@ pub(crate) fn cmd_section(file: &Path, op: &SectionOp) -> Kb {
                 .insert_section(place, r.as_deref(), &text, title, *level)
                 .map_err(|e| (e.to_string(), EXIT_SECTION))?;
             let new = splice(&doc.data, ins, ins, &chunk);
-            commit(file, orig, new, flags.dry_run, flags.yes, flags.json)
+            commit(dbpath, file, orig, new, flags.dry_run, flags.yes, flags.json)
         }
         SectionOp::Replace { ref_: r, text, flags } => {
             let orig = read_file(file)?;
@@ -74,7 +74,7 @@ pub(crate) fn cmd_section(file: &Path, op: &SectionOp) -> Kb {
             let new = doc
                 .set_section(r, &text, true)
                 .map_err(|e| (e.to_string(), EXIT_SECTION))?;
-            commit(file, orig, new, flags.dry_run, flags.yes, flags.json)
+            commit(dbpath, file, orig, new, flags.dry_run, flags.yes, flags.json)
         }
         #[cfg(feature = "editor")]
         SectionOp::Edit { ref_: r, flags } => {
@@ -100,7 +100,7 @@ pub(crate) fn cmd_section(file: &Path, op: &SectionOp) -> Kb {
             let new = doc
                 .set_section(r, &new_text, false)
                 .map_err(|e| (e.to_string(), EXIT_SECTION))?;
-            commit(file, orig, new, flags.dry_run, flags.yes, flags.json)
+            commit(dbpath, file, orig, new, flags.dry_run, flags.yes, flags.json)
         }
         SectionOp::Rm { ref_: r, value, flags } => {
             if is_fm_ref(r) {
@@ -111,7 +111,7 @@ pub(crate) fn cmd_section(file: &Path, op: &SectionOp) -> Kb {
                     Some(v) => fm::remove_list_item(&orig, key, v).map_err(|e| (e.to_string(), EXIT_SECTION))?,
                     None => fm::remove_field(&orig, key).map_err(|e| (e.to_string(), EXIT_SECTION))?,
                 };
-                commit(file, orig, new, flags.dry_run, flags.yes, flags.json)
+                commit(dbpath, file, orig, new, flags.dry_run, flags.yes, flags.json)
             } else {
                 Err((format!("`rm` on a section ref is not yet supported (try `rm fm.<key>` instead, got ref {r:?})",), EXIT_SECTION))
             }
@@ -120,7 +120,7 @@ pub(crate) fn cmd_section(file: &Path, op: &SectionOp) -> Kb {
 }
 
 
-pub(crate) fn cmd_replace(file: &Path, find: &str, new: &str, scope: Option<&str>, count: Option<usize>, flags: &WriteFlags) -> Kb {
+pub(crate) fn cmd_replace(dbpath: Option<&Path>, file: &Path, find: &str, new: &str, scope: Option<&str>, count: Option<usize>, flags: &WriteFlags) -> Kb {
     let orig = read_file(file)?;
     let doc = Doc::new(orig.clone());
     check_etag(&doc, scope, flags)?;
@@ -130,11 +130,12 @@ pub(crate) fn cmd_replace(file: &Path, find: &str, new: &str, scope: Option<&str
     if !flags.dry_run {
         eprintln!("kb: {n} replacement(s)");
     }
-    commit(file, orig, nb, flags.dry_run, flags.yes, flags.json)
+    commit(dbpath, file, orig, nb, flags.dry_run, flags.yes, flags.json)
 }
 
 
 pub(crate) fn cmd_patch(
+    dbpath: Option<&Path>,
     file: &Path,
     patch_file: Option<&Path>,
     patch_stdin: bool,
@@ -189,6 +190,6 @@ pub(crate) fn cmd_patch(
     let new_s = diff::apply_patch(&orig_s, &patch)
         .map_err(|e| (format!("apply patch: {e}"), EXIT_SECTION))?;
     let new = new_s.into_bytes();
-    commit(file, orig, new, flags.dry_run, flags.yes, flags.json)
+    commit(dbpath, file, orig, new, flags.dry_run, flags.yes, flags.json)
 }
 

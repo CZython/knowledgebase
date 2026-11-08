@@ -713,7 +713,7 @@ pub(crate) fn run(cli: &Cli) -> i32 {
             json,
             etag,
         } => cmd_show(file, ref_.as_deref(), *body, *full, *json, *etag),
-        Cmd::Section { file, op } => cmd_section(file, op),
+        Cmd::Section { file, op } => cmd_section(cli.db.as_deref(), file, op),
         Cmd::Replace {
             file,
             find,
@@ -721,14 +721,14 @@ pub(crate) fn run(cli: &Cli) -> i32 {
             scope,
             count,
             flags,
-        } => cmd_replace(file, find, new, scope.as_deref(), *count, flags),
+        } => cmd_replace(cli.db.as_deref(), file, find, new, scope.as_deref(), *count, flags),
         Cmd::Patch {
             file,
             patch_file,
             patch_stdin,
             patch_text,
             flags,
-        } => cmd_patch(file, patch_file.as_deref(), *patch_stdin, patch_text.as_deref(), flags),
+        } => cmd_patch(cli.db.as_deref(), file, patch_file.as_deref(), *patch_stdin, patch_text.as_deref(), flags),
         Cmd::Create { filename, args } => cmd_create(cli.db.as_deref(), filename, args),
         Cmd::Verify { file, strict, json } => {
             cmd_verify(file, *strict, *json, cli.db.as_deref())
@@ -958,6 +958,51 @@ pub(crate) fn refresh_all(db: &Db, full: bool, json: bool) -> Kb {
 
 /// `(path, seq)` for every registered root — the `winning_root` pick set
 /// (PLAN §4: innermost, then most-recent, wins).
+/// Re-index a single page after a successful write, so the index, FTS, and
+/// `links` table stay consistent with disk (T6: auto-refresh after every
+/// edit pathway). Mirrors `create.rs::index_created` — opens the DB, finds
+/// the winning root, `build_page` re-reads the freshly-written file, and
+/// `upsert_page` writes the row in one transaction.
+///
+/// Best-effort: a re-index failure (no roots, not indexable, no slug) is a
+/// warning, not an error — disk is the source of truth and `kb refresh`
+/// repairs later. Under `--json` the warning goes to stderr to keep stdout
+/// a single clean JSON document.
+fn reindex_after_write(dbpath: Option<&Path>, path: &Path, json: bool) -> Kb {
+    let abs = match std::fs::canonicalize(path) {
+        Ok(a) => a,
+        Err(_) => return Ok(EXIT_OK),
+    };
+    let abs_str = abs.to_string_lossy().to_string();
+    let db = match open_db(dbpath) { Ok(d) => d, Err(_) => return Ok(EXIT_OK) };
+    let roots = match roots_with_seq(&db) { Ok(r) => r, Err(_) => return Ok(EXIT_OK) };
+    if roots.is_empty() {
+        if !json { eprintln!("kb: note: no roots registered — skipped re-index (run `kb add <dir>` first)"); }
+        return Ok(EXIT_OK);
+    }
+    match kb_db::walk_snapshot::winning_root(&roots, &abs_str) {
+        None => {
+            if !json { eprintln!("kb: note: {abs_str} is not under any registered root — skipped re-index"); }
+            Ok(EXIT_OK)
+        }
+        Some((root, rel)) => {
+            match kb_db::index::build_page(&abs, &root, &rel, true) {
+                Ok(rec) => match kb_db::index::upsert_page(&db, &rec) {
+                    Ok(_) => Ok(EXIT_OK),
+                    Err(e) => {
+                        if !json { eprintln!("kb: note: re-index upsert failed: {e} (disk is authoritative; `kb refresh` repairs)"); }
+                        Ok(EXIT_OK)
+                    }
+                },
+                Err(e) => {
+                    if !json { eprintln!("kb: note: page not indexable: {e} (disk is authoritative; `kb refresh` repairs)"); }
+                    Ok(EXIT_OK)
+                }
+            }
+        }
+    }
+}
+
 pub(crate) fn roots_with_seq(db: &Db) -> Result<Vec<(String, i64)>, (String, i32)> {
     let mut stmt = db
         .conn
@@ -1327,7 +1372,7 @@ pub(crate) fn default_db_display() -> String {
 /// the write is applied, or `--dry-run` holds it). The JSON result is
 /// `{ "file", "applied", "changed", "dry_run", "bytes_before", "bytes_after",
 /// "diff" }` — uniform across every section/replace/fm op.
-pub(crate) fn commit(path: &Path, orig: Vec<u8>, new: Vec<u8>, dry_run: bool, assume_yes: bool, json: bool) -> Kb {
+pub(crate) fn commit(dbpath: Option<&Path>, path: &Path, orig: Vec<u8>, new: Vec<u8>, dry_run: bool, assume_yes: bool, json: bool) -> Kb {
     let old_s = String::from_utf8_lossy(&orig).into_owned();
     let new_s = String::from_utf8_lossy(&new).into_owned();
     let d = diff::unified_diff(&old_s, &new_s, &path.display().to_string(), "proposed");
@@ -1377,6 +1422,11 @@ pub(crate) fn commit(path: &Path, orig: Vec<u8>, new: Vec<u8>, dry_run: bool, as
         ));
     }
     atomic_write(path, &new).map_err(|e| (format!("write {}: {e}", path.display()), EXIT_ERR))?;
+    // T6: auto-refresh — re-index the single page now that disk is updated,
+    // so `links`/FTS/backlinks are consistent without a manual `kb refresh`.
+    // `--dry-run` and no-change paths returned earlier, so this only fires on
+    // a real write. Best-effort (a re-index miss is a note, not an error).
+    reindex_after_write(dbpath, path, json)?;
     if json {
         emit_json(true);
     } else {

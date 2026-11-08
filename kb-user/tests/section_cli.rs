@@ -1080,3 +1080,121 @@ fn multifile_namespace_is_a_declined_stub() {
     // declared but not yet implemented: a clean, non-zero generic error
     assert_eq!(code, 1, "multi-file stubs exit 1 (stderr: {err})");
 }
+
+// ---------------------------------------------------------------------------
+// T6 — auto-refresh after a write (commit re-indexes the single page)
+// ---------------------------------------------------------------------------
+
+/// A throwaway root + throwaway DB, mirroring m7_multifile's harness. Drives
+/// the real binary with `--db` so runs are independent of the user's DB.
+struct T6 {
+    root: std::path::PathBuf,
+    db: std::path::PathBuf,
+}
+impl T6 {
+    fn new(tag: &str) -> Self {
+        let base = std::env::temp_dir().join(format!("kb_t6_{pid}_{tag}", pid = std::process::id()));
+        let root = base.join("root");
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        let db = base.join("kb.db");
+        let _ = std::fs::remove_file(&db);
+        T6 { root, db }
+    }
+    /// Run `kb --db <db> <args…>`, returning `(code, stdout, stderr)`.
+    fn run(&self, args: &[&str]) -> (i32, String, String) {
+        let db = self.db.to_string_lossy().into_owned();
+        let mut cmd = kb();
+        cmd.arg(format!("--db={db}"));
+        for x in args {
+            cmd.arg(x);
+        }
+        let out = cmd.output().expect("failed to run kb");
+        (
+            out.status.code().unwrap_or(-1),
+            String::from_utf8_lossy(&out.stdout).into_owned(),
+            String::from_utf8_lossy(&out.stderr).into_owned(),
+        )
+    }
+    fn page(&self, rel: &str, title: &str, body: &str) {
+        let fm = format!("type: note\ntitle: {title}\n");
+        std::fs::write(self.root.join(rel), format!("---\n{fm}---\n{body}")).unwrap();
+    }
+}
+impl Drop for T6 {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(self.root.parent().unwrap());
+    }
+}
+
+/// A `replace` that introduces a new wikilink must *immediately* show up in a
+/// fresh process's `links` view — no manual `kb refresh` in between. This is
+/// the T6 contract: a write re-indexes the single page on commit.
+#[test]
+fn t6_replace_adds_link_visible_without_manual_refresh() {
+    let s = T6::new("replace_link");
+    // A has no links yet; B is the future target.
+    s.page("a.md", "A", "hello anchor\n");
+    s.page("b.md", "B", "the target\n");
+    // Register the root (indexes the initial, link-free state).
+    let (code, _out, err) = s.run(&["add", s.root.to_str().unwrap()]);
+    assert_eq!(code, 0, "add: {err}");
+    // Baseline: A has no forward links.
+    let (code, out, err) = s.run(&["links", "note:A", "--dedup"]);
+    assert_eq!(code, 0, "links baseline: {err}");
+    assert!(
+        !out.contains("note:B") && !out.contains("a.md → b.md"),
+        "baseline must have no A→B link: {out}"
+    );
+    // A write that introduces the link (no `kb refresh` after this).
+    let (code, _out, err) = s.run(&[
+        "replace",
+        s.root.join("a.md").to_str().unwrap(),
+        "--find",
+        "anchor",
+        "--new",
+        "see [[B]]",
+        "--yes",
+    ]);
+    assert_eq!(code, 0, "replace: {err}");
+    // Fresh process: the new link must already be in the index.
+    let (code, out, err) = s.run(&["links", "note:A", "--dedup"]);
+    assert_eq!(code, 0, "links after replace: {err}");
+    assert!(
+        out.contains("B") && out.contains("forward links"),
+        "the [[B]] link introduced by the write must be indexed immediately (T6): {out}"
+    );
+}
+
+/// Same T6 guarantee through the *section* write path (`commit` from a
+/// `section set`): a body edit that adds a link is reflected in `links`
+/// without a manual refresh.
+#[test]
+fn t6_section_set_adds_link_visible_without_manual_refresh() {
+    let s = T6::new("section_link");
+    s.page("a.md", "A", "# A\n\nintro\n");
+    s.page("b.md", "B", "the target\n");
+    let (code, _out, err) = s.run(&["add", s.root.to_str().unwrap()]);
+    assert_eq!(code, 0, "add: {err}");
+    // Section-op write: insert a new section on A whose body links to B.
+    let (code, _out, err) = s.run(&[
+        "section",
+        "--file",
+        s.root.join("a.md").to_str().unwrap(),
+        "insert",
+        "--title",
+        "Refs",
+        "--text",
+        "see [[B]]",
+        "--placement",
+        "end",
+        "--yes",
+    ]);
+    assert_eq!(code, 0, "section insert: {err}");
+    let (code, out, err) = s.run(&["links", "note:A", "--dedup"]);
+    assert_eq!(code, 0, "links after section write: {err}");
+    assert!(
+        out.contains("B") && out.contains("forward links"),
+        "the [[B]] link introduced by the section write must be indexed immediately (T6): {out}"
+    );
+}

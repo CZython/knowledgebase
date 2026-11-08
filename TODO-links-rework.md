@@ -19,7 +19,7 @@ Gate: `bash gate.sh` (7 stages, must stay green). Git repo:
 | T3 | TUI Reader: open at a target body line (so `#section` links land mid-page) | pending |
 | T4 | `kb toc`: per-section line/char counts (section total + body-only) | **done** (gate green) |
 | T5 | Indexer: switch `extract_links` → `detect_refs` + `classify_target` (v2 grammar) | **done** (gate green) |
-| T6 | All edit pathways: auto-run `kb refresh` after a successful write | pending |
+| T6 | All edit pathways: auto-reindex the single page after a successful write | **done** (gate green) |
 | T7 | `section_lookup(body, ref) → Option<usize>` — line of section heading | pending |
 | T8 | Wire the section lookup into the resolver: page resolves but `#section` missing → **ambiguous** | pending |
 | T9 | Wire the section lookup into the TUI reader: section links open / recenter at the heading line | pending |
@@ -190,6 +190,26 @@ lookup the primary consumer.)
 **Files:** `kb/cli/writeops.rs` (`commit`), `kb/cli/section.rs`,
 `kb/cli/editor.rs`, `kb/cli/create.rs`, `kb/cli/tag.rs`,
 `kb-db/src/refresh.rs` (single-file helper), tests.
+
+**Implemented (decision — option 2, commit wrapper).** `commit()` now takes
+`dbpath: Option<&Path>` as its first arg and, after a successful write, calls
+`reindex_after_write(dbpath, path, json)` (`kb/main.rs`). That helper opens
+the DB, finds the winning root via `roots_with_seq` + `winning_root`, then
+`build_page` + `upsert_page` the single written file (the same pair
+`create.rs::index_created` and the TUI `commit_edit` already use). Best-effort:
+a re-index miss (no roots / not indexable / no slug) is a stderr note, not an
+error — disk stays authoritative and `kb refresh` still repairs. `--dry-run` and
+the no-change path return before the call, so they never re-index, and under
+`--json` notes go to stderr to keep stdout a single clean JSON doc (no
+`"refresh"` key added — envelope shape unchanged). `commit()` is the single
+choke point (all 10 call sites are `section.rs`), so `--db` is threaded through
+`cmd_section` / `cmd_replace` / `cmd_patch` from the dispatch arms. `create.rs`
+already indexes via `index_created`; `editor.rs` writes through the same
+`commit()`; `tag.rs` only rewrites `tag_aliases` rows (no page body), so it
+needs no hook. Tests: `kb-user/tests/section_cli.rs` —
+`t6_replace_adds_link_visible_without_manual_refresh` +
+`t6_section_set_adds_link_visible_without_manual_refresh` (a write that adds a
+`[[B]]` link is immediately visible to a fresh `kb links` process).
 
 ## T7 — Section lookup: `section_lookup(body, ref) → Option<usize>`
 
