@@ -21,7 +21,7 @@ Gate: `bash gate.sh` (7 stages, must stay green). Git repo:
 | T5 | Indexer: switch `extract_links` → `detect_refs` + `classify_target` (v2 grammar) | **done** (gate green) |
 | T6 | All edit pathways: auto-reindex the single page after a successful write | **done** (gate green) |
 | T7 | `section_lookup(body, ref) → Result<Option<usize>, SectionError>` — line of section heading | **done** (gate green) |
-| T8 | Wire the section lookup into the resolver: page resolves but `#section` missing → **ambiguous** | pending |
+| T8 | Wire the section lookup into the resolver: page resolves but `#section` missing → **ambiguous** | **done** (gate green) |
 | T9 | Wire the section lookup into the TUI reader: section links open / recenter at the heading line | pending |
 
 ## T1 — `kb links` default flip
@@ -305,11 +305,51 @@ top?").
    will handle the no-scroll case: scroll to top with a "section not
    found" hint in the status bar).
 
-**Files:** `kb-core/src/resolver.rs`, `kb-core/src/section.rs`
-(export `section_lookup`), `kb/main.rs` (`AnnotatedLink` if a
-`resolution` field is added), `kb-core/tests/*`.
+**Files:** `kb-core/src/resolver.rs` (actually named `resolve.rs` in this
+codebase), `kb-core/src/section.rs` (export `section_lookup`), `kb/main.rs`
+(`AnnotatedLink` if a `resolution` field is added), `kb-core/tests/*`.
 
 **Blocked on:** T7 (needs `section_lookup`).
+
+**Implemented (decision — option A: `Page` carries `body`, gate stays in
+the shell).** Chose option (a) from the spec over (b): added
+`body: String` to `Page` (`kb-core/src/resolve.rs:40`), loaded via
+`COALESCE(body, '')` in `load_corpus` (`kb/main.rs:1063` — the same
+`COALESCE` pattern `kb/cli/links.rs:131` / `tui/mod.rs:1442` already
+use), and added a **pure** `kb_core::resolve::section_present(body,
+section) -> bool` (resolve.rs:237) that the shell's `push_annotated`
+calls. The check is NOT inside `kb_core::resolve::resolve` itself —
+that fn's contract is *"pure over identity columns"* and it takes
+a `query: &str`, not a `(query, section_pair)` tuple; the page + its
+section is a *shell concern* (classify_target already split them).
+This keeps `resolve`'s signature unchanged (so `cmd_resolve`,
+`resolve_target`, `annotated_links` and every existing `Page`
+literal site keeps compiling), and keeps T8 pure-testable in
+`resolve.rs` (`section_present*` tests) AND in the shell
+(`links_tests::t8_*` tests). The T8 gate: inside `push_annotated`
+(`kb/main.rs:1287`), when the resolver says `Unique(abs)` AND
+`cls.section.is_some()`, look up the target page's body from
+`pages`, call `section_present`; if false → demote to
+`Resolution::Candidates(vec![abs])` shape (i.e.
+`resolves_to = None`, `candidates = vec![abs]`, `resolved_id = None`).
+A 1-element `Candidates` is the same "page resolves, needs
+disambiguation" shape as a real 2+ collision — the TUI's existing
+`l.candidates.is_empty()` checks (render.rs:1939, mod.rs:1965,
+1645) all treat `len() > 0` as "needs picker" so this drops into
+the existing `Enter → candidate-list` flow with no TUI changes.
+`verify.rs` (check d, :143–152) already keys on
+`resolves_to.is_some() / candidates.is_empty()` → a demoted link is
+reported as `ambiguous-link`, not `dead-link`, matching the
+spec §2 ("page exists so the link is not dead"). The old
+`annotated_links_other_page_with_section_splits_and_resolves` test
+had to add a body to its target page (previously body-less; the
+gate's section check would have demoted it). `Page::body` is
+`String` (not `Option<String>`) matching the `COALESCE` pattern;
+it does not break `PartialEq` (no `Page == Page` asserts exist in
+the repo; equality always falls through to `Resolution`). 9 tests
+added (4 `section_present*` in `resolve.rs` + 5 `t8_*` in `main.rs`
+links_tests). No TUI changes needed — the TUI's "picker" path
+consumes the 1-element `Candidates` exactly like a 2-element one.
 
 ## T9 — TUI: open / recenter at section heading
 

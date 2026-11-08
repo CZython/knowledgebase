@@ -1061,8 +1061,11 @@ pub(crate) fn jbool(b: bool) -> String {
 /// coercing it to `""` and letting the §4 resolver's stage-2 bare-slug match
 /// treat `""` as a real slug.
 pub(crate) fn load_corpus(db: &Db) -> Result<Vec<resolver::Page>, (String, i32)> {
+    // `body` is carried on `Page` for the T8 section-level gate (`section_present`
+    // on the target page). `COALESCE(body,'')` mirrors the established caller
+    // pattern in `links.rs` / `tui/mod.rs` so the row type stays `String`.
     let mut stmt = db.conn
-        .prepare("SELECT abs_path, title, type, rel_path FROM pages")
+        .prepare("SELECT abs_path, title, type, rel_path, COALESCE(body, '') FROM pages")
         .map_err(|e| (format!("prepare corpus: {e}"), EXIT_ERR))?;
     let rows = stmt
         .query_map([], |r| {
@@ -1071,13 +1074,14 @@ pub(crate) fn load_corpus(db: &Db) -> Result<Vec<resolver::Page>, (String, i32)>
                 r.get::<_, Option<String>>(1)?,
                 r.get::<_, String>(2)?,
                 r.get::<_, String>(3)?,
+                r.get::<_, String>(4)?,
             ))
         })
         .map_err(|e| (format!("corpus query: {e}"), EXIT_ERR))?
         .collect::<Result<Vec<_>, _>>()
         .map_err(|e| (format!("corpus rows: {e}"), EXIT_ERR))?;
     let mut pages = Vec::with_capacity(rows.len());
-    for (abs_path, slug, typ, rel_path) in rows {
+    for (abs_path, slug, typ, rel_path, body) in rows {
         let slug = slug.ok_or_else(|| {
             (
                 format!(
@@ -1093,6 +1097,7 @@ pub(crate) fn load_corpus(db: &Db) -> Result<Vec<resolver::Page>, (String, i32)>
             slug,
             typ,
             rel_path,
+            body,
         });
     }
     Ok(pages)
@@ -1279,13 +1284,34 @@ fn push_annotated(
             t.to_string()
         }
     };
-    let (resolves_to, candidates, resolved_id) = match resolver::resolve(&page_part, pages) {
+    // T8 — when the link has a `#section` tail and the page resolves *uniquely*,
+    // the target page must *actually* contain that section. A missing (or
+    // ambiguous) `#section` demotes `Unique` → a 1-candidate `Candidates` set so
+    // the caller treats it as "needs disambiguation" (the page resolves; the
+    // *section* does not). Links with no `#section` are unaffected.
+    let resolution = resolver::resolve(&page_part, pages);
+    let (resolves_to, candidates, resolved_id) = match resolution {
         resolver::Resolution::Unique(abs) => {
             let id = pages
                 .iter()
                 .find(|p| p.abs_path == abs)
                 .map(|p| (p.typ.clone(), p.slug.clone()));
-            (Some(abs), Vec::new(), id)
+            let demote = match &cls.section {
+                Some(sec) => {
+                    let body = pages
+                        .iter()
+                        .find(|p| p.abs_path == abs)
+                        .map(|p| p.body.as_str())
+                        .unwrap_or("");
+                    !resolver::section_present(body, sec)
+                }
+                None => false, // no `#section` tail — fully resolved
+            };
+            if demote {
+                (None, vec![abs], None) // page found, section missing → ambiguous
+            } else {
+                (Some(abs), Vec::new(), id)
+            }
         }
         resolver::Resolution::Candidates(v) => (None, v, None),
         resolver::Resolution::Empty => (None, Vec::new(), None),
@@ -1710,11 +1736,16 @@ mod links_tests {
     use super::*;
 
     fn page(abs: &str, slug: &str, typ: &str) -> resolver::Page {
+        page_with_body(abs, slug, typ, "")
+    }
+
+    fn page_with_body(abs: &str, slug: &str, typ: &str, body: &str) -> resolver::Page {
         resolver::Page {
             abs_path: abs.to_string(),
             slug: slug.to_string(),
             typ: typ.to_string(),
             rel_path: abs.rsplit('/').next().unwrap_or(abs).to_string(),
+            body: body.to_string(),
         }
     }
 
@@ -1812,16 +1843,31 @@ mod links_tests {
 
     #[test]
     fn annotated_links_other_page_with_section_splits_and_resolves() {
-        let pages = vec![page("/data/wiki/attention.md", "attention", "wiki")];
+        // The target page's body *must* contain the `Decoder` and `Encoder`
+        // sections, otherwise T8 demotes each link from Unique → ambiguous.
+        let pages = vec![page_with_body(
+            "/data/wiki/attention.md",
+            "attention",
+            "wiki",
+            "# Attention\n\n## Decoder\ndecode details\n\n## Encoder\nencode details\n",
+        )];
         let body = "see [[attention#Decoder]] and [x](/data/wiki/attention.md#Encoder)";
         let links = annotated_links(body, &pages);
         assert_eq!(links.len(), 2);
         let a = &links[0];
         assert_eq!(a.section.as_deref(), Some("Decoder"));
-        assert_eq!(a.resolves_to.as_deref(), Some("/data/wiki/attention.md"), "page-part must resolve");
+        assert_eq!(
+            a.resolves_to.as_deref(),
+            Some("/data/wiki/attention.md"),
+            "page-part must resolve (section present)"
+        );
         let b = &links[1];
         assert_eq!(b.section.as_deref(), Some("Encoder"));
-        assert_eq!(b.resolves_to.as_deref(), Some("/data/wiki/attention.md"));
+        assert_eq!(
+            b.resolves_to.as_deref(),
+            Some("/data/wiki/attention.md"),
+            "path+section link resolves when the section is present"
+        );
     }
 
     #[test]
@@ -1870,6 +1916,96 @@ mod links_tests {
         assert_eq!(links.len(), 1);
         assert!(links[0].resolves_to.is_none(), "two matches → not unique");
         assert_eq!(links[0].candidates.len(), 2, "two candidate abs_paths");
+    }
+
+    // ---- T8: page resolves but `#section` is missing → ambiguous (1 candidate) ----
+
+    #[test]
+    fn t8_link_with_missing_section_demotes_to_ambiguous() {
+        // target page "B" exists but does NOT have a section called "Foo"
+        let target_page = page_with_body("/data/wiki/b.md", "b", "wiki", "# B\nbody only\n");
+        let pages = vec![target_page];
+        let body = "See [[b#Foo]] for details.";
+        let links = annotated_links(body, &pages);
+        assert_eq!(links.len(), 1);
+        assert!(
+            links[0].resolves_to.is_none(),
+            "unique page + missing section → must NOT be resolves_to"
+        );
+        assert_eq!(
+            links[0].candidates.len(),
+            1,
+            "demoted to a 1-element candidate set (the page it points at)"
+        );
+        assert_eq!(links[0].candidates[0], "/data/wiki/b.md");
+        assert!(links[0].resolved_id.is_none(), "no resolved_id for a demoted link");
+    }
+
+    #[test]
+    fn t8_link_with_present_section_stays_resolved() {
+        // target page "B" DOES contain a section called "Foo"
+        let target_page = page_with_body("/data/wiki/b.md", "b", "wiki", "# B\n\n## Foo\ncontent\n");
+        let pages = vec![target_page];
+        let body = "See [[b#Foo]] for details.";
+        let links = annotated_links(body, &pages);
+        assert_eq!(links.len(), 1);
+        assert_eq!(
+            links[0].resolves_to.as_deref(),
+            Some("/data/wiki/b.md"),
+            "page + section both found → fully resolved"
+        );
+        assert!(links[0].candidates.is_empty(), "no candidates for a resolved link");
+        assert!(links[0].resolved_id.is_some(), "resolved_id present");
+    }
+
+    #[test]
+    fn t8_link_without_section_unaffected() {
+        // no `#section` tail → the T8 section gate never fires
+        let target_page = page_with_body("/data/wiki/b.md", "b", "wiki", "# B\nbody\n");
+        let pages = vec![target_page];
+        let body = "See [[b]] for details.";
+        let links = annotated_links(body, &pages);
+        assert_eq!(links.len(), 1);
+        assert_eq!(links[0].resolves_to.as_deref(), Some("/data/wiki/b.md"));
+        assert!(links[0].candidates.is_empty());
+        assert!(links[0].resolved_id.is_some());
+    }
+
+    #[test]
+    fn t8_link_to_missing_page_stays_empty() {
+        // page itself not found → Empty (no candidates), section gate is moot
+        let pages: Vec<resolver::Page> = vec![];
+        let body = "See [[b#Foo]] for details.";
+        let links = annotated_links(body, &pages);
+        assert_eq!(links.len(), 1);
+        assert!(links[0].resolves_to.is_none());
+        assert!(
+            links[0].candidates.is_empty(),
+            "missing page → Empty, not a 1-candidate demotion"
+        );
+        assert!(links[0].resolved_id.is_none());
+    }
+
+    #[test]
+    fn t8_link_ambiguous_section_also_demotes() {
+        // target page "B" has TWO sections named "Dup" → section itself is
+        // ambiguous → section_lookup is `Err(Ambiguous)` → `section_present =
+        // false` → same demotion as a missing section.
+        let target_page = page_with_body(
+            "/data/wiki/b.md",
+            "b",
+            "wiki",
+            "# B\n\n## Dup\nx\n\n## Dup\ny\n",
+        );
+        let pages = vec![target_page];
+        let body = "See [[b#Dup]] for details.";
+        let links = annotated_links(body, &pages);
+        assert_eq!(links.len(), 1);
+        assert!(
+            links[0].resolves_to.is_none(),
+            "unique page + ambiguous section → must NOT be resolves_to"
+        );
+        assert_eq!(links[0].candidates.len(), 1, "demoted to 1 candidate");
     }
 
     #[test]

@@ -32,10 +32,12 @@
 //! outcome it returns (the two halves agree by construction — pinned by the
 //! M7b integration tests, not by this pure core alone).
 
-/// One page in the resolution corpus — the `pages` table projected to its
-/// identity columns. Only the fields the resolver actually reads are carried;
-/// `description`, `tags`, `mtime`, etc. are irrelevant to *which* page a ref
-/// points at.
+/// One page in the resolution corpus — the `pages` table projected to the
+/// columns resolution reads. The identity columns decide *which* page a ref
+/// points at; `body` (T8) is carried so the shell can run the **section-level
+/// gate** on the page a link targets (see [`section_present`]) without a
+/// second DB round-trip. `description`, `tags`, `mtime`, etc. remain
+/// irrelevant to resolution and are not carried.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Page {
     /// Canonical absolute path — the page's identity (PK, §4/§8). This is what
@@ -50,6 +52,10 @@ pub struct Page {
     /// Root-relative path (e.g. `wiki/attention.md`). Stage 3 (explicit path
     /// ref) matches against this and `abs_path`.
     pub rel_path: String,
+    /// The page's body text (the `pages.body` column, `''` when NULL). Not read
+    /// by stages 1–4 (identity resolution); carried for the T8 section-level
+    /// gate — [`section_present`] checks a written `#section` against this.
+    pub body: String,
 }
 
 /// The §4 resolution outcome. `Unique` names one page; `Candidates` names a
@@ -229,6 +235,30 @@ fn finish(hits: Vec<&Page>) -> Resolution {
     Resolution::Candidates(v)
 }
 
+/// T8 — does a **written `#section`** name a section that exists in a page
+/// body? Pure (no DB / IO): delegates section identity to the same 4-stage
+/// `section::section_lookup` cascade the rest of kb uses.
+///
+/// Contract:
+/// - `true`  — the section resolves to a unique heading (the link is *fully*
+///   resolved: page + section).
+/// - `false` — the section names nothing in the body (`NoSection` / `EmptyRef`
+///   / `NotFound`). Combined with a page that *already* resolved uniquely,
+///   this is the T8 "page found, section missing" case.
+/// - `false` also on `Err(Ambiguous)` — the body has 2+ matching headings, so
+///   the `#section` itself needs disambiguation; the caller treats both
+///   "missing" and "ambiguous section" as "not resolved to a *single* section".
+///
+/// Empty body / empty section ref → `false` (no section to find), so a link
+/// with a `#` tail but an empty target body degrades to ambiguous, as
+/// intended.
+pub fn section_present(body: &str, section: &str) -> bool {
+    if body.is_empty() || section.trim().is_empty() {
+        return false;
+    }
+    matches!(crate::section::section_lookup(body, section), Ok(Some(_)))
+}
+
 // =============================================================================
 // Unit tests — pin exec `resolve` to the §4 shape (drift-checked by Verus).
 // =============================================================================
@@ -237,31 +267,36 @@ fn finish(hits: Vec<&Page>) -> Resolution {
 mod tests {
     use super::*;
 
-    fn page(abs: &str, slug: &str, typ: &str, rel: &str) -> Page {
+    fn page(abs: &str, slug: &str, typ: &str, rel: &str, body: &str) -> Page {
         Page {
             abs_path: abs.into(),
             slug: slug.into(),
             typ: typ.into(),
             rel_path: rel.into(),
+            body: body.into(),
         }
+    }
+
+    fn page_no_body(abs: &str, slug: &str, typ: &str, rel: &str) -> Page {
+        page(abs, slug, typ, rel, "")
     }
 
     fn corpus() -> Vec<Page> {
         vec![
-            page(
+            page_no_body(
                 "/root/wiki/attention.md",
                 "Attention",
                 "wiki",
                 "wiki/attention.md",
             ),
-            page(
+            page_no_body(
                 "/root/wiki/Attention2.md",
                 "Attention",
                 "note",
                 "wiki/attention2.md",
             ),
-            page("/root/note/llm.md", "LLM", "note", "note/llm.md"),
-            page(
+            page_no_body("/root/note/llm.md", "LLM", "note", "note/llm.md"),
+            page_no_body(
                 "/root/wiki/transformer.md",
                 "Transformer (architecture)",
                 "wiki",
@@ -312,7 +347,7 @@ mod tests {
         // `finish(empty) == Empty` unconditionally and stages 2/3/4 never ran.
         // A page whose slug is *literally* "foo:bar" is only reachable via the
         // stage-2 bare-slug exact match — which the old code skipped.
-        let pages = vec![page("/root/x.md", "foo:bar", "note", "x.md")];
+        let pages = vec![page_no_body("/root/x.md", "foo:bar", "note", "x.md")];
         let r = resolve("foo:bar", &pages);
         assert_eq!(
             r,
@@ -440,5 +475,40 @@ mod tests {
         assert_eq!(split_type_slug(":no-type"), None);
         assert_eq!(split_type_slug("type:"), None);
         assert_eq!(split_type_slug(""), None);
+    }
+
+    // ---- T8: section_present (page resolves, #section exists?) ---------------
+
+    #[test]
+    fn section_present_true_when_section_in_body() {
+        let body = "# Page\n\n## Target\ncontent here\n\n## Other\ntoo\n";
+        assert!(section_present(body, "Target"), "unique title match → present");
+        assert!(section_present(body, "target"), "case-insensitive → present");
+        assert!(section_present(body, "1.1"), "dotted number → present");
+        assert!(section_present(body, "Page > Other"), "title path → present");
+    }
+
+    #[test]
+    fn section_present_false_when_missing() {
+        let body = "# Page\n\n## A\nx\n\n## B\ny\n";
+        assert!(!section_present(body, "C"), "section not in body → missing");
+        assert!(!section_present(body, "9.9"), "dotted ref not in body → missing");
+        assert!(!section_present("", "A"), "empty body → missing");
+        assert!(!section_present(body, ""), "empty section ref → missing");
+        assert!(!section_present(body, "   "), "whitespace section ref → missing");
+    }
+
+    #[test]
+    fn section_present_false_when_ambiguous() {
+        let body = "# Root\n\n## Dup\na\n\n## Dup\nb\n";
+        assert!(!section_present(body, "Dup"), "two match → ambiguous → not present");
+    }
+
+    #[test]
+    fn section_present_single_h1() {
+        // a page that is itself one H1: `# Only` → section "Only" at line 0
+        let body = "# Only\nbody\n";
+        assert!(section_present(body, "Only"));
+        assert!(section_present(body, "1"));
     }
 }
