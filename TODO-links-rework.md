@@ -20,7 +20,7 @@ Gate: `bash gate.sh` (7 stages, must stay green). Git repo:
 | T4 | `kb toc`: per-section line/char counts (section total + body-only) | **done** (gate green) |
 | T5 | Indexer: switch `extract_links` → `detect_refs` + `classify_target` (v2 grammar) | **done** (gate green) |
 | T6 | All edit pathways: auto-reindex the single page after a successful write | **done** (gate green) |
-| T7 | `section_lookup(body, ref) → Option<usize>` — line of section heading | pending |
+| T7 | `section_lookup(body, ref) → Result<Option<usize>, SectionError>` — line of section heading | **done** (gate green) |
 | T8 | Wire the section lookup into the resolver: page resolves but `#section` missing → **ambiguous** | pending |
 | T9 | Wire the section lookup into the TUI reader: section links open / recenter at the heading line | pending |
 
@@ -239,6 +239,26 @@ in `kb-user`.
 
 **Files:** `kb-core/src/section.rs` (function + tests),
 `kb-core/src/lib.rs` (re-export if needed).
+
+**Implemented (decision — `Err` = the ambiguity signal, not `None`).**
+`section_lookup(body, ref_) -> Result<Option<usize>, SectionError>` lives in
+`kb-core/src/section.rs` (free fns, re-exported via the existing
+`pub mod section`). It builds a `Doc` and delegates identity to the same
+4-stage `Doc::resolve` cascade, then maps the winning section to
+`Section::start_line` (0-based heading line). Contract: `Ok(Some(line))` = a
+unique match; `Ok(None)` = nothing matched (`NoSection` / `EmptyRef` /
+`NotFound`) — the page resolved but the `#section` names a section that doesn't
+exist there; `Err(SectionError::Ambiguous { .. })` = 2+ sections matched. A
+`section_lookup_line(..) -> Option<usize>` convenience folds `Ambiguous` → `None`
+(`unwrap_or_default()`) for callers that only jump on a real hit. Chose
+`Err(Ambiguous)` (not a `found + ambiguous` tuple) over the spec's "or None +
+a flag" alternative so the existing `SectionError::Ambiguous { ref_, candidates }`
+carries the full candidate list verbatim — T8's resolver can surface it directly
+to the "please disambiguate" message. 8 unit tests cover dotted numbers, case-
+insensitive titles + title paths, not-found (dotted/title/empty ref/empty body),
+ambiguity (title + dotted disambiguation), single-H1 → line 0, heading at last
+line, and the `section_lookup_line` fold. No new `kb-core` exports needed
+(`section` was already `pub mod`). Reuses no new deps.
 
 ## T8 — Resolver: `#section`-missing → ambiguous (not dead)
 

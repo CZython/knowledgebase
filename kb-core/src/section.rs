@@ -545,6 +545,55 @@ impl Doc {
     }
 }
 
+/// Resolve a section reference to the **0-based line index of its heading**
+/// (T7). Pure over a body `&str` — no DB, no IO. Delegates identity to the
+/// same 4-stage `Doc::resolve` cascade (dotted number → `A > B > C` title
+/// path → unique exact title → unique substring), then maps the winning
+/// section to its heading line (`Section::start_line`).
+///
+/// Return contract:
+/// - `Ok(Some(line))` — a unique section matched; `line` is the 0-based index
+///   of the heading line (a page that is itself a single H1 with no further
+///   structure still resolves, since the H1 is section `1`).
+/// - `Ok(None)` — no section matched (`SectionError::NoSection` /
+///   `EmptyRef` / `NotFound`). The body is empty or the ref names nothing.
+/// - `Err(SectionError::Ambiguous { .. })` — 2+ sections matched the same
+///   ref (the caller's signal to disambiguate, not to guess).
+///
+/// This is the primitive T8 (the resolver) and T9 (the TUI reader) both
+/// wire into: a page that *resolves* but whose `#section` is missing maps
+/// here to `Ok(None)` → **ambiguous**; a section link maps to `Ok(Some(..))`
+/// → open / recenter at that heading line.
+pub fn section_lookup(body: &str, ref_: &str) -> Result<Option<usize>, SectionError> {
+    let doc = Doc::new(body.as_bytes().to_vec());
+    match doc.resolve(ref_) {
+        Ok(i) => Ok(Some(doc.sections[i].start_line)),
+        Err(SectionError::Ambiguous { ref_, candidates }) => {
+            Err(SectionError::Ambiguous { ref_, candidates })
+        }
+        // `NoSection` / `EmptyRef` / `NotFound` / `ChildOfLeaf` all mean "a
+        // unique, non-ambiguous match was not found" — surface as `None` so a
+        // caller that only jumps on a real hit can `if let Some(line) = …`.
+        Err(
+            SectionError::NoSection { .. }
+            | SectionError::EmptyRef
+            | SectionError::NotFound { .. }
+            | SectionError::ChildOfLeaf { .. },
+        ) => Ok(None),
+    }
+}
+
+/// `section_lookup` convenience for callers that don't care *why* nothing
+/// matched: ambiguity is folded into `None` (only an `Err` is surfaced when
+/// the lookup itself is structurally broken). `T9` (a recenter hint) and
+/// most read paths can ignore the `Ambiguous` detail and treat it as
+/// "don't jump".
+pub fn section_lookup_line(body: &str, ref_: &str) -> Option<usize> {
+    // `unwrap_or_default()` folds every `Err(Ambiguous)` to `None` (the caller
+    // only jumps on a real hit, so the ambiguity detail is irrelevant here).
+    section_lookup(body, ref_).unwrap_or_default()
+}
+
 /// Splice `new` into `data` over the byte range `[lo, hi)`, returning the
 /// new buffer. Pure: does not mutate `data` (the caller can compare / retry).
 /// Invariant: `lo <= hi <= data.len()`.
@@ -1141,5 +1190,92 @@ mod tests {
         let d = Doc::new(buf);
         let titles: Vec<&str> = d.sections.iter().map(|s| s.title.as_str()).collect();
         assert_eq!(titles, vec!["Root", "After"]);
+    }
+
+    // ---- T7: section_lookup(body, ref) → Result<Option<usize>, SectionError> ----
+
+    #[test]
+    fn t7_lookup_dotted_returns_heading_line() {
+        // lines: 0="# Root" 1="" 2="## A" 3="A body" 4="" 5="## B" 6="B body"
+        let body = "# Root\n\n## A\nA body\n\n## B\nB body\n";
+        assert_eq!(section_lookup(body, "1"), Ok(Some(0)));
+        assert_eq!(section_lookup(body, "1.1"), Ok(Some(2)));
+        assert_eq!(section_lookup(body, "1.2"), Ok(Some(5)));
+    }
+
+    #[test]
+    fn t7_lookup_title_returns_heading_line() {
+        // lines: 0="# Root" 1="" 2="## A" 3="A body" 4="" 5="## B" 6="B body"
+        let body = "# Root\n\n## A\nA body\n\n## B\nB body\n";
+        assert_eq!(section_lookup(body, "A"), Ok(Some(2)));
+        assert_eq!(section_lookup(body, "Root > B"), Ok(Some(5)));
+    }
+
+    #[test]
+    fn t7_lookup_missing_section_is_none() {
+        let body = "# Root\n\n## A\nA body\n";
+        // a ref that names no section → Ok(None) (not an error)
+        assert_eq!(section_lookup(body, "9.9"), Ok(None));
+        assert_eq!(section_lookup(body, "Nope"), Ok(None));
+        // empty ref → Ok(None)
+        assert_eq!(section_lookup(body, ""), Ok(None));
+        // empty body → Ok(None)
+        assert_eq!(section_lookup("", "A"), Ok(None));
+    }
+
+    #[test]
+    fn t7_lookup_ambiguous_is_err() {
+        let body = "# Root\n\n## Dup\nx\n\n## Dup\ny\n";
+        match section_lookup(body, "Dup") {
+            Err(SectionError::Ambiguous { candidates, .. }) => {
+                assert!(!candidates.is_empty());
+            }
+            other => panic!("expected Ambiguous, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn t7_lookup_title_is_case_insensitive() {
+        // "watchmaking" / "WATCHMAKING" / "Watchmaking" all resolve to the same line
+        let body = "# Root\n\n## Watchmaking\ncontent\n\n## B\ny\n";
+        // lines: 0="# Root" 1="" 2="## Watchmaking" 3="content" 4="" 5="## B" 6="y"
+        assert_eq!(section_lookup(body, "Watchmaking"), Ok(Some(2)));
+        assert_eq!(section_lookup(body, "watchmaking"), Ok(Some(2)));
+        assert_eq!(section_lookup(body, "WATCHMAKING"), Ok(Some(2)));
+        // and the title path is case-insensitive too
+        assert_eq!(section_lookup(body, "root > WATCHMAKING"), Ok(Some(2)));
+    }
+
+    #[test]
+    fn t7_lookup_heading_at_last_line() {
+        // lines: 0="# Root" 1="" 2="body" 3="## Last" 4="last body"
+        // "Last" is a heading not at line 0 and not the deepest one — returns line 3
+        let body = "# Root\n\nbody\n## Last\nlast body\n";
+        assert_eq!(section_lookup(body, "Last"), Ok(Some(3)));
+        assert_eq!(section_lookup(body, "1.1"), Ok(Some(3)));
+        // a leaf that is also the final heading of a three-level page
+        // lines: 0="# Root" 1="" 2="## Mid" 3="" 4="### Tail" 5="tail body"
+        let tail = "# Root\n\n## Mid\n\n### Tail\ntail body\n";
+        assert_eq!(section_lookup(tail, "Tail"), Ok(Some(4)));
+        assert_eq!(section_lookup(tail, "1.1.1"), Ok(Some(4)));
+    }
+
+    #[test]
+    fn t7_lookup_single_h1_resolves_to_line_zero() {
+        // a page that is itself one H1 with no sub-structure still resolves
+        assert_eq!(section_lookup("# Only Heading\nbody\n", "1"), Ok(Some(0)));
+        assert_eq!(section_lookup("# Only Heading\nbody\n", "Only Heading"), Ok(Some(0)));
+    }
+
+    #[test]
+    fn t7_lookup_line_folds_ambiguity_to_none() {
+        let body = "# Root\n\n## A\nx\n\n## A\ny\n";
+        // title "A" is ambiguous → section_lookup_line collapses to None
+        assert_eq!(section_lookup_line(body, "A"), None);
+        // but the dotted ref 1.1 uniquely names the FIRST "A" → Ok(Some(line))
+        // lines: 0="# Root" 1="" 2="## A" 3="x" 4="" 5="## A" 6="y"
+        assert_eq!(section_lookup_line(body, "1.1"), Some(2));
+        // clean (non-ambiguous) page → returns the line
+        assert_eq!(section_lookup_line("# Root\n\n## A\nx\n\n## B\ny\n", "B"), Some(5));
     }
 }
