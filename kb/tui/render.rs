@@ -57,7 +57,7 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, List as RatList, ListItem, ListState, Paragraph, Widget, Wrap};
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
-use crate::tui::{App, FmMeta, LinkCandOption, LinksState, Mode, PageRow, ReadState, StatusKind};
+use crate::tui::{App, FmMeta, LinkCandOption, LinksEntry, LinksState, Mode, PageRow, ReadState, StatusKind};
 use crate::tui::palette::Palette;
 
 /// Draw the whole screen for `app`. Called once per event-loop tick.
@@ -92,8 +92,18 @@ pub fn draw(f: &mut Frame, app: &mut App) {
     // must issue the one `&mut App` write (the roll-up build/update) here, in
     // `draw`'s scope, before the borrow. Cheap on a hit (no body or width
     // change); O(n) on a miss (new page or window resize).
+    // The roll-up measures the *spliced* body (the text the user sees) —
+    // the same splice `draw_read` paints — so the scroll clamp, the find
+    // search and the centering math all agree with what's on screen. The
+    // splice is cheap (line-by-line string replace, only the resolved links
+    // change) and the roll-up is memoized on the spliced text's (hash, width),
+    // so a re-open of the same page is an O(1) hit. Splice + flatten to a
+    // single string (the form `ensure_body_rollup` consumes).
     let (body, in_read) = match &app.mode {
-        Mode::Read(rs) => (rs.body.clone(), true),
+        Mode::Read(rs) => {
+            let spliced = splice_body(&rs.body, &rs.links);
+            (spliced.join("\n"), true)
+        }
         _ => (String::new(), false),
     };
     if in_read {
@@ -266,12 +276,14 @@ fn draw_read(f: &mut Frame, app: &App, rs: &ReadState, area: ratatui::layout::Re
     // rendered row. The padding counts + scroll are the `FindPadding` the
     // input pass already computed (FindState.center), so render and input
     // can't desync.
-    let rendered = rendered_lines(p, &rs.body);
-    // The roll-up was pre-warmed in `draw` (the `&mut App` frame); `valid` is
-    // `true` for a Read body (the only mode that reaches `draw_read`). We
-    // still keep the `rendered_lines` pass — it feeds the find overlay and
-    // the per-line `read_line` loop below — but the **row-count** math is
-    // now O(1) from the cache instead of re-running `rendered_row_count`.
+    // Splice the body against its links (the *identical* text the Links
+    // view paints — only the focus highlight differs there). This is the
+    // text the user sees, so every downstream consumer (scroll clamp, find
+    // search, centering) must measure it. The roll-up is pre-warmed in
+    // `draw` against this same spliced body, so `total_rows` is O(1); the
+    // defensive fallback re-runs the measure here.
+    let spliced = splice_body(&rs.body, &rs.links);
+    let rendered: Vec<String> = spliced.iter().map(|s| rendered_line(p, s)).collect();
     let content_rows = if app.body_rollup.valid {
         app.body_rollup.total_rows
     } else {
@@ -288,7 +300,8 @@ fn draw_read(f: &mut Frame, app: &App, rs: &ReadState, area: ratatui::layout::Re
         .unwrap_or((0, 0));
     // The selected hit's (line_idx, byte_offset) — the one match rendered
     // in `find_current` (all others in `find_match`). `None` when there is
-    // no match.
+    // no match. Matches are byte offsets into the *spliced* rendered line
+    // (see `find_center_scroll`, which searches the spliced body).
     let selected: Option<(usize, usize)> = rs
         .find
         .as_ref()
@@ -301,36 +314,37 @@ fn draw_read(f: &mut Frame, app: &App, rs: &ReadState, area: ratatui::layout::Re
     let needle_len = rs.find.as_ref().map(|fs| fs.needle.len()).unwrap_or(0);
 
     let blank = Line::from(vec![Span::styled(String::new(), p.default)]);
-    let mut body_lines: Vec<Line<'static>> = Vec::with_capacity(pad_above + rs.body.lines().count() + pad_below);
+    let mut body_lines: Vec<Line<'static>> = Vec::with_capacity(pad_above + spliced.len() + pad_below);
     for _ in 0..pad_above {
         body_lines.push(blank.clone());
     }
-    for (li, l) in rs.body.lines().enumerate() {
+    for (li, l) in spliced.iter().enumerate() {
+        // Base styling = markdown emphasis + heading role of the spliced text,
+        // patched with the link-state styles (both views apply the same base;
+        // the Read view passes `focused_key = None`). `apply_find_patched`
+        // last-wins per char, so we append the find patches *after* the link
+        // patches: an active find overlay (find_match / find_current) takes
+        // priority over the link's base style on the same glyph.
+        //
+        // NOTE: the offsets are computed on the *rendered* line (markdown
+        // emphasis stripped), which is the exact text `read_line` produces —
+        // passing `rendered[li]` (not the spliced `l`) keeps the byte offsets
+        // aligned. `is_heading` sees the same leading `#` either way.
+        let rendered_line = rendered.get(li).map(|s| s.as_str()).unwrap_or("");
+        let mut patches: Vec<(usize, usize, Style)> = line_patches(p, rendered_line, &rs.links, li, None);
         if has_find {
             let ms: Vec<(usize, usize)> = rs.find.as_ref().unwrap().matches.iter()
                 .filter_map(|(mli, off)| {
                     if *mli == li { Some((*off, *off + needle_len)) } else { None }
                 })
                 .collect();
-            if !ms.is_empty() {
-                let sel = selected;
-                let patches: Vec<(usize, usize, ratatui::style::Style)> = ms
-                    .iter()
-                    .map(|(s, e)| {
-                        let is_sel = sel
-                            .map(|(sl, so)| sl == li && so == *s)
-                            .unwrap_or(false);
-                        (*s, *e, if is_sel { p.find_current } else { p.find_match })
-                    })
-                    .collect();
-                body_lines.push(apply_find_patched(
-                    read_line(p, l),
-                    &patches,
-                ));
-                continue;
+            let sel = selected;
+            for (s, e) in ms {
+                let is_sel = sel.map(|(sl, so)| sl == li && so == s).unwrap_or(false);
+                patches.push((s, e, if is_sel { p.find_current } else { p.find_match }));
             }
         }
-        body_lines.push(read_line(p, l));
+        body_lines.push(apply_find_patched(read_line(p, l), &patches));
     }
     for _ in 0..pad_below {
         body_lines.push(blank.clone());
@@ -341,14 +355,15 @@ fn draw_read(f: &mut Frame, app: &App, rs: &ReadState, area: ratatui::layout::Re
     // *first* rendered row shown, so `+1` gives a 1-based "row N" the user
     // can quote in a bug report. With find armed, the title doubles as the
     // find status (needle + hit position) so the user always sees what's
-    // highlighted.
+    // highlighted. While find is armed, `l` is typed into the needle, so the
+    // picker affordance moves to `Tab`.
     let total_rows = pad_above + content_rows + pad_below;
     let title = if has_find {
         let fs = rs.find.as_ref().unwrap();
         let m = fs.matches.len();
         let pos = fs.cursor.min(m - 1) + 1;
         format!(
-            " body — find '{}': {pos} of {m} · ↑/↓ move · l links · Esc close",
+            " body — find '{}': {pos} of {m} · ↑/↓ move · Tab links · Esc close",
             fs.needle
         )
     } else {
@@ -1790,39 +1805,14 @@ fn draw_links(f: &mut ratatui::Frame, app: &App, ls: &LinksState, area: Rect) {
         .split(chunks[1]);
 
     // ----- Left pane: body with find-style highlight ----------------------
+    // The body text is *identical* to the Read view (the same
+    // `splice_body` collapse) — only the highlight differs. The focused
+    // link is boxed in `find_current`; every other resolved link keeps the
+    // `link` role, and dead / ambiguous links render as plain body text
+    // (their state is the right-hand target-info pane, not a prose style).
     let p = &app.palette;
 
-    // Splice alive (uniquely-resolved) links: replace the full reference
-    // span (e.g. `[label](path/to/page)` or `[[target]]`) with just the
-    // display text (`label` or `target`), so the prose renders as
-    // "see [label](path/to/page) for details" → "see label for details".
-    // Dead (unresolved), ambiguous, External, and Current links are
-    // left as normal text (no special rendering).
-    let spliced_body: Vec<String> = ls
-        .source_body
-        .lines()
-        .enumerate()
-        .map(|(li, raw)| {
-            let alive: Vec<(usize, usize, String)> = ls
-                .links
-                .iter()
-                .filter(|e| e.line == li && is_alive_link(e))
-                .map(|e| (
-                    e.col,
-                    e.end,
-                    e.label
-                        .clone()
-                        .unwrap_or_else(|| e.target.clone()),
-                ))
-                .collect();
-            if alive.is_empty() {
-                raw.to_string()
-            } else {
-                splice_links_on_line(raw, &alive)
-            }
-        })
-        .collect();
-
+    let spliced_body = splice_body(&ls.source_body, &ls.links);
     let rendered: Vec<String> = spliced_body.iter().map(|l| rendered_line(p, l)).collect();
     let pane_w = (panes[0].width.saturating_sub(2)) as usize;
     let pane_h = (panes[0].height.saturating_sub(2)) as usize;
@@ -1840,28 +1830,10 @@ fn draw_links(f: &mut ratatui::Frame, app: &App, ls: &LinksState, area: Rect) {
     let fp = crate::tui::find_padding(focused_row, content_rows, pane_h);
     let (pad_above, pad_below) = (fp.above, fp.below);
 
-    // Build the per-line patch list. Patches are (start, end, style) byte
-    // offsets into the *rendered* line. Only alive links are highlighted;
-    // dead/ambiguous links are plain text (no find-patch applied).
-    let mut patches_by_line: std::collections::HashMap<usize, Vec<(usize, usize, Style)>> =
-        std::collections::HashMap::new();
-    for (i, e) in ls.links.iter().enumerate() {
-        let is_focused = i == focused;
-        if !is_alive_link(e) {
-            continue;
-        }
-        let style = if is_focused { p.find_current } else { p.find_match };
-        if let Some(rendered_line) = rendered.get(e.line) {
-            let needle = e.label.clone().unwrap_or_else(|| e.target.clone());
-            let (rs, re) = raw_to_rendered_span(rendered_line, &needle);
-            if rs < re {
-                patches_by_line
-                    .entry(e.line)
-                    .or_default()
-                    .push((rs, re, style));
-            }
-        }
-    }
+    // The focused link's (line, col) key — `line_patches` upgrades exactly
+    // that one link to `find_current` (overriding its state style). `None`
+    // when there is no focused link (degenerate; the picker bails earlier).
+    let focused_key = focused_e.map(|e| (e.line, e.col));
 
     let blank = Line::from(vec![Span::styled(String::new(), p.default)]);
     let mut body_lines: Vec<Line<'static>> = Vec::with_capacity(
@@ -1872,11 +1844,17 @@ fn draw_links(f: &mut ratatui::Frame, app: &App, ls: &LinksState, area: Rect) {
     }
     for (li, raw) in spliced_body.iter().enumerate() {
         let base = read_line(p, raw);
-        if let Some(patches) = patches_by_line.get(&li) {
-            body_lines.push(apply_find_patched(base, patches));
-        } else {
-            body_lines.push(base);
-        }
+        // Base rendering (markdown emphasis + the spliced text) + the
+        // link-state patches (the focused link gets `find_current`, others
+        // keep their state style). `line_patches` returns an empty vec for
+        // a line with no links, so `apply_find_patched` is identity there —
+        // we can branch-free. NOTE: the offsets are computed on the
+        // *rendered* line (markdown emphasis stripped), which is the exact
+        // text `read_line` produces — passing `rendered[li]` (not `raw`)
+        // keeps the byte offsets aligned.
+        let rendered_line = rendered.get(li).map(|s| s.as_str()).unwrap_or("");
+        let patches = line_patches(p, rendered_line, &ls.links, li, focused_key);
+        body_lines.push(apply_find_patched(base, &patches));
     }
     for _ in 0..pad_below {
         body_lines.push(blank.clone());
@@ -1917,19 +1895,98 @@ fn draw_links(f: &mut ratatui::Frame, app: &App, ls: &LinksState, area: Rect) {
     }
 }
 
-/// True when the link is *alive* — a uniquely-resolved, navigable page
-/// reference (Db / Path, `resolved = Some(...)` or `abs_path = Some(...)`,
-/// no candidates). External and Current links are also "alive" in the
-/// sense that they are well-formed; they render with the same display
-/// text (the URL or the `#section`) as normal prose, so they are
-/// included here.
-fn is_alive_link(e: &crate::tui::LinksEntry) -> bool {
+/// The *render state* of a link — the single source of truth both the
+/// Read view (`draw_read`) and the Links view (`draw_links`) consult to
+/// decide (a) how to splice / style the written reference, and (b) whether
+/// the reference earns the navigable `🔗` marker.
+///
+/// The body text is *identical* in both views (Read and Links splice the
+/// same way — the reader never sees the link "change" between them); only
+/// the *highlight* differs (the Links view boxes the focused link, the Read
+/// view does not). The splice is *state-sensitive* (see the variant docs):
+/// every link collapses to its display text; a resolved *page* link
+/// additionally earns the `🔗` marker. There is no *stylistic* distinction
+/// between a dead link and a resolved one in prose — dead links read as
+/// ordinary body text; the only visual markers a link earns are the `link`
+/// tint (resolved) and the `🔗` glyph (uniquely-resolved pages).
+///
+/// - [`LinkState::Resolved`] — navigable. Either a *uniquely-resolved page*
+///   (Db / Path, `resolved = Some(_)`, no candidates) or a well-formed
+///   `External` / `Current` reference. The reference splices to its display
+///   text and renders in the `link` role; a resolved *page* link
+///   additionally earns the `🔗` marker (the "this resolves to a kb page"
+///   affordance) while `External` / `Current` do not (they are not kb
+///   pages — the marker would mislead).
+/// - [`LinkState::Dead`] — Db / Path with `resolved = None` and no
+///   candidates: the target page is missing. Splices to its display text
+///   and renders in the body's `default` role (plain text) — no strikethrough.
+/// - [`LinkState::Ambiguous`] — Db / Path with `resolved = None` but a
+///   non-empty candidate set: the reference is real but points at several
+///   pages. Splices to its display text and renders in the body's
+///   `default` role (plain text) — no italic.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LinkState {
+    Resolved,
+    Dead,
+    Ambiguous,
+}
+
+/// Classify a link into [`LinkState`]. Pure (reads only the entry); the
+/// same entry yields the same state in both views.
+pub fn link_state(e: &LinksEntry) -> LinkState {
     match e.kind {
         kb_core::links::LinkKind::Db | kb_core::links::LinkKind::Path => {
-            e.resolved.is_some() && e.candidates.is_empty()
+            if e.resolved.is_some() && e.candidates.is_empty() {
+                LinkState::Resolved
+            } else if e.candidates.is_empty() {
+                LinkState::Dead
+            } else {
+                LinkState::Ambiguous
+            }
         }
-        kb_core::links::LinkKind::External
-        | kb_core::links::LinkKind::Current => true,
+        // External / Current have no page to resolve; they are always
+        // well-formed (navigable in the pick-list sense, but they are not kb
+        // pages so they never earn the `🔗` marker).
+        kb_core::links::LinkKind::External | kb_core::links::LinkKind::Current => {
+            LinkState::Resolved
+        }
+    }
+}
+
+/// True when the link is a *uniquely-resolved kb page* (Db / Path,
+/// `resolved = Some(_)`, no candidates) — the one state that earns the
+/// `🔗` marker and the splice-to-display-text collapse. `External` /
+/// `Current` are `Resolved` but are not kb pages, so they do not get the
+/// marker (the bare URI / `#section` is self-evident; they still splice to
+/// their display text since the wrapper is pure syntax).
+fn is_resolved_page(e: &LinksEntry) -> bool {
+    matches!(e.kind, kb_core::links::LinkKind::Db | kb_core::links::LinkKind::Path)
+        && e.resolved.is_some()
+        && e.candidates.is_empty()
+}
+
+/// True when the link splices to its *display text* (collapsing the
+/// `[[…]]` / `[…](…)` wrapper): exactly the [`LinkState::Resolved`] links.
+/// Dead and Ambiguous links are left rendered *as written* (the full
+/// reference, brackets included) so the broken / colliding syntax is still
+/// visible — their state is carried purely by style (the body's `default`
+/// role: plain text, no strikethrough, no italic).
+fn splices_to_display(e: &LinksEntry) -> bool {
+    matches!(link_state(e), LinkState::Resolved)
+}
+
+/// The display text a spliced link collapses to — the `label` if the inline
+/// form carries one, else the written `target`. A resolved *page* link also
+/// gets the `🔗` marker appended (the navigable-page affordance);
+/// `External` / `Current` splice to the bare display text.
+/// Dead / Ambiguous links are *not* spliced (they remain as written) and
+/// never reach this function.
+fn splice_display(e: &LinksEntry) -> String {
+    let base = e.label.clone().unwrap_or_else(|| e.target.clone());
+    if is_resolved_page(e) {
+        format!("{base} 🔗")
+    } else {
+        base
     }
 }
 
@@ -1960,6 +2017,118 @@ fn splice_links_on_line(
         if *col < *end && *col < out.len() {
             let e = (*end).min(out.len());
             out.replace_range(*col..e, display);
+        }
+    }
+    out
+}
+
+/// Splice a full body against its link annotations, returning the
+/// **spliced** per-line text — the text the user actually sees (the same
+/// in both the Read and Links views). This is the single source of truth
+/// for the body pane: `draw_read`, `draw_links`, the scroll clamp, the
+/// find-match search and the centering math all consume this rather than
+/// the raw body, so the scroll unit and the highlight offsets always land
+/// on what is on screen.
+///
+/// State-sensitive (see [`LinkState`]): *resolved* links collapse to their
+/// display text — the `[[…]]` / `[…](…)` wrapper is pure reference syntax
+/// the reader does not read, and only a resolved *page* link additionally
+/// gains the `🔗` marker (the navigable-page affordance). *Dead* and
+/// *Ambiguous* links are left rendered **as written** (the full reference,
+/// brackets included) so the broken / colliding syntax is still visible —
+/// their state is carried purely by style (the body's `default` role:
+/// plain text, no strikethrough, no italic) and by the Links view's target
+/// info. Prose, emphasis delimiters and any line with no link is preserved
+/// byte-for-byte.
+///
+/// Pure over `(body, links)`; no `App`, no IO — so it is unit-testable and
+/// idempotent (the same inputs give the same body the render pass paints).
+pub fn splice_body(body: &str, links: &[LinksEntry]) -> Vec<String> {
+    body.lines()
+        .enumerate()
+        .map(|(li, raw)| {
+            let resolved: Vec<(usize, usize, String)> = links
+                .iter()
+                .filter(|e| e.line == li && splices_to_display(e))
+                .map(|e| (e.col, e.end, splice_display(e)))
+                .collect();
+            if resolved.is_empty() {
+                raw.to_string()
+            } else {
+                splice_links_on_line(raw, &resolved)
+            }
+        })
+        .collect()
+}
+
+/// The (start, end, style) patches to overlay on a *spliced* body line
+/// (byte offsets into `rendered` — the line as painted by
+/// [`rendered_line`]) so the link reads with state-appropriate emphasis.
+/// Both the Read view (`draw_read`) and the Links view (`draw_links`) call
+/// this for the **base** styling — the body line is identical in the two —
+/// and the Links view additionally passes `focused_key` to upgrade the
+/// focused link to `find_current` (the strong box) while the others keep
+/// their state style.
+///
+/// Every link has already gone through [`splice_body`]; this overlay only
+/// adds the state-appropriate style:
+///
+/// - **Resolved** (a real, navigable reference): spliced to its display
+///   text; the highlight is the `link` role (a saturated, unboxed link
+///   tint — distinct from the `md_code` box that is reserved for backtick
+///   spans). A resolved *page* link keeps the `🔗` marker in the
+///   surrounding prose; this box (the `link` tint) wraps the display text.
+/// - **Dead** (target page missing): left **as written** (the full
+///   `[[…]]` / `[…](…)` span); the highlight is the body's `default`
+///   role — normal text, no strike, no distinction from prose. The only
+///   link a reader can *see* as "dead" is a focused one (via the
+///   Links view's box).
+/// - **Ambiguous** (several candidate pages): likewise as written in the
+///   body's `default` role; the only cue is the Links view's box on the
+///   focused entry.
+///
+/// `focused_key` is the `(line, col)` of the focused link (Links view only;
+/// `None` in the Read view). When it matches a link on this line that link's
+/// style is `find_current` (overriding the state style) — so the focused
+/// dead / ambiguous / resolved link is *always* boxed, which is the fix for
+/// the "no highlight on a dead/ambiguous link" bug.
+///
+/// ATX headings are exempt (a heading line renders wholly in `label`; a link
+/// highlight on it would fight the heading role — a link on a heading line
+/// is a degenerate case we leave unstyled).
+pub fn line_patches(
+    p: &Palette,
+    rendered: &str,
+    links: &[LinksEntry],
+    line: usize,
+    focused_key: Option<(usize, usize)>,
+) -> Vec<(usize, usize, Style)> {
+    if is_heading(rendered) {
+        return Vec::new();
+    }
+    let mut out: Vec<(usize, usize, Style)> = Vec::new();
+    for e in links.iter().filter(|e| e.line == line) {
+        // The focused link's style is `find_current` (the Links-view
+        // affordance); everything else is the state's base role.
+        let is_focused = focused_key.map(|(fl, fc)| fl == e.line && fc == e.col).unwrap_or(false);
+        let base = match link_state(e) {
+            LinkState::Resolved => p.link,
+            // Dead and ambiguous read as plain body text — the state is
+            // carried by the Links-view box alone (no strike / italic).
+            LinkState::Dead | LinkState::Ambiguous => p.default,
+        };
+        let style = if is_focused { p.find_current } else { base };
+        // Resolved links spliced to their display text (`label` if the
+        // inline form has one, else the `target`); Dead / Ambiguous stayed
+        // as written. The needle below is exactly what `rendered` shows.
+        let needle = if matches!(link_state(e), LinkState::Resolved) {
+            e.label.clone().unwrap_or_else(|| e.target.clone())
+        } else {
+            e.raw_text.clone()
+        };
+        let (s, en) = raw_to_rendered_span(rendered, &needle);
+        if s < en {
+            out.push((s, en, style));
         }
     }
     out
@@ -3145,5 +3314,306 @@ mod tests {
     fn splice_empty_is_identity() {
         let raw = "no links here";
         assert_eq!(splice_links_on_line(raw, &[]), raw);
+    }
+
+    // ---- T2 v2: state-sensitive helpers (`link_state`, `splice_body`,
+    // `line_patches`) — the shared Read / Links-view primitives -------------
+
+    /// Build a minimal `LinksEntry` for state tests. Fields not under
+    /// inspection are neutral; `resolved` / `candidates` are the two
+    /// discriminators `link_state` reads.
+    ///
+    /// `raw_text` is derived from the label/target pair to mirror the
+    /// canonical forms: wikilink `[[target]]` when `label` is `None`,
+    /// inline `[label](target)` otherwise.
+    fn entry(
+        kind: kb_core::links::LinkKind,
+        target: &str,
+        label: Option<&str>,
+        resolved: Option<&str>,
+        candidates: &[&str],
+        col: usize,
+        end: usize,
+    ) -> LinksEntry {
+        let raw_text = match label {
+            None => format!("[[{target}]]"),
+            Some(l) => format!("[{l}]({target})"),
+        };
+        LinksEntry {
+            line: 0,
+            col,
+            end,
+            context: String::new(),
+            target: target.to_string(),
+            raw_text,
+            label: label.map(|s| s.to_string()),
+            section: None,
+            kind,
+            resolved: resolved.map(|s| s.to_string()),
+            candidates: candidates.iter().map(|s| s.to_string()).collect(),
+            abs_path: resolved.map(|s| format!("{s}.md")),
+        }
+    }
+
+    /// A Resolved page link — the one state that earns `🔗`.
+    #[test]
+    fn link_state_resolved_page() {
+        let e = entry(
+            kb_core::links::LinkKind::Db,
+            "watchmaking",
+            Some("the watchmaking guide"),
+            Some("note:watchmaking"),
+            &[],
+            9,
+            22,
+        );
+        assert_eq!(link_state(&e), LinkState::Resolved);
+    }
+
+    /// External / Current are Resolved (navigable) but not kb pages.
+    #[test]
+    fn link_state_external_and_current_are_resolved() {
+        for k in [kb_core::links::LinkKind::External, kb_core::links::LinkKind::Current] {
+            let e = entry(k, "x", None, None, &[], 0, 1);
+            assert_eq!(link_state(&e), LinkState::Resolved, "{k:?} should be Resolved");
+        }
+    }
+
+    /// Db / Path with no resolution and no candidates → Dead.
+    #[test]
+    fn link_state_dead() {
+        let e = entry(kb_core::links::LinkKind::Db, "missing", None, None, &[], 0, 9);
+        assert_eq!(link_state(&e), LinkState::Dead);
+    }
+
+    /// Db / Path with no resolution but a candidate set → Ambiguous.
+    #[test]
+    fn link_state_ambiguous() {
+        let e = entry(
+            kb_core::links::LinkKind::Path,
+            "guide",
+            None,
+            None,
+            &["a.md", "b.md"],
+            0,
+            5,
+        );
+        assert_eq!(link_state(&e), LinkState::Ambiguous);
+    }
+
+    /// A Resolved *page* link splices to `label 🔗` — the marker only appears
+    /// on resolved page links (the navigable-page affordance).
+    #[test]
+    fn splice_body_resolved_page_earns_marker() {
+        let body = "read the [watching](guide.md)";
+        // `[watching](guide.md)` starts at col 9, ends at col 29 (exclusive).
+        let links = vec![entry(
+            kb_core::links::LinkKind::Path,
+            "guide.md",
+            Some("watching"),
+            Some("note:watching"),
+            &[],
+            9,
+            29,
+        )];
+        let spliced = splice_body(body, &links);
+        assert_eq!(spliced, vec!["read the watching 🔗"]);
+    }
+
+    /// External / Current splice to their display text but earn NO marker.
+    #[test]
+    fn splice_body_external_no_marker() {
+        let body = "see <https://example.com/x>";
+        let links = vec![entry(
+            kb_core::links::LinkKind::External,
+            "https://example.com/x",
+            None,
+            None,
+            &[],
+            4,
+            27,
+        )];
+        let spliced = splice_body(body, &links);
+        assert_eq!(spliced, vec!["see https://example.com/x"]);
+        assert!(!spliced[0].ends_with('🔗'), "external must not earn the marker");
+    }
+
+    /// Dead and Ambiguous links are left **as written** (the full
+    /// `[[target]]` reference, brackets included) — no splice applies, the
+    /// prose reads exactly as the user typed it. The only *state* cue is
+    /// the Links-view focused box (via `find_current`) — carried by
+    /// `line_patches`, never by prose style.
+    #[test]
+    fn splice_body_dead_and_ambiguous_left_as_written() {
+        let body = "see [[missing]] and [[guide]] here";
+        let links = vec![
+            entry(
+                kb_core::links::LinkKind::Db,
+                "missing",
+                None,
+                None,
+                &[],
+                4,
+                15,
+            ),
+            entry(
+                kb_core::links::LinkKind::Db,
+                "guide",
+                None,
+                None,
+                &["a.md", "b.md"],
+                20,
+                29,
+            ),
+        ];
+        // Both stay as written (the full `[[…]]` span). No `🔗` because
+        // neither resolves to a kb page.
+        let spliced = splice_body(body, &links);
+        assert_eq!(spliced, vec![body]);
+        assert!(!spliced[0].contains('🔗'), "dead/ambiguous must not earn the marker");
+        assert!(spliced[0].contains("[[missing]]"), "dead link's brackets are intact");
+        assert!(spliced[0].contains("[[guide]]"), "ambiguous link's brackets are intact");
+    }
+
+    /// A `**`-emphasis line is spliced for a resolved link while the
+    /// surrounding emphasis delimiters are preserved — `rendered_line` then
+    /// strips the `**` and `line_patches` must land on the *stripped* text.
+    #[test]
+    fn splice_body_preserves_emphasis_delimiters() {
+        let body = "see **[x](y.md)** for the rest";
+        // "see " (0-3) + "**" (4-5), then `[x](y.md)` spans cols 6..15
+        // (6 = `[`, 14 = `)`, exclusive end = 15). `**` closers are 15-16.
+        let links = vec![entry(
+            kb_core::links::LinkKind::Path,
+            "y.md",
+            Some("x"),
+            Some("note:y"),
+            &[],
+            6,
+            15,
+        )];
+        let spliced = splice_body(body, &links);
+        assert_eq!(spliced, vec!["see **x 🔗** for the rest"]);
+    }
+
+    /// `line_patches` produces *one* patch per link on the line, in the
+    /// state's base role, at the byte span of the link's visible text in the
+    /// rendered (emphasis-stripped) line. Resolved → `link` (the saturated
+    /// link tint), Dead and Ambiguous → `default` (plain body text — no
+    /// strikethrough, no italic; their distinction is carried by the Links
+    /// view's focused box and the target-info pane, not by prose style).
+    #[test]
+    fn line_patches_three_states_distinct_roles() {
+        let p = Palette::default_palette();
+        // One line carrying a dead + an ambiguous + a resolved link.
+        // Offsets span each **full reference** (for a wikilink `[[x]]` the
+        // span is the byte range of those 4+ chars; for an inline form
+        // `[x](y)` the span is the byte range of that whole form) since
+        // `splice_body` replaces `raw[col..end]` with the display text.
+        let body = "see [[missing]] [[guide]] and [live](live.md) now";
+        let links = vec![
+            entry(
+                kb_core::links::LinkKind::Db,
+                "missing",
+                None,
+                None,
+                &[],
+                4,
+                15,
+            ),
+            entry(
+                kb_core::links::LinkKind::Db,
+                "guide",
+                None,
+                None,
+                &["a.md", "b.md"],
+                16,
+                25,
+            ),
+            entry(
+                kb_core::links::LinkKind::Path,
+                "live.md",
+                Some("live"),
+                Some("note:live"),
+                &[],
+                30,
+                45,
+            ),
+        ];
+        let rendered = rendered_line(&p, body);
+        let patches = line_patches(&p, &rendered, &links, 0, None);
+        let by_needle = |needle: &str| -> Option<(usize, usize, Style)> {
+            patches
+                .iter()
+                .find(|(s, e, _)| *s < *e && &rendered[*s..*e] == needle)
+                .copied()
+        };
+        // Dead / Ambiguous paint their full as-written span (brackets
+        // included); Resolved paints its spliced display text.
+        let dead = by_needle("[[missing]]").expect("dead as-written span present");
+        let amb = by_needle("[[guide]]").expect("ambiguous as-written span present");
+        let live = by_needle("live").expect("resolved display text present");
+        // Style roles match the v3 state contract.
+        assert_eq!(dead.2, p.default, "dead → default (normal text, brackets as written)");
+        assert_eq!(amb.2, p.default, "ambiguous → default (normal text, brackets as written)");
+        assert_eq!(live.2, p.link, "resolved (non-focused) → link role");
+    }
+
+    /// The focused link (Links view) overrides its state role with
+    /// `find_current` — even for a *dead* link (the "no highlight on a dead
+    /// link" fix). Non-focused links on the same line keep their state role.
+    #[test]
+    fn line_patches_focused_dead_upgrades_to_find_current() {
+        let p = Palette::default_palette();
+        let body = "see [[missing]] and [[guide]]";
+        let missing = entry(
+            kb_core::links::LinkKind::Db,
+            "missing",
+            None,
+            None,
+            &[],
+            4,
+            13,
+        );
+        let guide = entry(
+            kb_core::links::LinkKind::Db,
+            "guide",
+            None,
+            None,
+            &["a.md", "b.md"],
+            18,
+            26,
+        );
+        let links = vec![missing.clone(), guide.clone()];
+        let rendered = rendered_line(&p, body);
+        let key = (missing.line, missing.col);
+        let patches = line_patches(&p, &rendered, &links, 0, Some(key));
+        let find_patch = |n: &str| patches.iter().find(|(s, e, _)| s < e && &rendered[*s..*e] == n).copied();
+        let focused = find_patch("[[missing]]").expect("focused dead as-written span present");
+        let unfocused = find_patch("[[guide]]").expect("unfocused ambiguous as-written span present");
+        assert_eq!(focused.2, p.find_current, "focused dead → find_current (boxed, as written)");
+        assert_eq!(unfocused.2, p.default, "unfocused ambiguous → default (normal text, as written)");
+    }
+
+    /// ATX headings render wholly in the heading role; links on a heading
+    /// line are exempt from the link-state patches (returning empty).
+    #[test]
+    fn line_patches_heading_is_exempt() {
+        let p = Palette::default_palette();
+        let body = "# Heading with [[missing]]";
+        let links = vec![entry(
+            kb_core::links::LinkKind::Db,
+            "missing",
+            None,
+            None,
+            &[],
+            13,
+            22,
+        )];
+        let rendered = rendered_line(&p, body);
+        assert!(
+            line_patches(&p, &rendered, &links, 0, None).is_empty(),
+            "a heading line yields no link patches"
+        );
     }
 }

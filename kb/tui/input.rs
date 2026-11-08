@@ -292,10 +292,11 @@ fn handle_read(app: &mut App, ev: KeyEvent) -> bool {
         // recent find hit (if any) so the "I just finished `f`" follow-up
         // path starts at the right place rather than at line 0.
         //
-        // **Reachable whether or not find is armed**: with find armed, a
-        // dedicated `l` arm in `handle_find_input` (below) also opens the
-        // picker — using the currently-highlighted find hit as the anchor
-        // — so `f` → navigate → `l` is a one-keystroke follow-through.
+        // **Reachable whether or not find is armed**: *in the Read view
+        // itself* (find not active) `l` opens the picker directly; *while
+        // find is armed* the `Tab` arm in `handle_find_input` (below) opens
+        // it anchored on the currently-highlighted hit — so `f` → navigate →
+        // `Tab` is the one-keystroke follow-through.
         KeyCode::Char('l') => {
             if let Err((msg, _)) = app.open_links() {
                 app.set_error(msg);
@@ -493,13 +494,12 @@ fn handle_find_input(app: &mut App, ev: KeyEvent) -> bool {
             false
         }
 
-        // Type / delete the needle. `l` is special: it opens the
-        // Link-picker (M8.5) anchored on the currently-highlighted find
-        // hit — the "I just finished `f`, now follow the closest link"
-        // fast path. `l` is a rare needle character, and the design
-        // (user constraint #2) is that the picker *pre-selects nearest* on
-        // find-armed entry, so it must NOT be typed into the needle here.
-        KeyCode::Char('l') => {
+        // Type / delete the needle. `Tab` (not a printable letter) opens the
+        // Link-picker (M8.5) anchored on the currently-highlighted find hit —
+        // the "I just finished `f`, now follow the closest link" fast path.
+        // `l` is now typed into the needle, so `f` → type needle → `Tab` →
+        // `Enter` is the one-keystroke follow-through.
+        KeyCode::Tab => {
             if let Err((msg, _)) = app.open_links() {
                 app.set_error(msg);
             }
@@ -1233,15 +1233,13 @@ mod tests {
         }
     }
 
-    /// While find is armed (Read mode), the dedicated `l` arm in
-    /// `handle_find_input` (M8.5) must be captured and open the
-    /// Link-picker — NOT typed into the needle (the design constraint
-    /// that `l` is a one-keystroke follow-through: `f` → navigate → `l`).
-    /// Regression: a generic `Char(c)` arm that pre-dates the `l` arm
-    /// would have swallowed the character and the picker would never
-    /// have pre-selected the nearest link.
+    /// While find is armed (Read mode), the `Tab` arm in
+    /// `handle_find_input` (M8.5) must be captured and open the Link-picker
+    /// — `l` is typed into the needle (not a control key). The "I just
+    /// finished `f`, now follow the closest link" fast path is
+    /// `f` → navigate → `Tab` → `Enter`.
     #[test]
-    fn find_armed_l_opens_picker_not_typed() {
+    fn find_armed_tab_opens_picker_l_is_typed() {
         let db = crate::tui::Db::open_in_memory_test().unwrap();
         db.migrate().unwrap();
         let body = String::from("first see [[b]]\nanchor line\nsecond\n[[c]] last\n");
@@ -1281,25 +1279,34 @@ mod tests {
                 crate::tui::Mode::Read(r) => r.find.as_ref().expect("find state"),
                 _ => panic!(),
             };
-            assert_eq!(fs.needle, "anchor", "needle 'anchor' before l");
+            assert_eq!(fs.needle, "anchor", "needle 'anchor' before Tab");
             assert_eq!(fs.matches.len(), 1);
             assert_eq!(fs.cursor, 0);
         }
 
-        // Now `l` must open the picker, not append to the needle.
+        // `l` IS now typed into the needle (find mode no longer intercepts it).
         assert!(!handle_event(&mut app, key('l')));
+        {
+            let fs = match &app.mode {
+                crate::tui::Mode::Read(r) => r.find.as_ref().expect("find state"),
+                _ => panic!(),
+            };
+            assert_eq!(fs.needle, "anchorl", "'l' is typed verbatim into the needle");
+        }
+
+        // Tab must open the picker.
+        assert!(!handle_event(&mut app, KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE)));
         assert!(
             matches!(app.mode, crate::tui::Mode::Links(_)),
-            "'l' while find armed opens the Link-picker"
+            "Tab while find armed opens the Link-picker"
         );
-        // The needle on the parked Read must still be "anchor"
-        // (NOT "anchorl", proving the capture arm ran first).
-        // The parked state is `links_return` (pop target on Esc).
+        // The needle on the parked Read must still be "anchorl"
+        // (NOT "anchorl<TAB>", proving Tab was captured, not typed).
         if let Some(rs) = &app.links_return {
             let fs = rs.find.as_ref().expect("find still armed in parked Read");
             assert_eq!(
-                fs.needle, "anchor",
-                "'l' was NOT typed into the needle"
+                fs.needle, "anchorl",
+                "Tab was NOT typed into the needle"
             );
         } else {
             panic!("open_links must park the source Read so Esc can return to it");

@@ -66,6 +66,9 @@ strikethrough = true       # ~~strikethrough~~ in the read pane
 fg = "white"               # `code` in the read pane
 bg = "dark-gray"           # the "code box" — makes code read as code, not prose
 
+[link]
+fg = "light-blue"          # spliced links on a page — unboxed, distinct from the code box
+
 # Reader find (the `f` key in Read mode): the needle's occurrences are boxed.
 # `find_match` is the softer box (every hit); `find_current` is the strong
 # box (the selected hit the viewport centers on). Distinct hues (cyan vs

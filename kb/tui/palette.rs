@@ -187,6 +187,7 @@ pub struct Palette {
     pub md_italic:   Style,
     pub md_strike:   Style,
     pub md_code:     Style,
+    pub link:        Style,
     pub find_match:  Style,
     pub find_current: Style,
 }
@@ -252,6 +253,13 @@ impl Palette {
             // the yellow bold / cyan italic — a code span is monospaced
             // content, so it stays un-bolded and un-tinted in the fg.
             md_code:         Style::default().fg(Color::White).bg(Color::DarkGray),
+            // A spliced link on a Read page (or the Links picker): LightBlue on
+            // the terminal background — a saturated, unboxed link tint that is
+            // distinct from `md_code`'s White-on-DarkGray "code box" (reserved
+            // for backtick spans) and from the Magenta heading family. Dead
+            // and ambiguous links render in `default` (plain body text); the
+            // only colour a link ever earns is this one.
+            link:            Style::default().fg(Color::LightBlue),
             // Reader find (`f` in Read): every occurrence of the needle is a
             // box. `find_match` is the *softer* box (all hits) — black on
             // LightCyan, readable against the White body; `find_current` is
@@ -293,6 +301,10 @@ impl Palette {
             // Inline code: a neutral White-on-DarkGray code box (colorblind-
             // safe, distinct from the Yellow bold and LightCyan italic).
             md_code:         Style::default().fg(Color::White).bg(Color::DarkGray),
+            // A spliced link: Yellow + UNDERLINE — unboxed (no code-style bg),
+            // and the underline doubles the "this is a link" cue so it survives
+            // even under the Red→Magenta / Green→Cyan remaps above.
+            link:            Style::default().fg(Color::Yellow).add_modifier(Modifier::UNDERLINED),
             // Reader find: cyan (matches) vs magenta (the current/selected
             // hit). Both are distinct from the red/green families and from
             // each other in hue, so a hit list stays scannable under CVD.
@@ -331,6 +343,7 @@ impl Palette {
             md_italic:   StyleSpec,
             md_strike:   StyleSpec,
             md_code:     StyleSpec,
+            link:        StyleSpec,
             find_match:  StyleSpec,
             find_current: StyleSpec,
         }
@@ -346,6 +359,7 @@ impl Palette {
             ("selection", &f.selection), ("selection_ctx", &f.selection_ctx),
             ("md_bold", &f.md_bold), ("md_italic", &f.md_italic),
             ("md_strike", &f.md_strike), ("md_code", &f.md_code),
+            ("link", &f.link),
             ("find_match", &f.find_match), ("find_current", &f.find_current),
         ] {
             if let Some(e) = sp.parse_error() {
@@ -370,6 +384,7 @@ impl Palette {
             md_italic:   f.md_italic.to_style(),
             md_strike:   f.md_strike.to_style(),
             md_code:     f.md_code.to_style(),
+            link:        f.link.to_style(),
             find_match:  f.find_match.to_style(),
             find_current: f.find_current.to_style(),
         })
@@ -581,6 +596,8 @@ mod tests {
             Style::default().fg(Color::DarkGray).add_modifier(Modifier::CROSSED_OUT));
         assert_eq!(p.md_code,
             Style::default().fg(Color::White).bg(Color::DarkGray));
+        assert_eq!(p.link,
+            Style::default().fg(Color::LightBlue));
         assert_eq!(p.find_match,
             Style::default().fg(Color::Black).bg(Color::LightCyan));
         assert_eq!(p.find_current,
@@ -594,7 +611,7 @@ mod tests {
         let p = Palette::colorblind();
         let roles = [
             p.label, p.active, p.caret, p.gated, p.info, p.success, p.error,
-            p.md_bold, p.md_italic, p.md_strike, p.md_code,
+            p.md_bold, p.md_italic, p.md_strike, p.md_code, p.link,
             p.find_match, p.find_current,
         ];
         for r in roles {
@@ -673,6 +690,9 @@ mod tests {
   fg = "white"
   bg = "dark-gray"
 
+  [link]
+  fg = "light-blue"
+
   [find_match]
   fg = "black"
   bg = "light-cyan"
@@ -692,7 +712,7 @@ mod tests {
     #[test]
     fn missing_role_is_an_error() {
         let toml = r#"
-# Only two of the 19 required roles are present; the rest must be errors.
+# Only two of the 20 required roles are present; the rest must be errors.
 [label]
 fg = "gray"
 

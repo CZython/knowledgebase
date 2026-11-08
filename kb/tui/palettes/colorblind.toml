@@ -65,6 +65,10 @@ strikethrough = true       # ~~strikethrough~~ in the read pane
 fg = "white"               # `code` in the read pane
 bg = "dark-gray"           # the "code box" — makes code read as code, not prose
 
+[link]
+fg       = "yellow"
+underline = true           # spliced links — unboxed; the underline doubles the "link" cue
+
 # Reader find (the `f` key in Read mode). Cyan (matches) vs magenta
 # (the current/selected hit) — both distinct from the red/green families
 # and from each other in hue, so a hit list stays scannable under CVD.

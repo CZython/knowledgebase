@@ -287,6 +287,10 @@ pub struct LinksEntry {
     pub context: String,
     /// The written target (the raw text as the user typed it).
     pub target: String,
+    /// The link **as written** in the line (the full `col..end` span, e.g.
+    /// `[[target]]`, `[label](target)`, `<url>`) — Dead / Ambiguous links
+    /// paint this verbatim, styled as normal body text.
+    pub raw_text: String,
     /// The optional display text (`[ label ]( target )` form). `None` for the
     /// `[[X]]`, `[ X ]`, `< url>` forms.
     pub label: Option<String>,
@@ -306,6 +310,49 @@ pub struct LinksEntry {
     /// The resolved `abs_path` the `Enter` key will navigate to (only set
     /// for a *unique* hit; `None` otherwise).
     pub abs_path: Option<String>,
+}
+
+impl LinksEntry {
+    /// Build a `LinksEntry` from an [`crate::AnnotatedLink`] (the shared
+    /// annotation in `main`). Used by every constructor that paints links
+    /// — `open_links` (the picker's own list) AND the four `ReadState`
+    /// constructor sites (so the Read view carries the *exact* same entries
+    /// the picker sees; both derive from the same `annotated_links` output).
+    /// Keeping the field mapping in one place means the two views cannot
+    /// drift out of sync if `AnnotatedLink` gains a field.
+    pub fn from_annotated(al: crate::AnnotatedLink) -> Self {
+        Self {
+            line: al.line,
+            col: al.col,
+            end: al.end,
+            context: al.context,
+            target: al.target,
+            raw_text: al.raw_text,
+            label: al.label,
+            section: al.section,
+            kind: al.kind,
+            resolved: al.resolved_id.as_ref().map(|(t, s)| format!("{t}:{s}")),
+            candidates: al.candidates,
+            abs_path: al.resolves_to,
+        }
+    }
+}
+
+/// Annotate a page's *body* by running it through `annotated_links` against
+/// the full corpus (loaded on demand — the TUI does not cache the corpus).
+/// Returns `Vec<LinksEntry>`, in document order, ready to splice/style.
+/// This is the single source of `ReadState.links`; `open_links` re-uses the
+/// same annotation for the picker. A corpus load failure yields an empty
+/// list (every link would be unresolved) rather than aborting the Read open
+/// — a degraded link view is still a usable read.
+pub fn links_for_body(db: &kb_db::Db, body: &str) -> Vec<LinksEntry> {
+    match crate::load_corpus(db) {
+        Ok(corpus) => crate::annotated_links(body, &corpus)
+            .into_iter()
+            .map(LinksEntry::from_annotated)
+            .collect(),
+        Err(_) => Vec::new(),
+    }
 }
 
 /// One row in the **Link-candidate picker** (the sub-state of
@@ -457,6 +504,16 @@ pub struct ReadState {
     /// `App`) so find can't outlive the page it's searching — opening a
     /// different page clears it via `open_read`/`open_in_editor`.
     pub find: Option<FindState>,
+    /// The annotated links of this body's *current* text (resolved, dead,
+    /// and ambiguous alike). Computed once at open time from
+    /// `annotated_links(body, &corpus)` and kept on `ReadState` so the
+    /// Read view can splice + style links to *exactly* what the Links view
+    /// paints (the body text is identical in both; only the highlight
+    /// differs). The scroll / find / roll-up math operate on the
+    /// spliced body so every measured byte offset matches what is on
+    /// screen. `LinksState` builds its own copy of the same annotation from
+    /// the same source body, so the two views agree to the byte.
+    pub links: Vec<LinksEntry>,
 }
 
 /// The memoized geometry of the body currently open in Read mode: the
@@ -1078,8 +1135,14 @@ impl App {
     pub fn scroll_body(&mut self, delta: isize) {
         // Take the current body + scroll out of the borrow (we need `&mut self`
         // for the roll-up, so we can't hold a borrow simultaneously).
+        // The roll-up is measured on the *spliced* body (the text the user
+        // sees) — the same splice `draw_read` paints — so the scroll clamp
+        // lands on rendered rows the user actually perceives.
         let (body, cur) = match &self.mode {
-            Mode::Read(r) => (r.body.clone(), r.scroll_top),
+            Mode::Read(r) => {
+                let body = crate::tui::render::splice_body(&r.body, &r.links).join("\n");
+                (body, r.scroll_top)
+            }
             _ => return,
         };
         self.ensure_body_rollup(&body);
@@ -1103,9 +1166,12 @@ impl App {
         // plain max via the roll-up (which needs `&mut self`), then write the
         // target. Two passes over `self` are required by the borrow checker,
         // so we copy what we need into locals and do the roll-up once.
+        // Measure on the *spliced* body (the text the user sees) so the
+        // bottom target matches what the render pass paints — same splice
+        // as `draw_read` (the user can scroll to the very last visible row).
         let (body, center_max) = match &self.mode {
             Mode::Read(rs) => (
-                rs.body.clone(),
+                crate::tui::render::splice_body(&rs.body, &rs.links).join("\n"),
                 rs.find
                     .as_ref()
                     .and_then(|fs| fs.center.as_ref())
@@ -1237,10 +1303,14 @@ impl App {
     pub fn find_center_scroll(&mut self) {
         // Read the body + needle up front (immutable), so the roll-up and
         // center compute don't hold a borrow across the `&mut self` writes.
+        // The search runs over the *spliced* body (the text the user sees)
+        // — the same splice `draw_read` paints — so a find hit on a link's
+        // written reference (say, a dead link's `[[target]]`) lands on the
+        // *display* text ("target"), which is the user's intent.
         let (body, needle, cursor, cur_top) = match &self.mode {
             Mode::Read(r) => match &r.find {
                 Some(fs) => (
-                    r.body.clone(),
+                    crate::tui::render::splice_body(&r.body, &r.links).join("\n"),
                     fs.needle.clone(),
                     fs.cursor,
                     r.scroll_top,
@@ -1365,33 +1435,26 @@ impl App {
             .as_ref()
             .and_then(|fs| fs.matches.get(fs.cursor).copied());
 
-        let corpus = load_corpus(&self.db)?;
-        let body: String = self
-            .db
-            .conn
-            .query_row(
-                "SELECT COALESCE(body, '') FROM pages WHERE abs_path = ?1",
-                [abs_path.as_str()],
-                |r| r.get(0),
-            )
-            .map_err(|e| (format!("body lookup for {abs_path}: {e}"), EXIT_ERR))?;
-         let annotated = crate::annotated_links(&body, &corpus);
-         let entries: Vec<LinksEntry> = annotated
-             .into_iter()
-             .map(|al| LinksEntry {
-                 line: al.line,
-                 col: al.col,
-                 end: al.end,
-                 context: al.context,
-                target: al.target,
-                label: al.label,
-                section: al.section,
-                kind: al.kind,
-                resolved: al.resolved_id.as_ref().map(|(t, s)| format!("{t}:{s}")),
-                candidates: al.candidates,
-                abs_path: al.resolves_to,
-            })
-            .collect();
+         let corpus = load_corpus(&self.db)?;
+         let body: String = self
+             .db
+             .conn
+             .query_row(
+                 "SELECT COALESCE(body, '') FROM pages WHERE abs_path = ?1",
+                 [abs_path.as_str()],
+                 |r| r.get(0),
+             )
+             .map_err(|e| (format!("body lookup for {abs_path}: {e}"), EXIT_ERR))?;
+          // Same annotation the Read view carries (`ReadState.links`), so the
+          // picker and the Read render agree to the byte. `corpus` is loaded
+          // explicitly here (a corpus *load* failure is an error for the
+          // picker — there's no page to list links for), not via the
+          // degrade-to-empty `links_for_body` helper.
+          let annotated = crate::annotated_links(&body, &corpus);
+          let entries: Vec<LinksEntry> = annotated
+              .into_iter()
+              .map(LinksEntry::from_annotated)
+              .collect();
 
         // Nearest-neighbor selector: when an anchor (the find hit) is
         // supplied, the picker's cursor points at the entry closest to it
@@ -1494,6 +1557,7 @@ impl App {
         // picker is done).
         let incoming = std::mem::take(&mut self.links_return);
         self.read_return = incoming;
+        let links = links_for_body(&self.db, &body);
         let new_rs = ReadState {
             row_idx,
             id,
@@ -1503,6 +1567,7 @@ impl App {
             abs_path: abs_path.to_string(),
             fm,
             find: None,
+            links,
         };
         self.mode = Mode::Read(new_rs);
         self.set_success(format!("opened linked page {abs_path} — Esc back to the link you followed"));
@@ -1773,6 +1838,7 @@ impl App {
             .iter()
             .position(|r| r.abs_path == row.abs_path)
             .unwrap_or(0);
+        let links = links_for_body(&self.db, &body);
         let rs = ReadState {
             row_idx,
             id,
@@ -1782,6 +1848,7 @@ impl App {
             abs_path: row.abs_path,
             fm,
             find: None,
+            links,
         };
         self.mode = Mode::Read(rs);
         Ok(())
@@ -3251,6 +3318,7 @@ impl App {
         self.search_return = Some(search);
         let (body, outline, fm) = load_body(&self.db, &abs_path)?;
         let row_idx = self.rows.iter().position(|r| r.abs_path == abs_path).unwrap_or(0);
+        let links = links_for_body(&self.db, &body);
         self.mode = Mode::Read(ReadState {
             row_idx,
             id,
@@ -3260,6 +3328,7 @@ impl App {
             abs_path: abs_path.clone(),
             fm,
             find: None,
+            links,
         });
         self.set_info("open page — ↑↓ scroll · Esc back to search");
         Ok(())
@@ -7155,6 +7224,7 @@ mod tests {
             abs_path: "/stale.md".into(),
             fm: FmMeta::default(),
             find: None,
+            links: Vec::new(),
         });
         app.open_links().unwrap();
         let ls = match &app.mode {

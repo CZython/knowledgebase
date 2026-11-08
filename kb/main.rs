@@ -1130,6 +1130,11 @@ pub struct AnnotatedLink {
     pub context: String,
     /// The raw written target (per the form it was written as).
     pub target: String,
+    /// The link **as written** in the line — `line[col..end]` (the full
+    /// reference span: `[[target]]`, `[label](target)`, `<url>`). Used by
+    /// the TUI to paint Dead / Ambiguous links exactly as the user typed
+    /// them (normal text, no styling change).
+    pub raw_text: String,
     /// The classification of the target (decides how it resolves + renders).
     pub kind: links::LinkKind,
     /// Optional display text (the inline label).
@@ -1160,9 +1165,8 @@ pub struct AnnotatedLink {
 pub fn annotated_links(body: &str, pages: &[resolver::Page]) -> Vec<AnnotatedLink> {
     let mut out: Vec<AnnotatedLink> = Vec::new();
     for (li, line) in body.lines().enumerate() {
-        let context = line.trim().to_string();
         for raw in links::detect_refs(line) {
-            push_annotated(&mut out, li, raw.start, raw.end, &context, &raw, pages);
+            push_annotated(&mut out, li, line, raw.start, raw.end, &raw, pages);
         }
     }
     out
@@ -1176,9 +1180,9 @@ pub fn annotated_links(body: &str, pages: &[resolver::Page]) -> Vec<AnnotatedLin
 fn push_annotated(
     out: &mut Vec<AnnotatedLink>,
     line: usize,
+    line_text: &str,
     col: usize,
     end: usize,
-    context: &str,
     raw: &links::RawLink,
     pages: &[resolver::Page],
 ) {
@@ -1187,8 +1191,9 @@ fn push_annotated(
         line,
         col,
         end,
-        context: context.to_string(),
+        context: line_text.trim().to_string(),
         target: cls.target.clone(),
+        raw_text: line_text[col..end].to_string(),
         kind: cls.kind,
         label: cls.label.clone(),
         section: cls.section.clone(),
