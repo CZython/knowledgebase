@@ -16,13 +16,13 @@ Gate: `bash gate.sh` (7 stages, must stay green). Git repo:
 |---|------|-------|
 | T1 | `kb links`: default = annotated list; `--dedup` = old edge-set+backlinks view | **done** (shipped) |
 | T2 | TUI links view rework: find-style single-link focus + right-pane target info | **done** (shipped) |
-| T3 | TUI Reader: open at a target body line (so `#section` links land mid-page) | pending |
+| T3 | TUI Reader: open at a target body line (so `#section` links land mid-page) | **done** (gate green) |
 | T4 | `kb toc`: per-section line/char counts (section total + body-only) | **done** (gate green) |
 | T5 | Indexer: switch `extract_links` → `detect_refs` + `classify_target` (v2 grammar) | **done** (gate green) |
 | T6 | All edit pathways: auto-reindex the single page after a successful write | **done** (gate green) |
 | T7 | `section_lookup(body, ref) → Result<Option<usize>, SectionError>` — line of section heading | **done** (gate green) |
 | T8 | Wire the section lookup into the resolver: page resolves but `#section` missing → **ambiguous** | **done** (gate green) |
-| T9 | Wire the section lookup into the TUI reader: section links open / recenter at the heading line | pending |
+| T9 | Wire the section lookup into the TUI reader: section links open / recenter at the heading line | **done** (gate green) |
 
 ## T1 — `kb links` default flip
 
@@ -391,6 +391,42 @@ lookup on top):**
 
 **Blocked on:** T7 (`section_lookup`) and T8 (resolver knows the
 section is missing).
+
+**Implemented (decision — recenter is a `links_return` mutation, not a
+`Read` open — the page is already open).** Two pieces. **T3's piece**
+(open a *new* page centered on a section): `open_linked`
+(`kb/tui/mod.rs:1547`) gained a `section: Option<&str>` param; it
+computes `section_lookup_line(&body, &sec)` (T7's pure fn on the
+target page's body — no DB), splices the target body with
+`splice_body` (the same body `draw_read` will paint → the rollup's line
+indices are 1:1 with the rendered rows), and sets
+`scroll_top = first_row_of[line].min(max_top)`. `LinkCandOption` gained
+a `section` field, threaded through both candidate-list call sites —
+so T8's demoted `#section`-missing links (1-element `Candidates`) open
+at the top with a hint rather than dead-ending. **T9's piece** (a
+`[[#sec]]` self-ref — `LinkKind::Current`, which opens *nothing* new):
+`App::recenter_return_to(section)` (`kb/tui/mod.rs:1611`) recenters the
+*picked-from* source Read parked in `self.links_return`: it resolves the
+heading line on the source body (raw-body index is valid because
+`splice_body` never inserts/removes lines), `ensure_body_rollup`'s the
+spliced source body, and sets
+`scroll_top = first_row_of[line].saturating_sub(center).min(max_top)`
+where `center = (pane_h - 1) / 2` — pane-center scroll, no
+`find_padding` (the user is already *in* the page, so a plain pan lands
+the heading mid-viewport). `links_open_selected` calls it on
+`LinkKind::Current`, then `close_links()` pops back to the recentered
+Read — the Enter key that used to be a dead end ("this page's section —
+nothing to open") now jumps in-page. Status bar: success `→ § <sec> —
+recentered the source page (row N)`; miss `! section '<sec>' not found —
+left where you were` (scroll unchanged — the user is mid-page, and a
+no-op is less disruptive than scroll-to-top). The now-unreachable
+`Current` arm in the dead-link `kind_note` match was removed. 2 new
+tests: `open_current_self_link_recenters_parked_read` (30-line body +
+`## intro` heading → `scroll_top` = (31 logical line) - (11 center) =
+20) and `open_current_self_link_section_not_found_keeps_scroll`
+(`[ # ghost ]` → the user's prior `scroll_body(1)` position is
+preserved + the `not found` hint is set). Gate 7/7, no warnings, full
+`kb-user` suite green (197 unit + integration suites).
 
 **After all T5–T9:** CHANGELOG `[Unreleased]`, `PLAN.md` §12 milestone
 row + §13x results, `DESIGN-links-rewire.md` status.

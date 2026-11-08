@@ -1608,6 +1608,79 @@ impl App {
         Ok(())
     }
 
+    /// T9 — recenter a *parked* source Read (in `links_return`) on a
+    /// `#section` target (a `Current`-kind link). This is the in-page
+    /// equivalent of `open_linked`: instead of navigating to a *new* page,
+    /// we scroll the *existing* source Read so the section's heading
+    /// appears at the vertical center of the body pane. The math is
+    /// `center = (pane_h - 1) / 2`, `target = row.saturating_sub(center)`
+    /// — the same centering the find path uses, minus the padding trick
+    /// (the user is already *in* the page, so a plain pane scroll is
+    /// enough).
+    ///
+    /// On success the status bar shows `→ § <section>`; when the heading
+    /// is not found (T8's ambiguous / missing / case-variant case) we
+    /// keep the current scroll and show `! section '...' not found`.
+    ///
+    /// This method MUST be called with `links_return` already set
+    /// (the picker parked the source Read there); the flat-list
+    /// restoration is the caller's responsibility (typically
+    /// `close_links`), so the user can `Esc` back to the same Read they
+    /// came from without re-opening it.
+    pub fn recenter_return_to(&mut self, section: Option<&str>) {
+        let Some(sec_str) = section.map(str::to_string) else {
+            self.set_info("no section on the link — nothing to recenter");
+            return;
+        };
+        // Read the parked source Read (the picker parked it there on open).
+        // We don't mutate `self.mode` here — the picker is still in control
+        // (the caller will `close_links` to pop back to this Read).
+        let (body, links) = match &self.links_return {
+            Some(rs) => (rs.body.clone(), rs.links.clone()),
+            None => {
+                self.set_info(format!(
+                    "! section '{sec_str}' not found — no source page parked"
+                ));
+                return;
+            }
+        };
+        // `section_lookup_line` (T7) resolves the heading's 0-based logical
+        // line on the *raw* body; `splice_body` is a strict 1:1 line remap
+        // (only rewrites link text within existing lines — never inserts or
+        // removes lines, per T8's invariant), so that line index is a valid
+        // key into the spliced rollup's `first_row_of`. The rollup is
+        // refreshed on the spliced body (the same body draw_read will paint)
+        // so the conversion is exact.
+        let line = kb_core::section::section_lookup_line(&body, &sec_str);
+        let Some(heading_line) = line else {
+            self.set_info(format!("! section '{sec_str}' not found — left where you were"));
+            return;
+        };
+        let spliced = crate::tui::render::splice_body(&body, &links).join("\n");
+        self.ensure_body_rollup(&spliced);
+        let row = self
+            .body_rollup
+            .first_row_of
+            .get(heading_line)
+            .copied()
+            .unwrap_or(0)
+            .min(self.body_rollup.max_top());
+        // Center the heading on the body pane: put it at the pane's
+        // mid-row (so the heading lands at the vertical center of the
+        // viewport). `saturating_sub` handles the "heading is in the
+        // upper half" case (`row < center → target = 0`); the `.min(max_top)`
+        // keeps the target within the unpadded body (the standard
+        // `scroll_body` clamp — no `find_padding`-style padding).
+        let center = self.body_pane_height.saturating_sub(1) / 2;
+        let target = row.saturating_sub(center).min(self.body_rollup.max_top());
+        if let Some(rs) = self.links_return.as_mut() {
+            rs.scroll_top = target;
+        }
+        self.set_success(format!(
+            "→ § {sec_str} — recentered the source page (row {target})"
+        ));
+    }
+
     /// Enter-key action in the Link-picker: read the *selected* entry and
     /// either open it (unique), open the **inline candidate picker** for an
     /// ambiguous entry (the M8.5 sub-state), or no-op for an unresolved
@@ -1715,11 +1788,19 @@ impl App {
             ));
             return Ok(());
         }
-        // Unresolved — dead link (or an informational External / Current
-        // ref: those have no page to open, so there is nothing to navigate to).
+        // T9 — a `Current`-kind link (a self section reference, e.g.
+        // `[[#intro]]`): recenter the *source* Read on the named section,
+        // then pop back to it (`close_links` restores the parked Read).
+        // Without this, the old behavior was a dead-end "nothing to open".
+        if entry.kind == kb_core::links::LinkKind::Current {
+            self.recenter_return_to(entry.section.as_deref());
+            self.close_links();
+            return Ok(());
+        }
+        // Unresolved — dead link (or an informational External ref: those
+        // have no page to open, so there is nothing to navigate to).
         let kind_note = match entry.kind {
             kb_core::links::LinkKind::External => " (external URI — informational)",
-            kb_core::links::LinkKind::Current => " (this page's section — nothing to open)",
             _ => " (no matching page)",
         };
         self.set_info(format!(
@@ -7993,6 +8074,124 @@ mod tests {
         assert_eq!(
             rs.scroll_top, 0,
             "stale section → top of page (best-effort hint, not a contract)"
+        );
+    }
+
+    // ---- T9: in-page recenter on a `#section` self-reference -----------
+
+    /// `links_open_selected` on a *current-page* (`[ # … ]`) link whose
+    /// section resolves: the source Read (parked in `links_return`) is
+    /// RECENTRED on the heading's row and the App pops back to it —
+    /// the user lands mid-page, not at the top.
+    #[test]
+    fn open_current_self_link_recenters_parked_read() {
+        let db = Db::open_in_memory_test().unwrap();
+        db.migrate().unwrap();
+        // Body: 30 filler lines, then a `# intro` heading at line 30.
+        // The `links_open_selected` flow will recenter the source Read so
+        // the `# intro` heading lands at the body pane's center row
+        // (pane_h defaults to 24; center = 11; target = 30 - 11 = 19).
+        let mut body = String::new();
+        for i in 0..30 {
+            body.push_str(&format!("line {i}\n"));
+        }
+        body.push_str("## intro\n");
+        body.push_str("content under heading\n");
+        // Add one self-reference link `[ # intro ]` on a leading line.
+        // (Insert at line 0 so it's the *first* link entry.)
+        let body = format!("[ # intro ] self-ref\n{body}");
+        insert_page(&db, "selfy", "Selfy", &body);
+        let mut app = App::new(db).unwrap();
+        app.selected = 0;
+        app.open_read().unwrap();
+        app.open_links().unwrap();
+        let ls = match &app.mode {
+            Mode::Links(l) => l,
+            _ => panic!("expected Links"),
+        };
+        assert_eq!(ls.links.len(), 1, "one Current link on the page");
+        let e = &ls.links[0];
+        assert_eq!(
+            e.kind,
+            kb_core::links::LinkKind::Current,
+            "a `[ # section ]` is kind Current"
+        );
+        assert_eq!(e.section.as_deref(), Some("intro"));
+        // Before activation: the parked Read is at scroll_top = 0.
+        let rs_top_before = app.links_return.as_ref().unwrap().scroll_top;
+        assert_eq!(rs_top_before, 0, "fresh open starts at top");
+        // Enter on the Current entry: recenter + pop back to Read.
+        app.links_open_selected().unwrap();
+        let rs = match &app.mode {
+            Mode::Read(r) => r,
+            _ => panic!("expected Read (popped back from the Links picker)"),
+        };
+        // The heading is at logical line 31 (after the `[ # intro ]` line at
+        // line 0); all lines are short (< 80 chars), so first_row_of[31]
+        // == 31. With pane_h = 24 (App::new's default) and center = 11,
+        // target = 31 - 11 = 20.
+        let expected = 20.min(rs.body.lines().count().saturating_sub(2));
+        assert_eq!(
+            rs.scroll_top, expected,
+            "Read is recentered at the `# intro` heading (logical line → \
+             rendered row → pane-center clamp), got {}",
+            rs.scroll_top
+        );
+        // Status hints should be present and mention the section name.
+        assert!(
+            app.status.text.contains("intro"),
+            "status bar should surface the `→ § intro` hint, got {:?}",
+            app.status
+        );
+    }
+
+    /// Same flow but with a section that **does not exist**: the source Read
+    /// stays untouched (`scroll_top` is unchanged) and the status bar
+    /// carries the "not found" hint. The App still pops back to the Read
+    /// (the user's `Esc`-back expectation holds — recenter is a no-op,
+    /// not an error).
+    #[test]
+    fn open_current_self_link_section_not_found_keeps_scroll() {
+        let db = Db::open_in_memory_test().unwrap();
+        db.migrate().unwrap();
+        // Body: 3 filler lines + heading `## real`. The self-ref
+        // `[ # ghost ]` points at a section that does NOT exist.
+        let body = String::from("[ # ghost ] self-ref\nlead1\nlead2\n## real\nintro body\n");
+        insert_page(&db, "selfy2", "Selfy 2", &body);
+        let mut app = App::new(db).unwrap();
+        app.selected = 0;
+        // Open Read, then scroll somewhere non-trivial so we can assert
+        // the recenter is a *no-op* (scroll stays where the user put it).
+        app.open_read().unwrap();
+        app.scroll_body(1);
+        let scroll_before = match &app.mode {
+            Mode::Read(r) => r.scroll_top,
+            _ => panic!(),
+        };
+        assert_ne!(scroll_before, 0, "sanity: the Read is scrolled before we open the picker");
+        app.open_links().unwrap();
+        let ls = match &app.mode {
+            Mode::Links(l) => l,
+            _ => panic!("expected Links"),
+        };
+        assert_eq!(
+            ls.links[0].section.as_deref(),
+            Some("ghost"),
+            "missing `ghost` section on the Current link"
+        );
+        app.links_open_selected().unwrap();
+        let rs = match &app.mode {
+            Mode::Read(r) => r,
+            _ => panic!("expected Read"),
+        };
+        assert_eq!(
+            rs.scroll_top, scroll_before,
+            "missing section → scroll position unchanged (the user is already in the page)"
+        );
+        assert!(
+            app.status.text.contains("not found"),
+            "status bar surfaces the `not found` hint, got {:?}",
+            app.status
         );
     }
 }
