@@ -3133,6 +3133,7 @@ mod tests {
         LinkCandOption {
             abs_path: abs_path.to_string(),
             display: display.to_string(),
+            section: None,
         }
     }
 

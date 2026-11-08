@@ -371,6 +371,12 @@ pub struct LinkCandOption {
     /// corpus snapshot has no such page (should not happen — the candidates
     /// were resolved against this corpus — but the picker stays total).
     pub display: String,
+    /// The `#section` the link carried (verbatim, or `None`). Carried so a
+    /// disambiguated open still lands at the section heading (T3) — the
+    /// candidate is one *page* of the ambiguous set, but the `#section` is a
+    /// property of the *link*, shared by every candidate. `open_linked`
+    /// consumes this to set the reader's initial scroll position.
+    pub section: Option<String>,
 }
 
 /// The **Link-candidate picker** sub-state (M8.5): the inline disambiguation
@@ -1538,7 +1544,7 @@ impl App {
     /// picker itself was opened *from* the incoming Read, so its
     /// `links_return` is set to the *same* state and the two return stacks
     /// are consistent after the round trip.
-    pub fn open_linked(&mut self, abs_path: &str) -> KbResult<()> {
+    pub fn open_linked(&mut self, abs_path: &str, section: Option<&str>) -> KbResult<()> {
         let (body, outline, fm) = load_body(&self.db, abs_path)?;
         // row_idx / id are display only — the *identity* is the path.
         let id = self
@@ -1558,12 +1564,40 @@ impl App {
         let incoming = std::mem::take(&mut self.links_return);
         self.read_return = incoming;
         let links = links_for_body(&self.db, &body);
+        // T3 — when the link carried a `#section`, open *at* that section's
+        // heading (rendered row) rather than at the top. The section lookup
+        // runs on the **raw** body (`section_lookup_line` resolves the
+        // heading's logical line); `splice_body` is a strict 1:1 line remap
+        // (it only rewrites link *text within* existing lines, never inserts
+        // or removes lines), so that logical line is a valid index into the
+        // spliced rollup's `first_row_of` (the line → first-rendered-row
+        // table the reader paints). `ensure_body_rollup` is called on the
+        // **spliced** body (the same body the render pass will use) so the
+        // rollup is already up-to-date when the reader first paints. A
+        // missing / ambiguous section falls back to row 0 — the T8 resolver
+        // already surfaced those as the "needs disambiguation" candidate set,
+        // so reaching `open_linked` with a section is a best-effort hint.
+        let scroll_top = match section {
+            Some(sec) => {
+                let spliced = crate::tui::render::splice_body(&body, &links).join("\n");
+                let line = kb_core::section::section_lookup_line(&body, sec).unwrap_or(0);
+                self.ensure_body_rollup(&spliced);
+                let row = self
+                    .body_rollup
+                    .first_row_of
+                    .get(line)
+                    .copied()
+                    .unwrap_or(0);
+                row.min(self.body_rollup.max_top())
+            }
+            None => 0, // no `#section` — top of the page (existing behavior)
+        };
         let new_rs = ReadState {
             row_idx,
             id,
             body,
             outline,
-            scroll_top: 0,
+            scroll_top,
             abs_path: abs_path.to_string(),
             fm,
             find: None,
@@ -1616,7 +1650,7 @@ impl App {
                 // the *incoming* Read via `read_return`, not back into the
                 // (now-orphaned) picker state.
                 let _ = (overlay_cursor, overlay_len);
-                self.open_linked(&opt.abs_path)?;
+                self.open_linked(&opt.abs_path, opt.section.as_deref())?;
                 return Ok(());
             }
         }
@@ -1636,7 +1670,7 @@ impl App {
         // Unique resolution — open it (the existing `open_linked` pop-back
         // handles the `read_return` stack).
         if let Some(abs) = entry.abs_path.clone() {
-            return self.open_linked(&abs);
+            return self.open_linked(&abs, entry.section.as_deref());
         }
         // Ambiguous — open the INLINE candidate picker (the M8.5 sub-state).
         // The user presses `↑`/`↓` to walk the candidates, `Enter` to open
@@ -1665,6 +1699,7 @@ impl App {
                             LinkCandOption {
                                 abs_path: abs.clone(),
                                 display,
+                                section: entry.section.clone(),
                             }
                         })
                         .collect(),
@@ -7801,8 +7836,8 @@ mod tests {
     /// reaches `handle_links` by observing that pressing `Esc` from the
     /// picker goes through `close_links` (pops to Read), not through
     /// `handle_read`'s Esc arm (which would also pop to Read via
-    /// `close_read` — so we need a discriminator: pressing `j`/`k` from
-    /// the picker moves the *picker's* cursor, not the body's scroll).
+    /// `close_read` — so we need a discriminator: pressing `j`/`k` from the
+    /// picker moves the *picker's* cursor, not the body's scroll).
     ///
     /// This test pins the observable state transition: enter the picker,
     /// call `links_open_selected` on entry 0, then verify the mode is Read.
@@ -7841,4 +7876,123 @@ mod tests {
         assert_eq!(rs.scroll_top, 0, "Read scroll unchanged by the picker excursion");
     }
 
+    // ---- T3: open-at-line (the `#section` hint) -------------------------
+
+    /// `links_open_selected` on a *unique* link that carries a `#section`:
+    /// the reader opens the target page's body AND scrolls so that the
+    /// section's heading line is the **first row** of the viewport
+    /// (`scroll_top` = the rendered row the heading lands on, computed via
+    /// `section_lookup_line` on the raw body + `first_row_of` on the
+    /// spliced body — the render pass uses the spliced body's roll-up, so
+    /// the initial scroll must be against the same measurement to not be
+    /// re-clamped on the first frame).
+    #[test]
+    fn open_linked_unique_with_section_opens_at_heading() {
+        let db = Db::open_in_memory_test().unwrap();
+        db.migrate().unwrap();
+        // Source: a wikilink to `b#intro` (unique page + section hint).
+        insert_page(
+            &db,
+            "a",
+            "A",
+            "see [[b#intro]] for the follow-up\n",
+        );
+        // Target: a body with enough leading content that the `intro`
+        // heading is not on line 0 — so that landing at the heading is a
+        // non-trivial scroll (not "top of page").
+        // Layout (0-based):
+        //   0: lead1
+        //   1: lead2
+        //   2: lead3
+        //   3: ## intro            ← heading (T3 should land here)
+        //   4: intro body...
+        let body_b = String::from("lead1\nlead2\nlead3\n## intro\nintro body\n");
+        db.conn
+            .execute(
+                "INSERT INTO pages (abs_path, id, type, title, root, rel_path, search_required_phrase, body, frontmatter_text, mtime_ns, content_hash)
+                 VALUES ('/root/b.md', 'note:b', 'note', 'B', '/root', 'b.md', NULL, ?1, '---\ntype: note\n---\n', 0, 'x')",
+                rusqlite::params![body_b],
+            )
+            .unwrap();
+        let mut app = App::new(db).unwrap();
+        app.selected = 0;
+        app.open_read().unwrap();
+        app.open_links().unwrap();
+        // The link is unique with `section = Some("intro")`.
+        let ls = match &app.mode {
+            Mode::Links(l) => l,
+            _ => panic!("expected Links"),
+        };
+        assert_eq!(ls.links.len(), 1, "one wikilink on page A");
+        assert!(
+            ls.links[0].abs_path.is_some(),
+            "unique link → abs_path set"
+        );
+        assert_eq!(
+            ls.links[0].section.as_deref(),
+            Some("intro"),
+            "#section split off the wikilink target"
+        );
+        app.links_open_selected().unwrap();
+        let rs = match &app.mode {
+            Mode::Read(r) => r,
+            _ => panic!("expected Read on the linked page"),
+        };
+        assert_eq!(rs.abs_path, "/root/b.md", "target page open");
+        // `scroll_top` must be the rendered row of the `## intro` heading.
+        // All lines here are short (< 80 chars), so each logical line is
+        // ONE rendered row: `first_row_of[3] == 3`. The heading is line
+        // index 3 (0-based); the reader should show it at the top.
+        assert_eq!(
+            rs.scroll_top, 3,
+            "scroll lands at the `## intro` heading (logical line 3 → rendered row 3); got {}",
+            rs.scroll_top
+        );
+    }
+
+    /// A *stale* `#section` (the chosen page does not contain the heading):
+    /// the reader still opens the page (no crash, no panic) and scrolls to
+    /// the **top** (`scroll_top == 0`) — the section hint is best-effort.
+    /// This is reached via the ambiguous-link path: `[[ambig#ghost]]` where
+    /// two pages share the slug `ambig` and neither contains a `ghost`
+    /// heading. T8 does NOT demote ambiguous links (only unique ones) — so
+    /// the candidate picker opens as usual, the user picks one, and
+    /// `open_linked` (with `section = Some("ghost")`) falls back to the
+    /// top. Reaches the `open_linked` path directly (not the T8 demotion).
+    #[test]
+    fn open_linked_ambiguous_with_stale_section_falls_back_to_top() {
+        let db = Db::open_in_memory_test().unwrap();
+        db.migrate().unwrap();
+        // Two pages share the slug `ambig` → `[[ambig#ghost]]` is ambiguous
+        // by slug, then sectioned. Neither page has a `ghost` heading.
+        insert_page(&db, "ambig", "Ambig", "see [[ambig#ghost]] twice");
+        insert_page(&db, "ambig2", "Ambig", "second\n");
+        let mut app = App::new(db).unwrap();
+        app.selected = 0;
+        app.open_read().unwrap();
+        app.open_links().unwrap();
+        let ls = match &app.mode {
+            Mode::Links(l) => l,
+            _ => panic!("expected Links"),
+        };
+        assert_eq!(ls.links.len(), 1, "one wikilink on page A");
+        assert_eq!(ls.links[0].candidates.len(), 2, "two slug matches → ambiguous");
+        assert_eq!(
+            ls.links[0].section.as_deref(),
+            Some("ghost"),
+            "section carried on the link"
+        );
+        // Open the ambiguous picker (Enter on the flat-list entry).
+        app.links_open_selected().unwrap();
+        // Now in the candidate overlay. Pick a candidate (cursor 0).
+        app.links_open_selected().unwrap();
+        let rs = match &app.mode {
+            Mode::Read(r) => r,
+            _ => panic!("expected Read on the candidate page"),
+        };
+        assert_eq!(
+            rs.scroll_top, 0,
+            "stale section → top of page (best-effort hint, not a contract)"
+        );
+    }
 }
