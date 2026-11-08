@@ -655,6 +655,48 @@ pub fn dedup(links: Vec<Link>) -> Vec<Link> {
     out
 }
 
+/// Extract page-targeting reference *rows* from a body — the v2 scanner
+/// (`detect_refs` + `classify_target`). Used by the M5 indexer to populate
+/// the `links` table (page→page edges).
+///
+/// - `External` URIs and `Current`-page refs are **skipped** (they are not
+///   page→page edges).
+/// - Any trailing `#section` is **stripped** — the `links` table stores the
+///   *page* target; the section is orthogonal (`Doc::resolve` handles it at
+///   query time, not index time).
+/// - Dedupes on `(target, style_str)`; first-occurrence order preserved.
+///
+/// Returns `(target, style)` pairs in document order.
+pub fn extract_ref_rows(body: &str) -> Vec<(String, String)> {
+    let mut out: Vec<(String, String)> = Vec::new();
+    let mut seen: BTreeSet<(String, String)> = BTreeSet::new();
+    for line in body.lines() {
+        for raw in detect_refs(line) {
+            let r = classify_target(&raw);
+            match r.kind {
+                LinkKind::External | LinkKind::Current => continue,
+                LinkKind::Db | LinkKind::Path => {}
+            }
+            // Strip `#section` if present (the target is the page, not the
+            // page+anchor).
+            let t = r.target.trim();
+            let page_part = match t.find('#') {
+                Some(p) => t[..p].trim().to_string(),
+                None => t.to_string(),
+            };
+            if page_part.is_empty() {
+                continue;
+            }
+            let style = r.kind.style_str(&page_part);
+            let key = (page_part, style.to_string());
+            if seen.insert(key.clone()) {
+                out.push(key);
+            }
+        }
+    }
+    out
+}
+
 // =============================================================================
 // Unit tests — pin exec `links` to the spec shape.
 // =============================================================================
@@ -963,5 +1005,76 @@ mod tests {
             let second = cls(s);
             assert_eq!(first, second);
         }
+    }
+
+    // ---- extract_ref_rows (v2 page→page edges for the `links` table) ------
+
+    #[test]
+    fn ref_rows_wikilink_is_page_edge() {
+        let rows = extract_ref_rows("see [[watchmaking guide]] here");
+        assert_eq!(rows, vec![("watchmaking guide".into(), "wikilink".into())]);
+    }
+
+    #[test]
+    fn ref_rows_path_link_is_relative_or_absolute() {
+        let rows = extract_ref_rows("a [notes/a.md] b [x](/home/u/x.md)");
+        // both are Path — style is relative then absolute (document order).
+        assert_eq!(
+            rows,
+            vec![("notes/a.md".into(), "relative".into()),
+                 ("/home/u/x.md".into(), "absolute".into())]
+        );
+    }
+
+    #[test]
+    fn ref_rows_external_and_current_are_skipped() {
+        // External URI: skipped (not a page edge).
+        let rows = extract_ref_rows("paper < https://arxiv.org > here");
+        assert!(rows.is_empty(), "external URIs are not page→page edges");
+        // Current-page ref `[ # sec ]`: skipped (resolves to the page itself).
+        let rows = extract_ref_rows("see [ # Cost / result ] and nothing else");
+        assert!(rows.is_empty(), "current-page refs are not page→page edges");
+    }
+
+    #[test]
+    fn ref_rows_section_anchor_is_stripped() {
+        // `#section` is an orthogonal target-level annotation — the `links`
+        // table stores the *page* target (the section is resolved at query
+        // time, not index time).
+        let rows = extract_ref_rows("see [[watchmaking guide#Cost / result]]");
+        assert_eq!(rows, vec![("watchmaking guide".into(), "wikilink".into())]);
+        let rows = extract_ref_rows("a [notes/a.md#Sec] b");
+        assert_eq!(rows, vec![("notes/a.md".into(), "relative".into())]);
+    }
+
+    #[test]
+    fn ref_rows_dedupes_repeated_edges() {
+        // Two `[[LLM]]` in the body → one row.
+        let rows = extract_ref_rows("see [[LLM]] and also [[LLM]] again");
+        assert_eq!(rows, vec![("LLM".into(), "wikilink".into())]);
+        // `[[a.md]]` + `[a.md]` — both classify as `Path` with style
+        // `relative` in v2 (a path-shaped inner string is a *path* ref; the
+        // form does not override the shape classification here), so the two
+        // edge rows are identical and dedupe into one.
+        let rows = extract_ref_rows("[[a.md]] and [a.md]");
+        assert_eq!(rows, vec![("a.md".into(), "relative".into())]);
+    }
+
+    #[test]
+    fn ref_rows_bare_words_in_prose_are_not_rows() {
+        // Under v2, a bare token like `papers/foo.pdf` (no brackets) is
+        // *prose*, not a reference — only spelled-out link forms are rows.
+        let rows = extract_ref_rows("the paper is at papers/foo.pdf");
+        assert!(rows.is_empty(),
+            "v2 retired bare-token paths: {rows:?}");
+    }
+
+    #[test]
+    fn ref_rows_multiline_is_scanned_per_line() {
+        // `detect_refs` is per-line; a `[[` spanning a newline is not a
+        // wikilink, but a second line's link still extracts.
+        let body = "line one [[not a link\nline two [[real]] here";
+        let rows = extract_ref_rows(body);
+        assert_eq!(rows, vec![("real".into(), "wikilink".into())]);
     }
 }

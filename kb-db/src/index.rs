@@ -26,7 +26,7 @@
 use crate::Db;
 use kb_core::frontmatter;
 use kb_core::identity;
-use kb_core::links::{self, Link, LinkStyle};
+use kb_core::links;
 use kb_core::meta::NoteType;
 use kb_core::tags as kb_tags;
 use rusqlite::{params, Result};
@@ -58,8 +58,12 @@ pub struct PageRecord {
     /// Per-row: the tag strings (raw casing as written, already normalized
     /// by `kb_tags::normalize`).
     pub tag_rows: Vec<String>,
-    /// Per-row: extracted links (deduped).
-    pub link_rows: Vec<(String, LinkStyle)>, // (target, style)
+    /// Per-row: extracted links (deduped). The `style` is the v2 classification
+    /// string (`wikilink` / `relative` / `absolute`) written into the
+    /// `links.style` column (v2 retired `LinkStyle` as a typed enum — the
+    /// indexer now writes the raw `&'static str` from
+    /// `LinkKind::style_str`).
+    pub link_rows: Vec<(String, String)>, // (target, style)
 }
 
 /// The result of indexing one page (used by `IndexOutcome::SkippedNoType`
@@ -215,15 +219,14 @@ pub fn build_page(
 
     let tags = kb_tags::normalize(&fm.tags);
 
-    // Link extraction over the *body* (not frontmatter). `extract_links`
-    // dedupes internally via `links::dedup` (called by the caller for the
-    // DB's PK contract); we dedupe here so `upsert_page`'s
-    // `INSERT ... ON CONFLICT` never fights a duplicate PK.
-    let raw_links = links::extract_links(&fm.body);
-    let link_rows: Vec<(String, LinkStyle)> = links::dedup(raw_links)
-        .into_iter()
-        .map(|l: Link| (l.target, l.style))
-        .collect();
+    // Link extraction over the *body* (not frontmatter). The v2 scanner
+    // (`extract_ref_rows` = `detect_refs` + `classify_target`) recognizes
+    // `[[…]]`, `[ … ]`, `[ label ]( … )`, and `< … >`; bare-token paths are
+    // retired under v2. `External` URIs and `Current`-page refs are skipped
+    // (not page→page edges); trailing `#section` is stripped; the result is
+    // deduped on `(target, style)` so `upsert_page`'s `INSERT ... ON CONFLICT`
+    // never fights a duplicate PK.
+    let link_rows: Vec<(String, String)> = links::extract_ref_rows(&fm.body);
 
     // fs metadata (mtime_ns / content_hash). `std::fs` here, not
     // `fs::symlink_metadata` — the file itself is already loaded above so
@@ -443,7 +446,7 @@ pub fn upsert_page(db: &Db, rec: &PageRecord) -> Result<usize> {
         "INSERT OR IGNORE INTO links (from_path, to_path, style) VALUES (?1, ?2, ?3)",
     )?;
     for (target, style) in &rec.link_rows {
-        ins_link.execute(params![rec.abs_path, target, style.as_str()])?;
+        ins_link.execute(params![rec.abs_path, target, style])?;
     }
     drop(ins_link);
 
@@ -603,7 +606,7 @@ mod tests {
             "tags:\n  - rust\n  - http\n",
             "search_required_phrase:\n  - mTLS\n  - \"token bucket\"\n",
             "---\n",
-            "\n# My Note — H1\n\n[[Some Wiki]]  papers/final.pdf\n",
+            "\n# My Note — H1\n\n[[Some Wiki]] and [papers/final.pdf]\n",
         );
         fs::write(&p, txt).unwrap();
 
@@ -623,17 +626,18 @@ mod tests {
         );
         // language extracted
         assert_eq!(rec.language.as_deref(), Some("en"));
-        // links: one wikilink + one relative path
+        // links (v2): `[[Some Wiki]]` (Db→wikilink) + `[papers/final.pdf]` (Path→relative);
+        // bare-prose paths like `papers/final.pdf` *outside* brackets are retired in v2.
         assert_eq!(rec.link_rows.len(), 2);
         let wikis: Vec<_> = rec
             .link_rows
             .iter()
-            .filter(|(_, s)| *s == LinkStyle::Wikilink)
+            .filter(|(_, s)| *s == "wikilink")
             .collect();
         let rels: Vec<_> = rec
             .link_rows
             .iter()
-            .filter(|(_, s)| *s == LinkStyle::Relative)
+            .filter(|(_, s)| *s == "relative")
             .collect();
         assert_eq!(wikis.len(), 1);
         assert_eq!(rels.len(), 1);

@@ -85,7 +85,8 @@ fn index_derives_all_row_tables_and_fts() {
     let s = Setup::new("derive");
     // A fully-specified note: title (slug source), language, description,
     // 2 tags, 2 search_required_phrase entries (a lone word + a quoted
-    // phrase), body with a wikilink + a relative path ref.
+    // phrase), body with a wikilink + a bare prose path (the latter is a
+    // *prose mention* under the v2 grammar, not a reference).
     write_page(
         &s.root,
         "notes/note.md",
@@ -132,10 +133,14 @@ fn index_derives_all_row_tables_and_fts() {
         "quoted gate entry must be stored unquoted: {gates:?}"
     );
 
-    // 2 link rows: 1 wikilink + 1 relative path.
-    assert_eq!(count(&s.db, "links"), 2);
+    // Link rows under the v2 scanner: only the `[[Transformer (architecture)]]`
+    // wikilink is a page→page edge. The bare prose path `papers/attention.pdf`
+    // is *not* a reference under v2 (v1's bare-token path extraction is
+    // retired; a path link must be spelled-out as `[ … ]` or `[ … ]( … )`), so
+    // it does not produce a row.
+    assert_eq!(count(&s.db, "links"), 1);
     let styles = strings(&s.db, "SELECT style FROM links ORDER BY style");
-    assert_eq!(styles, vec!["relative".to_string(), "wikilink".to_string()]);
+    assert_eq!(styles, vec!["wikilink".to_string()]);
 }
 
 #[test]
