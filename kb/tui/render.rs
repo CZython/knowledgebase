@@ -418,8 +418,16 @@ fn draw_read(f: &mut Frame, app: &App, rs: &ReadState, area: ratatui::layout::Re
             let rows: Vec<ratatui::widgets::ListItem> = rs
                 .outline
                 .iter()
-                .map(|(line, level, title)| {
-                    ratatui::widgets::ListItem::new(outline_line(p, *line, *level as usize, title))
+                .map(|(line, level, title, fl, fc)| {
+                    ratatui::widgets::ListItem::new(outline_line(
+                        p,
+                        *line,
+                        *level as usize,
+                        title,
+                        *fl,
+                        *fc,
+                        outline_area.width as usize - 2,
+                    ))
                 })
                 .collect();
             let outline_widget = RatList::new(rows).block(
@@ -1698,21 +1706,79 @@ fn browse_pane_title(view_len: usize, rows_len: usize, filter: &str) -> String {
     }
 }
 
-/// One **outline row**: a single `Line` (never a wrapping `Paragraph`), so a
-/// heading like `L3  H2 section` stays on one visible line and is never
-/// broken mid-word. The row is indented per heading level; the `L<line>`
-/// anchor carries the jump target and is styled `p.dim` (the title is the
-/// focus, styled `p.label`); an empty title gets the `¶` glyph (the body's
-/// `read_line` convention) in the label role. Pure over the palette + entry,
+/// One **outline row**: a single `Line` of spans (never a wrapping
+/// `Paragraph`), so a heading stays on one visible line and is never broken
+/// mid-word. Layout is *column-aligned* across rows — every column lands in
+/// the same absolute screen column on every row, regardless of how wide the
+/// title is or how many digits the counts have:
+///
+/// | gutter (5) | indent | title (truncated + right-padded) | metric (`>5L >7C`) |
+///
+/// 1. **gutter** — `L<line>` left-aligned into a fixed 5-char field (the
+///    trailing pad keeps the next column put even for `L3` vs `L12` vs `L999`);
+///    styled `p.dim` (carries the jump target).
+/// 2. **indent** — `(level-1)*2` spaces (a separate `p.dim` span, so the
+///    label is pure title text).
+/// 3. **title** — `p.label`, left-aligned, truncated with a trailing `…`
+///    only if it would overlap the metric, then right-padded so the metric
+///    column starts at a fixed offset. An empty title renders as `¶` (the
+///    body's `read_line` convention).
+/// 4. **metric** — `p.dim`; the section's full-span line + char counts (the
+///    same numbers `kb toc` reports), each right-aligned into a fixed 5/7
+///    digit field so `L` and `C` themselves sit in stable columns.
+///
+/// `width` is the content width the row must fit inside (the outline pane
+/// inner width); it fixes the column geometry. Pure over the palette + entry,
 /// one row per heading, in body order.
-fn outline_line(p: &Palette, line: usize, level: usize, title: &str) -> Line<'static> {
-    let indent = "  ".repeat(level.saturating_sub(1));
-    let anchor = Span::styled(format!("{indent}L{line:<4}"), p.dim);
-    if title.is_empty() {
-        Line::from(vec![anchor, Span::styled("¶".to_string(), p.label)])
+fn outline_line(
+    p: &Palette,
+    line: usize,
+    level: usize,
+    title: &str,
+    full_lines: usize,
+    full_chars: usize,
+    width: usize,
+) -> Line<'static> {
+    const GUTTER: usize = 5; // "L" + up to 4 digits, left-aligned
+    const SEP: usize = 2; // two spaces before the metric
+
+    let indent_w = 2 * level.saturating_sub(1);
+
+    // Fixed-width metric suffix (both counts right-aligned into fixed digit
+    // fields, so `L` and `C` sit in the same absolute column on every row).
+    let metric = format!("{:>5}L {:>7}C", full_lines, full_chars);
+    let metric_w = metric.chars().count();
+
+    // Title column = the row width minus everything else. Truncate (with an
+    // ellipsis marker) then right-pad so the metric column is put.
+    let title_col = width
+        .saturating_sub(GUTTER)
+        .saturating_sub(indent_w)
+        .saturating_sub(SEP)
+        .saturating_sub(metric_w);
+
+    let glyphs: Vec<char> = if title.is_empty() {
+        vec!['¶']
     } else {
-        Line::from(vec![anchor, Span::styled(title.to_string(), p.label)])
-    }
+        title.chars().collect()
+    };
+    let display: String = if glyphs.len() <= title_col {
+        glyphs.iter().collect()
+    } else {
+        let mut out: String = glyphs.iter().take(title_col.saturating_sub(1)).collect();
+        if title_col >= 1 {
+            out.push('…');
+        }
+        out
+    };
+    let pad = title_col.saturating_sub(display.chars().count());
+
+    Line::from(vec![
+        Span::styled(format!("L{line:<w$}", w = GUTTER.saturating_sub(1)), p.dim),
+        Span::styled(" ".repeat(indent_w), p.dim),
+        Span::styled(format!("{display}{}", " ".repeat(pad)), p.label),
+        Span::styled(format!("{:SEP$}{metric}", "", SEP = SEP), p.dim),
+    ])
 }
 
 #[cfg(test)]
@@ -2987,29 +3053,63 @@ mod tests {
     }
 
     /// **Outline line contract (the #2 fix)**: each heading row is a *single*
-    /// `Line` (two spans: dim `L<n>` anchor + label title), indented by level,
-    /// and never splits mid-word the way the old wrapping `Paragraph` did
-    /// (`H2 section` → `sub` / `section`). An empty title gets `¶` in the label
-    /// role. This is the visual precondition for M8.2's Enter-to-jump.
+    /// `Line` of four spans (dim `L<n>` gutter + dim indent + label title +
+    /// dim metric suffix), never splits mid-word the way the old wrapping
+    /// `Paragraph` did (`H2 section` → `sub` / `section`). The row is
+    /// **column-aligned**: the gutter, the metric's `L`/`C` units, and the
+    /// metric column start all land in the same absolute column on every
+    /// row, whatever the line number or digit counts an entry carries.
+    /// An empty title gets `¶` in the label role. This is the visual
+    /// precondition for M8.2's Enter-to-jump.
+    ///
+    /// With the fixed geometry (gutter 5, sep 2, metric 16) a width of 50
+    /// leaves 25 (L2) / 21 (L4) / 27 (L1) for the title column.
+    const O_WIDTH: usize = 50;
+    fn col_aligned(l: &Line<'static>) -> usize {
+        l.spans.iter().map(|s| s.content.chars().count()).sum()
+    }
+    /// Expected metric suffix for a given line/char pair: a 2-space separator
+    /// then both counts right-aligned into fixed 5/7 digit fields (the same
+    /// `L`/`C` units at the same absolute column on every row).
+    fn o_suffix(lines: u64, chars: u64) -> String {
+        format!("  {:>5}L {:>7}", lines, chars) + "C"
+    }
     #[test]
     fn outline_line_is_single_line_per_heading() {
         let p = Palette::default_palette();
-        let h2 = outline_line(&p, 3, 2, "H2 section");
-        assert_eq!(h2.spans.len(), 2, "anchor + title, one line");
-        // indent (level-1)*2 spaces + "L" + line padded to 4 wide.
-        assert_eq!(h2.spans[0].content.as_ref(), "  L3   ", "indent(1)=2sp + L3 anchor");
-        assert_eq!(h2.spans[0].style, p.dim, "anchor styled dim");
-        assert_eq!(h2.spans[1].content.as_ref(), "H2 section", "title intact — not wrapped");
-        assert_eq!(h2.spans[1].style, p.label, "title styled as label");
-        // Deeper level -> deeper indent, same shape.
-        let h4 = outline_line(&p, 9, 4, "H4 detail");
-        assert_eq!(h4.spans[0].content.as_ref(), "      L9   ", "indent(3)=6sp");
-        assert_eq!(h4.spans[0].style, p.dim);
+        let flat = |l: &Line<'static>| l.spans.iter().map(|s| s.content.as_ref()).collect::<String>();
+
+        // L2 anchor row: gutter `L3···` (5 wide) + indent (2) + title
+        // (`H2 section` 10g pad-right) + metric suffix — column-aligned.
+        let h2 = outline_line(&p, 3, 2, "H2 section", 6, 120, O_WIDTH);
+        assert_eq!(h2.spans.len(), 4, "gutter + indent + title + metric, one line");
+        assert_eq!(h2.spans[0].content.as_ref(), "L3   ", "gutter L3 left-aligned, 5 wide");
+        assert_eq!(h2.spans[0].style, p.dim, "gutter styled dim");
+        assert_eq!(h2.spans[1].content.as_ref(), "  ", "indent(1)=2sp dim");
+        assert_eq!(h2.spans[1].style, p.dim);
+        assert!(flat(&h2).contains("H2 section"), "title intact — not wrapped");
+        assert_eq!(h2.spans[2].style, p.label, "title styled label");
+        // Metric suffix: right-aligned line/char counts (the same numbers
+        // `kb toc` reports; full span incl. subsections), after a 2-space sep.
+        assert!(flat(&h2).ends_with(o_suffix(6, 120).as_str()), "metric suffix: {}", flat(&h2));
+        assert_eq!(col_aligned(&h2), O_WIDTH, "row spans the pane width exactly");
+
+        // Deeper level -> deeper indent; the metric's `C` unit still lands in
+        // the *same* absolute column as the L2 row (column alignment holds).
+        let h4 = outline_line(&p, 9, 4, "H4 detail", 4, 80, O_WIDTH);
+        assert!(flat(&h4).ends_with(o_suffix(4, 80).as_str()), "metric suffix: {}", flat(&h4));
+        let c_idx_2 = flat(&h2).rfind('C').unwrap();
+        let c_idx_4 = flat(&h4).rfind('C').unwrap();
+        assert_eq!(c_idx_2, c_idx_4, "the `C` unit is in the same column for L2 vs L4");
+        assert_eq!(col_aligned(&h4), O_WIDTH);
+
         // Empty title -> the ¶ glyph (the body's `read_line` convention).
-        let blank = outline_line(&p, 1, 1, "");
-        assert_eq!(blank.spans.len(), 2);
-        assert_eq!(blank.spans[1].content.as_ref(), "¶", "empty title uses the paragraph glyph");
-        assert_eq!(blank.spans[1].style, p.label);
+        let blank = outline_line(&p, 1, 1, "", 2, 10, O_WIDTH);
+        assert_eq!(blank.spans.len(), 4);
+        assert_eq!(blank.spans[0].content.as_ref(), "L1   ", "L1 left-aligned gutter");
+        assert!(flat(&blank).contains('¶'), "empty title uses the paragraph glyph");
+        assert!(flat(&blank).ends_with(o_suffix(2, 10).as_str()), "metric suffix: {}", flat(&blank));
+        assert_eq!(col_aligned(&blank), O_WIDTH);
     }
 
     /// The *severity glyph* is what makes a write-success distinguishable

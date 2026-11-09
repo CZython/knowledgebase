@@ -498,9 +498,11 @@ pub struct ReadState {
     pub id: String,
     /// The page's body, loaded once per open (reloaded by `R`).
     pub body: String,
-    /// The *display* outline — a `(line_index, level, title)` triple per
-    /// heading, in body order. Recomputed per load so the outline always
-    /// reflects what's on screen (not a stale cache).
+    /// The *display* outline — a `(line_index, level, title, full_lines,
+    /// full_chars)` entry per heading, in body order (the metrics are the
+    /// section's full-span line/char counts, same numbers as `kb toc`).
+    /// Recomputed per load so the outline always reflects what's on screen
+    /// (not a stale cache).
     pub outline: Outline,
     /// The first **rendered row** to show (scroll offset, total on any body).
     /// A rendered row is one row as the terminal sees it — a logical line
@@ -3761,17 +3763,26 @@ fn find_padding_for_cursor(
     Some(find_padding(first_row, content_rows, pane_height))
 }
 
-/// Extract the section outline from a `body`: a `(line_index, level,
-/// title)` triple per heading, in body order. Reuses the already-verified
-/// `kb-core::section::heading_of` so the outline definition is the same one
-/// `kb toc` reports — one predicate, two surfaces.
+/// Extract the section outline from a `body`: a `(line_index, level, title,
+/// full_lines, full_chars)` 5-tuple per heading, in body order.
+///
+/// Built from `kb-core::section::Doc::new` — the *same* parse the `kb toc`
+/// CLI and `section_lookup` use — so the heading set and the span counts are
+/// the *same numbers* `kb toc <file>` reports (`end_line - start_line` for
+/// `full_lines`, `end - start` bytes for `full_chars`, where `end` / own
+/// spans come from the fence-aware scan). One parse, two surfaces.
 fn outline_of(body: &str) -> Outline {
-    body
-        .lines()
-        .enumerate()
-        .filter_map(|(i, line)| {
-            let (level, title) = section_core::heading_of(line.as_bytes())?;
-            Some((i, level, title))
+    let doc = section_core::Doc::new(body.as_bytes().to_vec());
+    doc.sections
+        .into_iter()
+        .map(|s| {
+            (
+                s.start_line,
+                s.level,
+                s.title,
+                s.end_line.saturating_sub(s.start_line),
+                s.end.saturating_sub(s.start),
+            )
         })
         .collect()
 }
@@ -4324,10 +4335,13 @@ fn list_pages(db: &Db) -> KbResult<Vec<PageRow>> {
     Ok(rows)
 }
 
-/// A page outline: a list of `(byte_offset, level, title)` entries, in document
-/// order. (Named to keep multi-use signatures readable without inlining the
-/// tuple.)
-type Outline = Vec<(usize, u8, String)>;
+/// A page outline: a list of `(line_index, level, title, full_lines,
+/// full_chars)` entries, in document order. The two metric fields are the
+/// *full* span of each section (incl. its subsections): `end_line -
+/// start_line` lines, `end - start` bytes — the exact numbers `kb toc`
+/// reports for the same body. (Named to keep multi-use signatures readable
+/// without inlining the tuple.)
+type Outline = Vec<(usize, u8, String, usize, usize)>;
 
 /// Load a page's body text (from the `pages.body` column) + its outline
 /// (a `heading_of` extraction over the body) + frontmatter display metadata.
@@ -4865,8 +4879,14 @@ mod tests {
         app.open_read().unwrap();
         if let Mode::Read(r) = &app.mode {
             assert_eq!(r.outline.len(), 2, "only the two valid ATX headings");
-            assert_eq!(r.outline[0], (1, 1, "A".to_string()));
-            assert_eq!(r.outline[1], (3, 2, "B".to_string()));
+            // (line_index, level, title, full_lines, full_chars). The body is
+            // 7 raw lines (0 blank, 1 `# A`, 2 body, 3 `## B`, 4 body,
+            // 5 `####### X`, 6 `#NoSpace`), 37 bytes. Neither heading has a
+            // later sibling of level ≤ its own, so each spans to EOF (line 7,
+            // byte 37): `# A` is 6 lines / 36 bytes (from byte 1), `## B` is
+            // 4 lines / 28 bytes (from byte 9). Same numbers `kb toc` reports.
+            assert_eq!(r.outline[0], (1, 1, "A".to_string(), 6, 36));
+            assert_eq!(r.outline[1], (3, 2, "B".to_string(), 4, 28));
         } else {
             panic!("expected Read mode after open_read");
         }

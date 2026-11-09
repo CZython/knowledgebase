@@ -1,4 +1,4 @@
-# Links rework + toc metrics — tasks (T1–T9)
+# Links rework + toc metrics — tasks (T1–T10)
 
 **Context:** the unified reference grammar (DESIGN-links.md phase 1) landed
 (`a9e1add` core, `3329e04` shell). This file tracks the follow-on UX rework
@@ -23,6 +23,7 @@ Gate: `bash gate.sh` (7 stages, must stay green). Git repo:
 | T7 | `section_lookup(body, ref) → Result<Option<usize>, SectionError>` — line of section heading | **done** (gate green) |
 | T8 | Wire the section lookup into the resolver: page resolves but `#section` missing → **ambiguous** | **done** (gate green) |
 | T9 | Wire the section lookup into the TUI reader: section links open / recenter at the heading line | **done** (gate green) |
+| T10 | Split `Current` link state (present section → `🔗`, missing → as-written) + `↗` on `External` + author-emphasis carry-through for dead / ambiguous links | **done** (gate green) |
 
 ## T1 — `kb links` default flip
 
@@ -428,7 +429,97 @@ tests: `open_current_self_link_recenters_parked_read` (30-line body +
 preserved + the `not found` hint is set). Gate 7/7, no warnings, full
 `kb-user` suite green (197 unit + integration suites).
 
-**After all T5–T9:** CHANGELOG `[Unreleased]`, `PLAN.md` §12 milestone
+## T10 — TUI: Current / External link state + author-emphasis carry-through
+
+**Decision (user-locked)** — the styling intent:
+
+- `Current` links split into two states:
+  - *present* section on the source page → **Resolved**, splices to the
+    display text and earns **`🔗`** (navigable-section affordance).
+  - *missing* section on the source page → **Dead**, **rendered as
+    written** (the full `[ # section ]` reference, brackets intact) so the
+    broken syntax is still visible.
+- `External` links are always **Resolved** — splice to their display text
+  and earn **`↗`** (browser affordance), *not* `🔗` (kb-page
+  destinations only).
+- Dead / Ambiguous links do **NOT** get a fixed single style. The author
+  picks the style by wrapping the dead link in normal markdown syntax:
+  `**[dead]**` → bold, `*[dead]*` → italic, `~~[dead]~~` → strike,
+  `` `[dead]` `` → code. `render_markdown_text` already strips the
+  delimiters and applies the style to the inner text; the fix is to
+  **not** override with `p.default` in `line_patches` for non-focused
+  dead / ambiguous links — that overlay was flattening the author's
+  emphasis.
+
+**Constraint:** *this is all in TUI* — the shell / CLI scope stays
+unchanged (`verify.rs` still counts `Current` as `current`; no new `links.*`
+columns; no JSON shape change beyond the new `current_resolved` flag which
+the TUI consumes).
+
+**Data model.**
+
+- `AnnotatedLink.current_resolved: bool` (kb/main.rs) — `true` iff a
+  `Current`-kind link's named `#section` actually exists on the source
+  page. Computed by `push_annotated` via `resolver::section_present(body,
+  sec)` — the `body` passed to `annotated_links` *is* the source page
+  being read (the very page a `#sec` self-reference targets), so this is
+  the exact check. All non-Current links carry the canonical `false`.
+  `push_annotated`'s signature was narrowed via a `PushCtx<'_>` bundle
+  (line / line_text / col / end / raw / body — six per-line fields) to
+  keep the param count under clippy's `too_many_arguments` cap.
+- `LinksEntry.current_resolved: bool` (kb/tui/mod.rs) — mirrors the
+  `AnnotatedLink` field; `from_annotated` maps it through so the Read
+  view and the Links picker share the exact same entries.
+
+**State / render (kb/tui/render.rs).**
+
+- `link_state`:
+  - `Db` / `Path` — unchanged (`Resolved` / `Dead` / `Ambiguous`).
+  - `External` — `Resolved` (the browser destination is self-evident;
+    they earn `↗`, not `🔗`).
+  - `Current` — `Resolved` iff `current_resolved`, else `Dead`.
+- `splice_display`: appends the destination-affordance marker —
+  `🔗` on a resolved kb-page (Db / Path) or on `Current`+present
+  section, `↗` on `External`, bare display text otherwise.
+- `splices_to_display`: `Current`+present splices to display + `🔗`;
+  `Current`+missing stays as written.
+- `line_patches`: non-focused `Dead` / `Ambiguous` links now emit
+  **no** patch (skip entirely) — the `md_bold` / `md_italic` / `md_strike`
+  / `md_code` style that `render_markdown_text` applied to the inner text
+  carries through untouched. Focused dead / ambiguous still get
+  `find_current` (the Links-view box). *The old `p.default` overlay is
+  gone — it was the flat-text regression.*
+- `splices_to_display` / `splice_body` docs updated to match the new
+  marker contract.
+
+**Tests.**
+
+- `link_state_external_and_current_are_resolved` — External → Resolved;
+  `Current`+present → Resolved; `Current`+missing → Dead.
+- `splice_body_external_no_marker` — asserts `↗` is earned and `🔗` is
+  *not*.
+- `splice_body_current_resolved_earns_marker` — `[ # overview ]` (a
+  `Current` link to a present section) splices to `# overview 🔗`.
+- `splice_body_current_dead_left_as_written` — same form with the section
+  missing stays as written, no marker.
+- `line_patches_three_states_distinct_roles` — non-focused dead /
+  ambiguous links produce **no** patch; the resolved link produces
+  `link`.
+- `line_patches_focused_dead_upgrades_to_find_current` — focused dead
+  link → `find_current`; non-focused ambiguous on the same line → skipped.
+- `line_patches_dead_link_keeps_author_emphasis` — pins the contract:
+  `**[[missing]]**` (a dead link in bold) renders through
+  `render_markdown_text` with `md_bold` on the inner text; non-focused
+  `line_patches` returns *no* patch (the bold survives); focused →
+  `find_current`.
+
+**Files:** `kb/main.rs` (`AnnotatedLink.current_resolved`, `PushCtx`,
+`push_annotated` signature), `kb/tui/mod.rs` (`LinksEntry.current_resolved`,
+`from_annotated`), `kb/tui/render.rs` (`link_state`, `splice_display`,
+`line_patches`, splice / state tests). Gate 7/7 green (build, one-pkg,
+clippy, tests, verus, behavior, dep-tree). Commit `881a8f7`.
+
+**After all T5–T10:** CHANGELOG `[Unreleased]`, `PLAN.md` §12 milestone
 row + §13x results, `DESIGN-links-rewire.md` status.
 
 ## Conventions (carry-over)
