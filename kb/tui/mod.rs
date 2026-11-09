@@ -310,6 +310,13 @@ pub struct LinksEntry {
     /// The resolved `abs_path` the `Enter` key will navigate to (only set
     /// for a *unique* hit; `None` otherwise).
     pub abs_path: Option<String>,
+    /// `true` iff the `#section` named on a `Current`-kind self-reference
+    /// actually exists on the *source* page. `false` when the section is
+    /// missing or ambiguous (T9's "section not found" case). Only meaningful
+    /// for `kind = Current` and `section = Some(_)` — all other links carry
+    /// the canonical `false` (they are not sections, so this flag is ignored
+    /// by the render / state logic).
+    pub current_resolved: bool,
 }
 
 impl LinksEntry {
@@ -334,6 +341,7 @@ impl LinksEntry {
             resolved: al.resolved_id.as_ref().map(|(t, s)| format!("{t}:{s}")),
             candidates: al.candidates,
             abs_path: al.resolves_to,
+            current_resolved: al.current_resolved,
         }
     }
 }

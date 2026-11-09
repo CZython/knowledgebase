@@ -1197,6 +1197,12 @@ pub struct AnnotatedLink {
     pub candidates: Vec<String>,
     /// `Some((typ, slug))` of the resolved page, for display / navigation.
     pub resolved_id: Option<(String, String)>,
+    /// `true` iff the `#section` named on a `Current`-kind self-reference
+    /// actually exists on the *source* page. `false` when the section is
+    /// missing or ambiguous (T9's "section not found" case). Only meaningful
+    /// for `kind = Current` and `section = Some(_)` — all other links carry
+    /// the canonical `false` (they are not sections, so this flag is ignored).
+    pub current_resolved: bool,
 }
 
 /// Extract every **written link** in `body`, in document order, each
@@ -1216,7 +1222,8 @@ pub fn annotated_links(body: &str, pages: &[resolver::Page]) -> Vec<AnnotatedLin
     let mut out: Vec<AnnotatedLink> = Vec::new();
     for (li, line) in body.lines().enumerate() {
         for raw in links::detect_refs(line) {
-            push_annotated(&mut out, li, line, raw.start, raw.end, &raw, pages);
+            let ctx = PushCtx { body, line: li, line_text: line, col: raw.start, end: raw.end, raw: &raw };
+            push_annotated(&mut out, pages, &ctx);
         }
     }
     out
@@ -1227,15 +1234,26 @@ pub fn annotated_links(body: &str, pages: &[resolver::Page]) -> Vec<AnnotatedLin
 /// (they have no page to look up); `Db` / `Path` funnel through the *same*
 /// `resolver::resolve` waterfall (the §4 contract) so a bare-title link and
 /// a path link that both hit the same page cannot disagree.
-fn push_annotated(
-    out: &mut Vec<AnnotatedLink>,
+///
+/// The per-line annotation context (line index, source line text, the raw
+/// byte span, and the full body for `section_present`) is bundled in
+/// `PushCtx` to keep the signature narrow. `out` and `pages` stay top-level
+/// (the out target and the corpus).
+struct PushCtx<'a> {
+    body: &'a str,
     line: usize,
-    line_text: &str,
+    line_text: &'a str,
     col: usize,
     end: usize,
-    raw: &links::RawLink,
+    raw: &'a links::RawLink,
+}
+
+fn push_annotated(
+    out: &mut Vec<AnnotatedLink>,
     pages: &[resolver::Page],
+    ctx: &PushCtx<'_>,
 ) {
+    let (body, line, line_text, col, end, raw) = (ctx.body, ctx.line, ctx.line_text, ctx.col, ctx.end, ctx.raw);
     let cls = links::classify_target(raw);
     let base = AnnotatedLink {
         line,
@@ -1250,13 +1268,22 @@ fn push_annotated(
         resolves_to: None,
         candidates: Vec::new(),
         resolved_id: None,
+        current_resolved: false,
     };
     // `External` / `Current` are informational (the bare URI, or the page's
-    // own `#section`); there is no page to resolve.
+    // own `#section`); there is no page to resolve. But a `Current` that
+    // names a real section on the source page is *alive* (navigable) and
+    // earns the `🔗` marker; one that names a missing / ambiguous section is
+    // *dead* (rendered as-written with the broken syntax visible). The
+    // `body` passed to `annotated_links` is the source page's body — the
+    // very page the `#sec` targets — so `section_present` is the exact
+    // check.
     if cls.kind == links::LinkKind::External
         || cls.kind == links::LinkKind::Current
     {
-        out.push(base);
+        let current_resolved = cls.kind == links::LinkKind::Current
+            && cls.section.as_deref().map(|sec| resolver::section_present(body, sec)).unwrap_or(false);
+        out.push(AnnotatedLink { current_resolved, ..base });
         return;
     }
     // The resolver consumes the *page-part* of the target: any `#section`

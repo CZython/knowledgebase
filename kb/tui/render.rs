@@ -1944,11 +1944,20 @@ pub fn link_state(e: &LinksEntry) -> LinkState {
                 LinkState::Ambiguous
             }
         }
-        // External / Current have no page to resolve; they are always
-        // well-formed (navigable in the pick-list sense, but they are not kb
-        // pages so they never earn the `🔗` marker).
-        kb_core::links::LinkKind::External | kb_core::links::LinkKind::Current => {
-            LinkState::Resolved
+        // External links are always well-formed — they earn `↗` (the browser
+        // affordance), not `🔗` (they are not kb pages).
+        kb_core::links::LinkKind::External => LinkState::Resolved,
+        // `Current` links point at a section of the page being read. A
+        // present section is Resolved (navigable, earns `🔗`); a missing
+        // section is Dead — the reference renders as written (brackets
+        // intact, author-applied markdown emphasis preserved) since there is
+        // nowhere to navigate to.
+        kb_core::links::LinkKind::Current => {
+            if e.current_resolved {
+                LinkState::Resolved
+            } else {
+                LinkState::Dead
+            }
         }
     }
 }
@@ -1969,24 +1978,28 @@ fn is_resolved_page(e: &LinksEntry) -> bool {
 /// `[[…]]` / `[…](…)` wrapper): exactly the [`LinkState::Resolved`] links.
 /// Dead and Ambiguous links are left rendered *as written* (the full
 /// reference, brackets included) so the broken / colliding syntax is still
-/// visible — their state is carried purely by style (the body's `default`
-/// role: plain text, no strikethrough, no italic).
+/// visible — their state is carried by the *author-applied markdown
+/// emphasis* (`**…**`, `*…*`, `~~…~~`, `` `…` ``), which
+/// [`render_markdown_text`] applies and [`line_patches`] no longer
+/// flattens; the Links view's focused box is the other cue.
 fn splices_to_display(e: &LinksEntry) -> bool {
     matches!(link_state(e), LinkState::Resolved)
 }
 
 /// The display text a spliced link collapses to — the `label` if the inline
-/// form carries one, else the written `target`. A resolved *page* link also
-/// gets the `🔗` marker appended (the navigable-page affordance);
-/// `External` / `Current` splice to the bare display text.
+/// form carries one, else the written `target`. Markers are appended by
+/// destination kind: a resolved *page* link and a `Current` link to a
+/// present section earn `🔗` (the navigable-section affordance); an
+/// `External` link earns `↗` (open-in-browser affordance).
 /// Dead / Ambiguous links are *not* spliced (they remain as written) and
 /// never reach this function.
 fn splice_display(e: &LinksEntry) -> String {
     let base = e.label.clone().unwrap_or_else(|| e.target.clone());
-    if is_resolved_page(e) {
-        format!("{base} 🔗")
-    } else {
-        base
+    match e.kind {
+        kb_core::links::LinkKind::External => format!("{base} ↗"),
+        kb_core::links::LinkKind::Current if e.current_resolved => format!("{base} 🔗"),
+        _ if is_resolved_page(e) => format!("{base} 🔗"),
+        _ => base,
     }
 }
 
@@ -2032,14 +2045,16 @@ fn splice_links_on_line(
 ///
 /// State-sensitive (see [`LinkState`]): *resolved* links collapse to their
 /// display text — the `[[…]]` / `[…](…)` wrapper is pure reference syntax
-/// the reader does not read, and only a resolved *page* link additionally
-/// gains the `🔗` marker (the navigable-page affordance). *Dead* and
-/// *Ambiguous* links are left rendered **as written** (the full reference,
-/// brackets included) so the broken / colliding syntax is still visible —
-/// their state is carried purely by style (the body's `default` role:
-/// plain text, no strikethrough, no italic) and by the Links view's target
-/// info. Prose, emphasis delimiters and any line with no link is preserved
-/// byte-for-byte.
+/// the reader does not read. Markers follow destination kind: a resolved
+/// *page* link or a `Current` link to a present section gains `🔗`
+/// (navigable affordance); an `External` link gains `↗` (browser
+/// affordance). *Dead* and *Ambiguous* links are left rendered **as
+/// written** (the full reference, brackets included) so the broken /
+/// colliding syntax is still visible — their state is carried by the
+/// author-applied markdown emphasis (which [`render_markdown_text`]
+/// applies and [`line_patches`] no longer flattens) and by the Links view's
+/// target info. Prose, emphasis delimiters and any line with no link is
+/// preserved byte-for-byte.
 ///
 /// Pure over `(body, links)`; no `App`, no IO — so it is unit-testable and
 /// idempotent (the same inputs give the same body the render pass paints).
@@ -2078,14 +2093,15 @@ pub fn splice_body(body: &str, links: &[LinksEntry]) -> Vec<String> {
 ///   tint — distinct from the `md_code` box that is reserved for backtick
 ///   spans). A resolved *page* link keeps the `🔗` marker in the
 ///   surrounding prose; this box (the `link` tint) wraps the display text.
-/// - **Dead** (target page missing): left **as written** (the full
-///   `[[…]]` / `[…](…)` span); the highlight is the body's `default`
-///   role — normal text, no strike, no distinction from prose. The only
-///   link a reader can *see* as "dead" is a focused one (via the
-///   Links view's box).
+/// - **Dead** (target page / section missing): left **as written** (the
+///   full `[[…]]` / `[…](…)` span) with **no style patch** unless focused —
+///   the author picks how a dead link reads by wrapping it in normal
+///   markdown (`**[dead]**` bold, `*[dead]*` italic, `~~[dead]~~` strike,
+///   `` `[dead]` `` code) and [`render_markdown_text`] applies it. A focused
+///   dead link is boxed in `find_current` (the Links-view affordance).
 /// - **Ambiguous** (several candidate pages): likewise as written in the
-///   body's `default` role; the only cue is the Links view's box on the
-///   focused entry.
+///   author-chosen markdown style; the only cue for an unfocused entry is
+///   the Links view's box on the focused one.
 ///
 /// `focused_key` is the `(line, col)` of the focused link (Links view only;
 /// `None` in the Read view). When it matches a link on this line that link's
@@ -2111,13 +2127,17 @@ pub fn line_patches(
         // The focused link's style is `find_current` (the Links-view
         // affordance); everything else is the state's base role.
         let is_focused = focused_key.map(|(fl, fc)| fl == e.line && fc == e.col).unwrap_or(false);
-        let base = match link_state(e) {
-            LinkState::Resolved => p.link,
-            // Dead and ambiguous read as plain body text — the state is
-            // carried by the Links-view box alone (no strike / italic).
-            LinkState::Dead | LinkState::Ambiguous => p.default,
-        };
-        let style = if is_focused { p.find_current } else { base };
+        // Dead / Ambiguous links stay as written; unless focused we emit
+        // *no* patch at all so the markdown emphasis the author applied
+        // (via `**`, `*`, `~~`, backticks) carries through — a `p.default`
+        // overlay would flatten it.
+        if !is_focused && matches!(link_state(e), LinkState::Dead | LinkState::Ambiguous) {
+            continue;
+        }
+        // Resolved → `link` tint unless focused; focused (any state) →
+        // `find_current` box. (Dead / ambiguous only reach this point when
+        // focused — non-focused dead/ambiguous were skipped above.)
+        let style = if is_focused { p.find_current } else { p.link };
         // Resolved links spliced to their display text (`label` if the
         // inline form has one, else the `target`); Dead / Ambiguous stayed
         // as written. The needle below is exactly what `rendered` shows.
@@ -3353,6 +3373,7 @@ mod tests {
             resolved: resolved.map(|s| s.to_string()),
             candidates: candidates.iter().map(|s| s.to_string()).collect(),
             abs_path: resolved.map(|s| format!("{s}.md")),
+            current_resolved: false,
         }
     }
 
@@ -3371,13 +3392,22 @@ mod tests {
         assert_eq!(link_state(&e), LinkState::Resolved);
     }
 
-    /// External / Current are Resolved (navigable) but not kb pages.
+    /// External links are always Resolved (the browser destination is
+    /// self-evident — they earn `↗`, not `🔗`). A `Current` link is Resolved
+    /// only when the referenced section is present in the page being read;
+    /// a missing section is Dead (nothing to navigate to).
     #[test]
     fn link_state_external_and_current_are_resolved() {
-        for k in [kb_core::links::LinkKind::External, kb_core::links::LinkKind::Current] {
-            let e = entry(k, "x", None, None, &[], 0, 1);
-            assert_eq!(link_state(&e), LinkState::Resolved, "{k:?} should be Resolved");
-        }
+        let e = entry(kb_core::links::LinkKind::External, "x", None, None, &[], 0, 1);
+        assert_eq!(link_state(&e), LinkState::Resolved, "External should be Resolved");
+        let cur_alive = {
+            let mut e = entry(kb_core::links::LinkKind::Current, "#intro", None, None, &[], 0, 1);
+            e.current_resolved = true;
+            e
+        };
+        assert_eq!(link_state(&cur_alive), LinkState::Resolved, "Current w/ present section should be Resolved");
+        let cur_dead = entry(kb_core::links::LinkKind::Current, "#nope", None, None, &[], 0, 1);
+        assert_eq!(link_state(&cur_dead), LinkState::Dead, "Current w/ missing section should be Dead");
     }
 
     /// Db / Path with no resolution and no candidates → Dead.
@@ -3421,7 +3451,9 @@ mod tests {
         assert_eq!(spliced, vec!["read the watching 🔗"]);
     }
 
-    /// External / Current splice to their display text but earn NO marker.
+    /// External splice to their display text but earn `↗` (the browser
+    /// affordance) — NOT `🔗` (that marker is reserved for kb-page
+    /// destinations).
     #[test]
     fn splice_body_external_no_marker() {
         let body = "see <https://example.com/x>";
@@ -3435,8 +3467,52 @@ mod tests {
             27,
         )];
         let spliced = splice_body(body, &links);
-        assert_eq!(spliced, vec!["see https://example.com/x"]);
-        assert!(!spliced[0].ends_with('🔗'), "external must not earn the marker");
+        assert_eq!(spliced, vec!["see https://example.com/x ↗"]);
+        assert!(!spliced[0].contains("🔗"), "external must not earn 🔗");
+        assert!(spliced[0].ends_with('↗'), "external must earn ↗");
+    }
+
+    /// A `Current` link to a section *present* in the page being read splices
+    /// to its display text and earns `🔗` — the navigable-section affordance.
+    /// The canonical Current form is `[ # section ]` (label `None`, target
+    /// `# section`); after splicing the reader sees `# section 🔗`.
+    #[test]
+    fn splice_body_current_resolved_earns_marker() {
+        let body = "see [ # overview ] for the overview";
+        // `[ # overview ]` spans cols 4..18 (14 chars, exclusive end).
+        let mut links = vec![entry(
+            kb_core::links::LinkKind::Current,
+            "# overview",
+            None,
+            None,
+            &[],
+            4,
+            18,
+        )];
+        links[0].current_resolved = true;
+        let spliced = splice_body(body, &links);
+        assert_eq!(spliced, vec!["see # overview 🔗 for the overview"]);
+    }
+
+    /// A `Current` link to a *missing* section is Dead → left as written
+    /// (target preserved, no marker); the author's markdown emphasis around
+    /// the bracket form is the only state cue.
+    #[test]
+    fn splice_body_current_dead_left_as_written() {
+        let body = "see [ # overview ] for the overview";
+        let links = vec![entry(
+            kb_core::links::LinkKind::Current,
+            "# overview",
+            None,
+            None,
+            &[],
+            4,
+            18,
+        )];
+        let spliced = splice_body(body, &links);
+        assert_eq!(spliced, vec!["see [ # overview ] for the overview"]);
+        assert!(!spliced[0].contains('🔗'), "current w/ missing section must not earn 🔗");
+        assert!(spliced[0].contains("[ # overview ]"), "as-written brackets intact");
     }
 
     /// Dead and Ambiguous links are left **as written** (the full
@@ -3497,12 +3573,11 @@ mod tests {
         assert_eq!(spliced, vec!["see **x 🔗** for the rest"]);
     }
 
-    /// `line_patches` produces *one* patch per link on the line, in the
-    /// state's base role, at the byte span of the link's visible text in the
-    /// rendered (emphasis-stripped) line. Resolved → `link` (the saturated
-    /// link tint), Dead and Ambiguous → `default` (plain body text — no
-    /// strikethrough, no italic; their distinction is carried by the Links
-    /// view's focused box and the target-info pane, not by prose style).
+    /// `line_patches` paints the resolved link in the `link` role, and
+    /// *skips* non-focused Dead / Ambiguous entirely — a `p.default` overlay
+    /// would flatten whatever markdown emphasis the author chose to wrap the
+    /// dead link in. Only when the dead / ambiguous link is focused (Links
+    /// view) does a patch land (in `find_current`).
     #[test]
     fn line_patches_three_states_distinct_roles() {
         let p = Palette::default_palette();
@@ -3549,20 +3624,18 @@ mod tests {
                 .find(|(s, e, _)| *s < *e && &rendered[*s..*e] == needle)
                 .copied()
         };
-        // Dead / Ambiguous paint their full as-written span (brackets
-        // included); Resolved paints its spliced display text.
-        let dead = by_needle("[[missing]]").expect("dead as-written span present");
-        let amb = by_needle("[[guide]]").expect("ambiguous as-written span present");
+        // Dead / Ambiguous are *skipped* (non-focused) so the author's
+        // markdown emphasis carries through untouched.
+        assert!(by_needle("[[missing]]").is_none(), "non-focused dead link must be skipped (no patch)");
+        assert!(by_needle("[[guide]]").is_none(), "non-focused ambiguous link must be skipped (no patch)");
         let live = by_needle("live").expect("resolved display text present");
-        // Style roles match the v3 state contract.
-        assert_eq!(dead.2, p.default, "dead → default (normal text, brackets as written)");
-        assert_eq!(amb.2, p.default, "ambiguous → default (normal text, brackets as written)");
         assert_eq!(live.2, p.link, "resolved (non-focused) → link role");
     }
 
-    /// The focused link (Links view) overrides its state role with
-    /// `find_current` — even for a *dead* link (the "no highlight on a dead
-    /// link" fix). Non-focused links on the same line keep their state role.
+    /// The focused link (Links view) is boxed in `find_current` — even for a
+    /// *dead* link (the "no highlight on a dead link" fix). Non-focused
+    /// dead / ambiguous links on the same line are *skipped* entirely (no
+    /// patch) so the author's markdown emphasis around them survives.
     #[test]
     fn line_patches_focused_dead_upgrades_to_find_current() {
         let p = Palette::default_palette();
@@ -3591,9 +3664,50 @@ mod tests {
         let patches = line_patches(&p, &rendered, &links, 0, Some(key));
         let find_patch = |n: &str| patches.iter().find(|(s, e, _)| s < e && &rendered[*s..*e] == n).copied();
         let focused = find_patch("[[missing]]").expect("focused dead as-written span present");
-        let unfocused = find_patch("[[guide]]").expect("unfocused ambiguous as-written span present");
         assert_eq!(focused.2, p.find_current, "focused dead → find_current (boxed, as written)");
-        assert_eq!(unfocused.2, p.default, "unfocused ambiguous → default (normal text, as written)");
+        assert!(find_patch("[[guide]]").is_none(), "unfocused ambiguous → skipped (no patch; author emphasis survives)");
+    }
+
+    /// A dead link the author wrapped in markdown emphasis must KEEP that
+    /// emphasis after the render pass — `line_patches` skips non-focused
+    /// Dead/Ambiguous entirely (no `p.default` overlay), so
+    /// `render_markdown_text`'s `md_bold` / `md_italic` / `md_strike` /
+    /// `md_code` style survives verbatim. Focused dead links still get
+    /// `find_current` (the Links view's box).
+    #[test]
+    fn line_patches_dead_link_keeps_author_emphasis() {
+        let p = Palette::default_palette();
+        let body = "see **[[missing]]** here";
+        // `**[[missing]]**` — the markdown pair wraps cols 4..18 (14 chars);
+        // the *link* `[[missing]]` itself is cols 6..16 (brackets included).
+        let dead = entry(
+            kb_core::links::LinkKind::Db,
+            "missing",
+            None,
+            None,
+            &[],
+            6,
+            16,
+        );
+        let links = vec![dead.clone()];
+        let rendered = rendered_line(&p, body);
+        // `render_markdown_text` strips the `**` pair and applies `md_bold`
+        // to the inner text; the rendered line is the 11-char
+        // `[[missing]]` (bold-styled) flanked by plain prose.
+        assert_eq!(rendered, "see [[missing]] here");
+        // Non-focused: `line_patches` must skip the dead link (no patch);
+        // the `md_bold` style from `render_markdown_text` carries through.
+        let patches = line_patches(&p, &rendered, &links, 0, None);
+        assert!(
+            patches.is_empty(),
+            "non-focused dead link must be skipped (emphasis carries through)"
+        );
+        // Focused: `line_patches` paints the full as-written span in
+        // `find_current` (the Links-view box).
+        let focused_key = (dead.line, dead.col);
+        let patches_focused = line_patches(&p, &rendered, &links, 0, Some(focused_key));
+        assert_eq!(patches_focused.len(), 1);
+        assert_eq!(patches_focused[0].2, p.find_current);
     }
 
     /// ATX headings render wholly in the heading role; links on a heading
