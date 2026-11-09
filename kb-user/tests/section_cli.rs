@@ -857,6 +857,203 @@ fn fm_dry_run_writes_nothing() {
 }
 
 // ---------------------------------------------------------------------------
+// `kb section rm <section-ref>` — remove a content section (heading + body +
+// its subsections), not just fm fields. Pins the *shell* contract for the
+// new branch: exit codes, the value-argument rejection, etag concurrency,
+// dry-run, and that the removal preserves the surrounding Markdown.
+// ---------------------------------------------------------------------------
+
+/// Content body (no frontmatter): `# Top / ## Mid / ## Bot`.
+/// Dotted ref layout: `# Top` = 1, `## Mid` = 1.1, `## Bot` = 1.2.
+fn sections_md() -> String {
+    "# Top\ntop body\n\n## Mid\nmid body\n\n## Bot\nbot body\n".to_string()
+}
+
+#[test]
+fn rm_middle_section() {
+    let f = temp_md("rm_middle", &sections_md());
+    let (code, out, err) = run(&[
+        "section",
+        "--file",
+        f.to_str().unwrap(),
+        "rm",
+        "1.1",
+        "--yes",
+        "--json",
+    ]);
+    assert_eq!(code, 0, "rc / err: {err}");
+    assert!(out.contains("\"changed\": true") && out.contains("\"applied\": true"), "{out}");
+    let now = std::fs::read_to_string(&f).unwrap();
+    assert!(now.contains("# Top") && now.contains("top body"), "Top intact: {now}");
+    assert!(!now.contains("## Mid") && !now.contains("mid body"), "Mid removed: {now}");
+    assert!(now.contains("## Bot") && now.contains("bot body"), "Bot intact: {now}");
+    // No doubled blank separators (the splice hygiene is preserved through commit).
+    assert!(!now.contains("top body\n\n\n"), "separator doubled: {now:?}");
+    assert!(now.ends_with('\n'), "newline-terminated: {now:?}");
+}
+
+#[test]
+fn rm_last_section() {
+    let f = temp_md("rm_last", &sections_md());
+    let (code, _, err) = run(&[
+        "section",
+        "--file",
+        f.to_str().unwrap(),
+        "rm",
+        "1.2",
+        "--yes",
+    ]);
+    assert_eq!(code, 0, "{err}");
+    let now = std::fs::read_to_string(&f).unwrap();
+    assert!(now.contains("## Mid") && now.contains("mid body"), "Mid intact: {now}");
+    assert!(!now.contains("## Bot") && !now.contains("bot body"), "Bot removed: {now}");
+    // The removed last section's trailing blank is not left dangling.
+    assert!(!now.ends_with("mid body\n\n\n"), "no dangling trailing blank: {now:?}");
+    assert!(now.ends_with('\n'), "newline-terminated: {now:?}");
+}
+
+#[test]
+fn rm_whole_root_section() {
+    let f = temp_md("rm_root", &sections_md());
+    let (code, _, err) = run(&[
+        "section",
+        "--file",
+        f.to_str().unwrap(),
+        "rm",
+        "1",
+        "--yes",
+    ]);
+    assert_eq!(code, 0, "{err}");
+    let now = std::fs::read_to_string(&f).unwrap();
+    assert!(
+        now.trim().is_empty(),
+        "removing the root section empties the file: {now:?}"
+    );
+}
+
+#[test]
+fn rm_section_subtree_includes_its_children() {
+    let md = "# Root\nroot\n\n## Alpha\nalpha\n\n### Alpha-Sub\nsub\n\n## Beta\nbeta\n";
+    let f = temp_md("rm_subtree", md);
+    // Refs: Root=1, Alpha=1.1, Alpha-Sub=1.1.1, Beta=1.2.
+    let (code, _, err) = run(&[
+        "section",
+        "--file",
+        f.to_str().unwrap(),
+        "rm",
+        "1.1",
+        "--yes",
+    ]);
+    assert_eq!(code, 0, "{err}");
+    let now = std::fs::read_to_string(&f).unwrap();
+    assert!(now.contains("# Root") && now.contains("root"), "Root intact: {now}");
+    assert!(!now.contains("## Alpha"), "Alpha removed: {now}");
+    assert!(!now.contains("### Alpha-Sub"), "Alpha-Sub (child) removed too: {now}");
+    assert!(!now.contains("sub body"), "child body removed: {now}");
+    assert!(now.contains("## Beta") && now.contains("beta"), "Beta intact: {now}");
+}
+
+#[test]
+fn rm_section_with_value_rejected() {
+    // A `value` is meaningful only for an `fm.<list>` ref; a section ref
+    // rejects it rather than silently ignoring it.
+    let f = temp_md("rm_value", &sections_md());
+    let (code, _, err) = run(&[
+        "section",
+        "--file",
+        f.to_str().unwrap(),
+        "rm",
+        "1.1",
+        "mid-body",
+        "--yes",
+    ]);
+    assert_eq!(code, 2, "section ref + value → exit 2 (stderr: {err})");
+    // File untouched.
+    let now = std::fs::read_to_string(&f).unwrap();
+    assert!(now.contains("## Mid"), "file untouched: {now}");
+}
+
+#[test]
+fn rm_section_unknown_ref_exits_2() {
+    let f = temp_md("rm_unknown", &sections_md());
+    let (code, _, err) = run(&[
+        "section",
+        "--file",
+        f.to_str().unwrap(),
+        "rm",
+        "9",
+        "--yes",
+    ]);
+    assert_eq!(code, 2, "no such section → exit 2 (stderr: {err})");
+    let now = std::fs::read_to_string(&f).unwrap();
+    assert!(now.contains("## Mid"), "file untouched: {now}");
+}
+
+#[test]
+fn rm_section_etag_mismatch_exits_3() {
+    // The section ref uses the *section* etag (the one `show <ref> --etag`
+    // prints), not the whole-file etag — so a mismatched value trips the
+    // guard before any mutation.
+    let f = temp_md("rm_etag", &sections_md());
+    let before = std::fs::read_to_string(&f).unwrap();
+    // Grab the real 1.1 etag to confirm the guard is comparing against it.
+    let (code, real_raw, _) = run(&["show", f.to_str().unwrap(), "1.1", "--etag"]);
+    assert_eq!(code, 0);
+    let real = real_raw.trim();
+    assert!(!real.is_empty() && real.len() == 16, "got etag: {real:?}");
+    // Mismatch (a dead value) → exit 3, file untouched.
+    let (code, _, err) = run(&[
+        "section",
+        "--file",
+        f.to_str().unwrap(),
+        "rm",
+        "1.1",
+        "--if-unchanged",
+        "deadbeefdeadbeef",
+        "--yes",
+    ]);
+    assert_eq!(code, 3, "section-rm etag mismatch → exit 3 (stderr: {err})");
+    assert_eq!(
+        std::fs::read_to_string(&f).unwrap(),
+        before,
+        "file untouched"
+    );
+    // A *matching* etag goes through.
+    let (code, _, err) = run(&[
+        "section",
+        "--file",
+        f.to_str().unwrap(),
+        "rm",
+        "1.1",
+        "--if-unchanged",
+        real,
+        "--yes",
+    ]);
+    assert_eq!(code, 0, "matching etag → proceeds (stderr: {err})");
+    let now = std::fs::read_to_string(&f).unwrap();
+    assert!(!now.contains("## Mid"), "section actually removed: {now}");
+}
+
+#[test]
+fn rm_section_dry_run_writes_nothing() {
+    let f = temp_md("rm_dry", &sections_md());
+    let before = std::fs::read_to_string(&f).unwrap();
+    let (code, out, _) = run(&[
+        "section",
+        "--file",
+        f.to_str().unwrap(),
+        "rm",
+        "1.1",
+        "--dry-run",
+    ]);
+    assert_eq!(code, 0, "dry-run still exits 0");
+    assert!(out.contains("@@"), "dry-run shows a diff: {out}");
+    let now = std::fs::read_to_string(&f).unwrap();
+    assert_eq!(now, before, "dry-run must not write");
+    assert!(now.contains("## Mid"), "section still present after dry-run: {now}");
+}
+
+// ---------------------------------------------------------------------------
 // `kb patch` — import an *external* unified diff (M6.5, §13f)
 // ---------------------------------------------------------------------------
 

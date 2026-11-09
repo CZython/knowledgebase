@@ -113,7 +113,23 @@ pub(crate) fn cmd_section(dbpath: Option<&Path>, file: &Path, op: &SectionOp) ->
                 };
                 commit(dbpath, file, orig, new, flags.dry_run, flags.yes, flags.json)
             } else {
-                Err((format!("`rm` on a section ref is not yet supported (try `rm fm.<key>` instead, got ref {r:?})",), EXIT_SECTION))
+                // `rm <section-ref> [value]` — remove the section (heading + body +
+                // its subsections). A `value` argument is meaningful only for an
+                // `fm.<list>` ref; a section ref accepts no list-item syntax, so we
+                // error clearly rather than silently ignoring it.
+                if value.is_some() {
+                    return Err((
+                        format!("`rm` on a section ref takes no <value> (got {r:?}); use `rm {r}` to delete the whole section"),
+                        EXIT_SECTION,
+                    ));
+                }
+                let orig = read_file(file)?;
+                let doc = Doc::new(orig.clone());
+                check_etag(&doc, Some(r.as_str()), flags)?;
+                let new = doc
+                    .remove_section(r)
+                    .map_err(|e| (e.to_string(), EXIT_SECTION))?;
+                commit(dbpath, file, orig, new, flags.dry_run, flags.yes, flags.json)
             }
         }
     }

@@ -597,14 +597,15 @@ pub(crate) enum SectionOp {
         #[command(flatten)]
         flags: WriteFlags,
     },
-    /// Remove a frontmatter field entirely (`rm fm.<key>`), or remove one
-    /// element from a list field (`rm fm.<key> <value>`). `rm` on a plain
-    /// section ref is not yet supported.
+    /// Remove a section (heading + body + subsections), a frontmatter field
+    /// entirely (`rm fm.<key>`), or one element from a list field
+    /// (`rm fm.<key> <value>`).
     Rm {
         #[arg(value_name = "REF")]
         ref_: String,
         /// For `fm.<list>` refs: the specific element to remove. Omit to
-        /// delete the entire field (scalar or list).
+        /// delete the entire field (scalar or list). Not applicable for
+        /// content section refs — omit it.
         #[arg(value_name = "VALUE")]
         value: Option<String>,
         #[command(flatten)]

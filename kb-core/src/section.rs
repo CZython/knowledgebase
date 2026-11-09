@@ -337,6 +337,43 @@ impl Doc {
         Ok(splice(&self.data, ins, ins, &body))
     }
 
+    /// Remove a section — its heading + body + all subsections (the section's
+    /// **full span**, exactly the span `set_section` replaces and `full_span`
+    /// reports). This is the inverse of the `splice(data, start, end, &body)`
+    /// call the other section ops make, with an empty body, so it composes
+    /// cleanly: remove the whole `1.2` subtree, or the whole `1` subtree
+    /// including `1.2`.
+    ///
+    /// Splice hygiene: a section's span includes its trailing separator
+    /// (the blank line before the next section). When removing the file's
+    /// last section that separator is a dangling blank at EOF, so we trim
+    /// trailing newlines and re-annex a single one — the
+    /// `ensure_trailing_newline` convention shared by every other section op
+    /// (`set`, `append`, `edit`). Mid-file removals are unaffected: the next
+    /// section's bytes (starting with a heading) follow the splice point and
+    /// already carry the correct separator.
+    ///
+    /// Returns the new full buffer (pure — `data` is not mutated).
+    pub fn remove_section(&self, ref_: &str) -> Result<Vec<u8>, SectionError> {
+        let i = self.resolve(ref_)?;
+        let s = &self.sections[i];
+        let n = self.data.len();
+        let start = s.start.min(n);
+        let span_end = s.end.min(n);
+        let mut out = splice(&self.data, start, span_end, &[]);
+        // Trim dangling trailing newlines (a removed last section leaves its
+        // separating blank line orphaned at EOF), then re-annex one `\n` so
+        // the file stays newline-terminated (the `ensure_trailing_newline`
+        // convention every other section op follows).
+        while out.ends_with(b"\n") {
+            out.pop();
+        }
+        if !out.is_empty() {
+            out.push(b'\n');
+        }
+        Ok(out)
+    }
+
     /// Insert a new section (heading + body) at a placement. Returns
     /// `(insertion_byte_offset, chunk)`. When `do_splice` is true the caller
     /// can rebuild via `splice` (or compare the chunk for a dry-run).
@@ -1117,6 +1154,61 @@ mod tests {
         // by a blank line, then the new body
         assert!(s.starts_with("# Root\n\n## A\n\nbrand new A body"));
         assert_eq!(pos, usize::MAX);
+    }
+
+    #[test]
+    fn remove_section_middle() {
+        // Refs: Top=1, Mid=1.1, Bot=1.2.
+        let d = Doc::new(b"# Top\ntop\n\n## Mid\nmid\n\n## Bot\nbot\n".to_vec());
+        let new = d.remove_section("1.1").unwrap();
+        let s = String::from_utf8(new).unwrap();
+        assert!(s.contains("## Bot") && s.contains("bot"), "sibling after survives: {s:?}");
+        assert!(s.contains("# Top") && s.contains("top"), "sibling before survives: {s:?}");
+        assert!(!s.contains("## Mid") && !s.contains("mid"), "target gone: {s:?}");
+        // No doubled blank where the section used to be.
+        assert!(!s.contains("top\n\n\n"), "separator doubled: {s:?}");
+        assert!(s.ends_with('\n'), "newline-terminated: {s:?}");
+    }
+
+    #[test]
+    fn remove_section_last() {
+        let d = Doc::new(b"# Top\ntop\n\n## Bot\nbot\n".to_vec());
+        let new = d.remove_section("1.1").unwrap();
+        let s = String::from_utf8(new).unwrap();
+        assert!(s.contains("# Top") && s.contains("top"), "Top survives: {s:?}");
+        assert!(!s.contains("## Bot") && !s.contains("bot"), "Bot gone: {s:?}");
+        // The trailing separator of the removed last section is folded into a
+        // single newline (the ensure_trailing_newline convention).
+        assert!(s.ends_with("top\n"), "exactly one trailing newline: {s:?}");
+    }
+
+    #[test]
+    fn remove_section_whole_root_empties_buffer() {
+        let d = Doc::new(b"# Top\ntop\n\n## Mid\nmid\n".to_vec());
+        let new = d.remove_section("1").unwrap();
+        assert!(new.is_empty(), "removing the root section yields an empty buffer: {new:?}");
+    }
+
+    #[test]
+    fn remove_section_includes_its_subtree() {
+        // Refs: Root=1, Alpha=1.1, Alpha-Sub=1.1.1, Beta=1.2.
+        let d = Doc::new(b"# Root\nroot\n\n## Alpha\nalpha\n\n### Alpha-Sub\nsub\n\n## Beta\nbeta\n".to_vec());
+        let new = d.remove_section("1.1").unwrap();
+        let s = String::from_utf8(new).unwrap();
+        assert!(s.contains("# Root") && s.contains("root"), "Root intact: {s:?}");
+        assert!(!s.contains("## Alpha"), "Alpha gone: {s:?}");
+        assert!(!s.contains("### Alpha-Sub"), "child also gone: {s:?}");
+        assert!(!s.contains("\nsub\n"), "child body gone: {s:?}");
+        assert!(s.contains("## Beta") && s.contains("beta"), "sibling Beta intact: {s:?}");
+    }
+
+    #[test]
+    fn remove_section_unknown_ref_is_no_section() {
+        let d = Doc::new(b"# Top\ntop\n".to_vec());
+        match d.remove_section("9.9.9") {
+            Err(SectionError::NoSection { ref_ }) => assert_eq!(ref_, "9.9.9"),
+            other => panic!("expected NoSection, got {other:?}"),
+        }
     }
 
     #[test]
