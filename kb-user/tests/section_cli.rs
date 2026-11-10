@@ -722,6 +722,54 @@ fn fm_append_list_item() {
     );
 }
 
+// ---------------------------------------------------------------------------
+// Regression — value-bearing flags that start with `-`
+//
+// clap's `--text` / `--value` / `--title` / `--find` / `--new` are
+// `allow_hyphen_values = true` so an agent may pass a dash-leading value
+// (a bullet, a flag-like token, …) without it being parsed as another flag.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn append_text_dash_leading_value() {
+    let f = temp_md("append_dash", &base_md());
+    let (code, _, err) = run(&[
+        "section",
+        "--file",
+        f.to_str().unwrap(),
+        "append",
+        "Beta",
+        "--text",
+        "-dash-line",
+        "--yes",
+    ]);
+    assert_eq!(code, 0, "a dash-leading --text must not be read as a flag ({err})");
+    let now = std::fs::read_to_string(&f).unwrap();
+    assert!(now.contains("-dash-line"), "{now}");
+}
+
+#[test]
+fn fm_append_value_dash_leading() {
+    let f = temp_md("fm_append_dash", &fm_md());
+    let (code, _, err) = run(&[
+        "section",
+        "--file",
+        f.to_str().unwrap(),
+        "append",
+        "fm.tags",
+        "--value",
+        "-dash-tag",
+        "--yes",
+    ]);
+    assert_eq!(code, 0, "a dash-leading --value must not be read as a flag ({err})");
+    let (code, out, _) = run(&["show", f.to_str().unwrap(), "fm.tags"]);
+    assert_eq!(code, 0);
+    assert!(
+        out.contains("-dash-tag"),
+        "dash-leading list item present: {out}"
+    );
+}
+
 #[test]
 fn fm_rm_list_item() {
     let f = temp_md("fm_rmitem", &fm_md());
@@ -1268,14 +1316,14 @@ fn patch_identity_is_a_noop_changeless() {
 }
 
 // ---------------------------------------------------------------------------
-// Multi-file namespace stubs
+// Multi-file namespace (M7) — root registration
 // ---------------------------------------------------------------------------
 
 #[test]
-fn multifile_namespace_is_a_declined_stub() {
+fn add_rejects_nonexistent_root() {
     let (code, _, err) = run(&["add", "/tmp/nope"]);
-    // declared but not yet implemented: a clean, non-zero generic error
-    assert_eq!(code, 1, "multi-file stubs exit 1 (stderr: {err})");
+    // clean, non-zero generic error on a path that doesn't exist
+    assert_eq!(code, 1, "a nonexistent root must exit 1 (stderr: {err})");
 }
 
 // ---------------------------------------------------------------------------

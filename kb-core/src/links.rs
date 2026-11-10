@@ -557,8 +557,8 @@ impl LinkKind {
 ///   target's *inner* text (brackets stripped) is the db lookup key.
 /// - Target starts with `#` (after trim) → `Current` + section = the
 ///   `#`-stripped remainder. (The page is the one being read; only the
-///   section is looked up, against the page's own sections — a Phase 2
-///   concern; for now the section is *surfaced* but not yet a jump.)
+///   section is looked up, against the page's own sections — the TUI's
+///   `open_linked` jumps to that heading's rendered row.)
 /// - Target is path-shaped (per [`is_pathlike`]) → `Path`.
 /// - Otherwise → `Db` (a *word* — the db lookup; this is the v1 bare-word
 ///   rule, unchanged).

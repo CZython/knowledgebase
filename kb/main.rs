@@ -12,8 +12,9 @@
 // editor flow.
 //
 // The **multi-file namespace** (DB-backed: `add` / `drop-root` / `search` /
-// `browse` / `tag` / `link` / …) lands in M5/M7 — these commands are
-// declared (so `kb --help` is complete) but return a not-implemented message.
+// `browse` / `tag` / `link` / …) is implemented in M5/M7 — full root
+// registration, FTS search, tag/alias, and link operations backed by the
+// `kb-db` crate's SQLite + FTS5 store.
 //
 // ## Agent contract (locked, PLAN §13f)
 // * **Read** is scoped + minimal: `kb toc <file>` (outline only),
@@ -181,8 +182,10 @@ pub(crate) struct CreateArgs {
 /// The complete new text, from exactly one of three sources.
 #[derive(Args, Clone, Default)]
 pub(crate) struct TextSource {
-    /// Literal text.
-    #[arg(long)]
+    /// Literal text. `allow_hyphen_values` so a value that legitimately
+    /// begins with `-` (a diff hunk, a `--` option list, an em-dash bullet)
+    /// isn't misread as a flag (mirrors `patch --patch-text`).
+    #[arg(long, allow_hyphen_values = true)]
     text: Option<String>,
     /// Read text from a file (`-` = stdin).
     #[arg(long = "from-file")]
@@ -232,12 +235,15 @@ pub(crate) enum Cmd {
     /// Substring find/replace across a file, or within one section (`--scope`).
     Replace {
         file: PathBuf,
-        #[arg(long)]
+        /// Literal to find. `allow_hyphen_values` so a `-`-prefixed literal is
+        /// a value, not a flag.
+        #[arg(long, allow_hyphen_values = true)]
         find: String,
-        #[arg(long)]
+        /// Literal to replace with. `allow_hyphen_values` same as `--find`.
+        #[arg(long, allow_hyphen_values = true)]
         new: String,
         /// Restrict to a section (default: the whole file).
-        #[arg(long)]
+        #[arg(long, allow_hyphen_values = true)]
         scope: Option<String>,
         /// Replace at most N occurrences (default: all).
         #[arg(long)]
@@ -538,7 +544,7 @@ pub(crate) enum SectionOp {
         #[arg(long)]
         keep_heading: bool,
         /// For `fm` refs: the single value to write.
-        #[arg(long, value_name = "VALUE")]
+        #[arg(long, value_name = "VALUE", allow_hyphen_values = true)]
         value: Option<String>,
         #[command(flatten)]
         flags: WriteFlags,
@@ -552,7 +558,7 @@ pub(crate) enum SectionOp {
         #[command(flatten)]
         text: TextSource,
         /// For `fm.<list>` refs: the single value to append.
-        #[arg(long, value_name = "VALUE")]
+        #[arg(long, value_name = "VALUE", allow_hyphen_values = true)]
         value: Option<String>,
         #[command(flatten)]
         flags: WriteFlags,
@@ -563,7 +569,7 @@ pub(crate) enum SectionOp {
         #[arg(long, value_name = "REF")]
         ref_: Option<String>,
         /// New section's title (heading text).
-        #[arg(long)]
+        #[arg(long, allow_hyphen_values = true)]
         title: String,
         /// before | after | child | top | end (default: child).
         #[arg(long, default_value = "child")]

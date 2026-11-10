@@ -270,18 +270,16 @@ pub struct LinksEntry {
     /// first char of the path). The `[[` itself is *not* counted — the
     /// offset is where the *content* the user wrote starts.
     ///
-    /// Public API surface — exposed so external consumers (the CLI `kb
-    /// links` form, any tool that wants to highlight the *whole reference*)
-    /// can paint `line[col..end]`. The TUI's find-style highlight uses a
-    /// simpler string-search strategy instead, so `col` is the field the
-    /// highlight actually keys off.
-    #[allow(dead_code)] // Externally-facing (CLI + future tooling); not yet painted by the TUI.
+    /// 0-based byte offset in that line where the reference (including its
+    /// wrappers) starts. Mirrors the `col` field of the CLI-side
+    /// `AnnotatedLink` — the same coordinate is used by `render.rs`
+    /// (`splice_body`, `line_patches`) to paint the whole reference span
+    /// rather than just the inner target substring.
     pub col: usize,
-    /// 0-based byte offset in that line where the reference **ends**
-    /// (exclusive). For wikilinks: just past `]]`; for the inline form:
-    /// just past the closing `)`. See the `col` doc for the TUI
-    /// highlight's strategy note.
-    #[allow(dead_code)] // Externally-facing (CLI + future tooling); not yet painted by the TUI.
+    /// 0-based byte offset in that line where the reference (including its
+    /// wrappers) ends (exclusive). For wikilinks: just past `]]`; for the
+    /// inline form: just past the closing `)`. Used together with `col`
+    /// as the `col..end` slice in `render.rs`.
     pub end: usize,
     /// The containing raw line, trimmed (for context display).
     pub context: String,

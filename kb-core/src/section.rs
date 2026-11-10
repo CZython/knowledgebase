@@ -315,26 +315,50 @@ impl Doc {
     }
 
     /// Append `text` at the end of a section's *full span* (before the next
-    /// sibling/parent heading), keeping exactly one blank line of separation
-    /// from the existing content. Returns the new full buffer.
+    /// sibling/parent heading). Whitespace at either boundary of `text` is
+    /// stripped; the section boundary is then re-established in a
+    /// predictable shape: exactly one blank line between the old content and
+    /// the appended text, and — when a next sibling heading follows — exactly
+    /// one blank line between the appended text and that heading. At
+    /// end-of-file the appended text is simply newline-terminated.
+    /// Returns the new full buffer.
     pub fn append_section(&self, ref_: &str, text: &str) -> Result<Vec<u8>, SectionError> {
         let i = self.resolve(ref_)?;
         let sec = &self.sections[i];
         let ins = sec.end;
-        let mut body = ensure_trailing_newline(text.as_bytes().to_vec());
-        // separation: keep exactly one blank line between old content and new
-        // (mirrors mdtool.py::append_section)
+        let n = self.data.len();
+        let has_next = ins < n;
+        // Strip boundary whitespace from the appended text; the section
+        // boundary is established below, independently, so the text's own
+        // leading/trailing newlines can't collide with the old or next
+        // section's whitespace.
+        let body: Vec<u8> = text
+            .trim_start_matches('\n')
+            .trim_end_matches('\n')
+            .as_bytes()
+            .to_vec();
+        // Leading side: if the old content does not already end in a blank
+        // line, annex one so the append is separated from the old content.
+        // (gap ≥ 2 means the old content already has a trailing blank — keep
+        // it as the old content's, not the append's.)
         let before = &self.data[..ins];
         let mut gap = 0;
         while gap < before.len() && before[before.len() - 1 - gap] == b'\n' {
             gap += 1;
         }
-        if gap == 0 {
-            body = b"\n\n".to_vec().into_iter().chain(body).collect();
-        } else if gap == 1 {
-            body = b"\n".to_vec().into_iter().chain(body).collect();
+        let mut out: Vec<u8> = Vec::new();
+        if gap <= 1 {
+            out.push(b'\n');
         }
-        Ok(splice(&self.data, ins, ins, &body))
+        out.extend_from_slice(&body);
+        // Trailing side: newline-terminate, and — when a next sibling heading
+        // (or the document's trailing content) follows — a blank line before
+        // it. At end-of-file the trailing newline is the terminator.
+        out.push(b'\n');
+        if has_next {
+            out.push(b'\n');
+        }
+        Ok(splice(&self.data, ins, ins, &out))
     }
 
     /// Remove a section — its heading + body + all subsections (the section's
@@ -1232,6 +1256,44 @@ mod tests {
         let s = String::from_utf8(new).unwrap();
         // existing content ends without a blank line; the append must add one
         assert!(s.contains("no blank here\n\nmore"));
+    }
+
+    #[test]
+    fn append_section_trailing_blank_text_next_sibling() {
+        // Regression: text carrying its own trailing blank must not double up
+        // the boundary before the next sibling — exactly one blank each side.
+        let d = Doc::new(b"# Root\n\n## A\ncurrent A body\n\n## B\nb body\n".to_vec());
+        let new = d.append_section("1.1", "new line\n\n").unwrap();
+        let s = String::from_utf8(new).unwrap();
+        assert_eq!(s, "# Root\n\n## A\ncurrent A body\n\nnew line\n\n## B\nb body\n");
+    }
+
+    #[test]
+    fn append_section_leading_blank_text_next_sibling() {
+        // Regression: a leading blank on the text must not double up either.
+        let d = Doc::new(b"# Root\n\n## A\ncurrent A body\n\n## B\nb body\n".to_vec());
+        let new = d.append_section("1.1", "\nnew line").unwrap();
+        let s = String::from_utf8(new).unwrap();
+        assert_eq!(s, "# Root\n\n## A\ncurrent A body\n\nnew line\n\n## B\nb body\n");
+    }
+
+    #[test]
+    fn append_section_eof_plain_terminated() {
+        // At end-of-file the append is just newline-terminated — no trailing
+        // blank is annexed (there is no next sibling to separate from).
+        let d = Doc::new(b"# Root\n\n## A\ncurrent A body\n".to_vec());
+        let new = d.append_section("1.1", "new line").unwrap();
+        let s = String::from_utf8(new).unwrap();
+        assert_eq!(s, "# Root\n\n## A\ncurrent A body\n\nnew line\n");
+    }
+
+    #[test]
+    fn append_section_eof_trailing_blank_drops_double() {
+        // The text's own trailing blank must not survive at EOF either.
+        let d = Doc::new(b"# Root\n\n## A\ncurrent A body\n".to_vec());
+        let new = d.append_section("1.1", "new line\n\n").unwrap();
+        let s = String::from_utf8(new).unwrap();
+        assert_eq!(s, "# Root\n\n## A\ncurrent A body\n\nnew line\n");
     }
 
     #[test]
