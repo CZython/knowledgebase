@@ -7,19 +7,15 @@
 //! The schema mirrors PLAN §8 exactly:
 //!
 //! ```sql
-//! roots / pages / page_gates / pages_fts / page_tags / meta / tag_aliases / links
+//! roots / pages / page_gates / page_tags / meta / tag_aliases / links
 //! ```
 //!
-//! + **three FTS5 sync triggers** (the §13a "M5 index/refresh code generates
-//!   both" guarantee, made automatic): any INSERT/UPDATE/DELETE against `pages`
-//!   keeps `pages_fts` (an external-content FTS5 index) in lockstep. The
-//!   indexer therefore only ever writes `pages` — never `pages_fts` directly.
-//!
-//! `pages_fts` is external-content (`content='pages',
-//! content_rowid='rowid'`), so it stores **only the index**; the real text
-//! stays in `pages`. §13a confirmed this shape empirically.
+//! Full-text search is a Turso native FTS index over the `pages` columns
+//! (`idx_pages_fts`, built by [`FTS_INDEX_SQL`]). The engine keeps it in
+//! lockstep with `pages`, so the indexer only ever writes `pages` — there is
+//! no external-content table and no sync triggers.
 
-use rusqlite::{Connection, Result};
+use crate::sql::{Connection, Result};
 
 /// Current schema version (recorded in `meta.version` for future upgrades).
 pub const SCHEMA_VERSION: &str = "2";
@@ -32,7 +28,7 @@ pub const SCHEMA_VERSION: &str = "2";
 /// `SCHEMA_SQL` stays a literal: it is the definition site.)
 pub const COL_SEARCH_REQUIRED_PHRASE: &str = "search_required_phrase";
 
-/// The complete v0 schema (PLAN §8 + FTS5 sync triggers). Idempotent.
+/// The complete v0 schema (PLAN §8). Idempotent.
 const SCHEMA_SQL: &str = r#"
 CREATE TABLE IF NOT EXISTS roots (
   path           TEXT PRIMARY KEY,   -- the registered root path (as given; canonicalised at walk time)
@@ -71,11 +67,6 @@ CREATE TABLE IF NOT EXISTS page_gates (
   PRIMARY KEY (abs_path, term)
 );
 
-CREATE VIRTUAL TABLE IF NOT EXISTS pages_fts USING fts5(
-  title, description, body, frontmatter_text,
-  content='pages', content_rowid='rowid'
-);
-
 CREATE TABLE IF NOT EXISTS page_tags (
   abs_path TEXT NOT NULL,
   tag      TEXT NOT NULL,
@@ -101,28 +92,36 @@ CREATE TABLE IF NOT EXISTS links (
 );
 CREATE INDEX IF NOT EXISTS idx_links_to ON links(to_path);
 
--- ==== FTS5 sync (external-content) — three triggers keep `pages_fts` in
---      lockstep with `pages`. `pages` is the *only* table the indexer
---      writes; these fire on every INSERT/UPDATE/DELETE and translate the
---      change into the `pages_fts` 'delete'/'insert' pair FTS5 requires.
+-- Legacy SQLite FTS5 artifacts (from pre-Turso databases) are dropped so an
+-- upgraded file does not keep a virtual table the engine cannot read. This
+-- is best-effort: `IF EXISTS` is a no-op on a fresh Turso database.
 DROP TRIGGER IF EXISTS pages_ai;
-CREATE TRIGGER pages_ai AFTER INSERT ON pages BEGIN
-  INSERT INTO pages_fts(rowid, title, description, body, frontmatter_text)
-  VALUES (new.rowid, new.title, new.description, new.body, new.frontmatter_text);
-END;
 DROP TRIGGER IF EXISTS pages_au;
-CREATE TRIGGER pages_au AFTER UPDATE ON pages BEGIN
-  INSERT INTO pages_fts(pages_fts, rowid, title, description, body, frontmatter_text)
-  VALUES ('delete', old.rowid, old.title, old.description, old.body, old.frontmatter_text);
-  INSERT INTO pages_fts(rowid, title, description, body, frontmatter_text)
-  VALUES (new.rowid, new.title, new.description, new.body, new.frontmatter_text);
-END;
 DROP TRIGGER IF EXISTS pages_ad;
-CREATE TRIGGER pages_ad AFTER DELETE ON pages BEGIN
-  INSERT INTO pages_fts(pages_fts, rowid, title, description, body, frontmatter_text)
-  VALUES ('delete', old.rowid, old.title, old.description, old.body, old.frontmatter_text);
-END;
+
+-- The FTS5 virtual table and its shadow tables. On a legacy DB the upgrade
+-- path removes the virtual-table row from `sqlite_schema` so Turso can open
+-- the file (see `legacy.rs`); dropping the shadow tables here cleans up the
+-- rest.
+DROP TABLE IF EXISTS pages_fts;
+DROP TABLE IF EXISTS pages_fts_data;
+DROP TABLE IF EXISTS pages_fts_idx;
+DROP TABLE IF EXISTS pages_fts_content;
+DROP TABLE IF EXISTS pages_fts_docsize;
+DROP TABLE IF EXISTS pages_fts_config;
 "#;
+
+/// Turso native full-text search (Tantivy-backed). Unlike SQLite FTS5 this
+/// is a real index on `pages`, maintained automatically by the engine, so
+/// no external-content table and no sync triggers are needed. `fts_match`,
+/// `fts_score` and `fts_highlight` in queries resolve against this index.
+///
+/// Built *after* `reconcile_pages_columns`, because a pre-existing `pages`
+/// table may still be missing one of the indexed columns (e.g. `description`)
+/// until the reconcile adds it.
+const FTS_INDEX_SQL: &str = "\
+CREATE INDEX IF NOT EXISTS idx_pages_fts ON pages
+  USING fts (title, description, body, frontmatter_text);";
 
 /// The `pages` columns the schema guarantees to exist. `migrate` reconciles
 /// a *pre-existing* `pages` table to this column set. `CREATE TABLE
@@ -187,17 +186,17 @@ fn reconcile_pages_columns(conn: &Connection) -> Result<()> {
     }
     let mut current: Vec<String> = conn
         .prepare("PRAGMA table_info(pages)")?
-        .query_map([], |r| r.get::<_, String>(1))?
+        .query_map((), |r| r.get::<_, String>(1))?
         .collect::<Result<_>>()?;
     // Phase 1: renames — old present, new absent.
     for (old, new) in PAGES_COLUMN_RENAMES {
         let has_old = current.iter().any(|c| c == old);
         let has_new = current.iter().any(|c| c == new);
         if has_old && !has_new {
-            // RENAME COLUMN rewrites `pages.<old>` inside the FTS5 triggers
-            // (SQLite ≥ 3.25), keeping them in lockstep.
+            // RENAME COLUMN preserves the data and the FTS index follows the
+            // column rename automatically.
             conn.execute(
-                &format!("ALTER TABLE pages RENAME COLUMN {old} TO {new}"),
+                format!("ALTER TABLE pages RENAME COLUMN {old} TO {new}"),
                 [],
             )?;
             if let Some(slot) = current.iter_mut().find(|c| c == old) {
@@ -208,7 +207,7 @@ fn reconcile_pages_columns(conn: &Connection) -> Result<()> {
     // Phase 2: additions — anything in the guaranteed set still absent.
     for col in PAGES_COLUMNS {
         if !current.iter().any(|c| c == col) {
-            conn.execute(&format!("ALTER TABLE pages ADD COLUMN {col} TEXT"), [])?;
+            conn.execute(format!("ALTER TABLE pages ADD COLUMN {col} TEXT"), ())?;
             current.push(col.to_string());
         }
     }
@@ -223,10 +222,11 @@ fn reconcile_pages_columns(conn: &Connection) -> Result<()> {
 pub fn migrate(conn: &Connection) -> Result<()> {
     conn.execute_batch(SCHEMA_SQL)?;
     reconcile_pages_columns(conn)?;
+    conn.execute_batch(FTS_INDEX_SQL)?;
     conn.execute(
         "INSERT INTO meta(key, value) VALUES ('version', ?1)
          ON CONFLICT(key) DO UPDATE SET value = excluded.value",
-        rusqlite::params![SCHEMA_VERSION],
+        crate::sql::params![SCHEMA_VERSION],
     )?;
     Ok(())
 }
@@ -237,7 +237,7 @@ mod tests {
 
     #[test]
     fn migrate_is_idempotent() {
-        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        let conn = Connection::open_in_memory().unwrap();
         migrate(&conn).unwrap();
         migrate(&conn).unwrap(); // second apply must be a no-op
         let n: i64 = conn
@@ -249,17 +249,17 @@ mod tests {
             .unwrap();
         assert!(n >= 8, "expected full schema, got {n} tables");
         let v: String = conn
-            .query_row("SELECT value FROM meta WHERE key='version'", [], |r| {
+            .query_row("SELECT value FROM meta WHERE key='version'", (), |r| {
                 r.get(0)
             })
             .unwrap();
         assert_eq!(v, SCHEMA_VERSION);
     }
 
-    fn column_names(conn: &rusqlite::Connection) -> Vec<String> {
+    fn column_names(conn: &Connection) -> Vec<String> {
         conn.prepare("PRAGMA table_info(pages)")
             .unwrap()
-            .query_map([], |r| r.get::<_, String>(1))
+            .query_map((), |r| r.get::<_, String>(1))
             .unwrap()
             .collect::<Result<_>>()
             .unwrap()
@@ -274,7 +274,7 @@ mod tests {
     /// the user's hidden-phrase gating silently breaks.
     #[test]
     fn migrate_renames_search_terms_to_search_required_phrase_preserving_data() {
-        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        let conn = Connection::open_in_memory().unwrap();
         // The v0/v1 `pages` shape: identity + text columns, gate column under
         // its ORIGINAL name `search_terms` (commit d38340e renamed it).
         conn.execute_batch(
@@ -332,7 +332,7 @@ mod tests {
         // (i.e. the gate phrase is preserved, not stranded).
         let new_val: Option<String> = conn
             .query_row(
-                &format!(
+                format!(
                     "SELECT {COL_SEARCH_REQUIRED_PHRASE} FROM pages WHERE abs_path='/root/a.md'"
                 ),
                 [],
@@ -354,7 +354,7 @@ mod tests {
     /// semantics of a fresh insert of an optional field.
     #[test]
     fn migrate_adds_missing_optional_pages_column() {
-        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        let conn = Connection::open_in_memory().unwrap();
         // A `pages` shape missing *both* the gate column and one more
         // optional column (`description`), to exercise the additive path.
         conn.execute_batch(
@@ -417,10 +417,10 @@ mod tests {
     /// for `pages` — no spurious renames or additions, existing data intact.
     #[test]
     fn migrate_is_a_noop_already_current_pages() {
-        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        let conn = Connection::open_in_memory().unwrap();
         migrate(&conn).unwrap(); // fresh + reconciled
         conn.execute(
-            &format!(
+            format!(
                 "INSERT INTO pages
                  (abs_path, id, type, root, rel_path, {COL_SEARCH_REQUIRED_PHRASE}, mtime_ns, content_hash)
                  VALUES ('/root/a.md', 'note:a', 'note', '/root', 'a.md', 'token bucket', 1, 'h')"
@@ -441,7 +441,7 @@ mod tests {
         );
         let v: Option<String> = conn
             .query_row(
-                &format!(
+                format!(
                     "SELECT {COL_SEARCH_REQUIRED_PHRASE} FROM pages WHERE abs_path='/root/a.md'"
                 ),
                 [],

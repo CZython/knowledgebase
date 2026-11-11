@@ -51,7 +51,6 @@ clap_complete = { workspace = true, optional = true }
 kb-core = { workspace = true }
 kb-db   = { workspace = true }
 dirs    = { workspace = true }
-rusqlite = { workspace = true }
 # TUI-only, optional, pulled in only if a caller enables `--features tui`.
 # With the default (headless) build they stay out of the dependency tree.
 ratatui   = { workspace = true, optional = true }

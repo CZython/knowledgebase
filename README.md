@@ -1,15 +1,15 @@
-# kb — a single-binary Markdown knowledge base over SQLite + FTS5
+# kb — a single-binary Markdown knowledge base over Turso + FTS
 
 One Rust binary that indexes a tree of Markdown notes into an embedded
-SQLite / FTS5 database, then lets you **search**, **browse**, and **edit**
+Turso (SQLite-compatible) / FTS database, then lets you **search**, **browse**, and **edit**
 them — by section, by substring, or by applying external `diff -u` /
 `git diff` patches. The core logic (identity, section splice, search
 grammar, alias/tag semantics) lives in a **Verus-verified, zero-dependency
-pure-Rust crate**; the SQLite shell is a thin, audited boundary.
+pure-Rust crate**; the Turso shell is a thin, audited boundary.
 
 There is no server, no daemon, no external binary to keep in step — it is
 one self-contained binary (statically linked on Linux; native Mach-O /
-`.exe` on macOS / Windows) that reads Markdown and writes a SQLite file.
+`.exe` on macOS / Windows) that reads Markdown and writes a Turso database file.
 
 ---
 
@@ -60,7 +60,7 @@ Or, from the repo root, just run `cargo build` and grab
 
 Every tagged release (`v*`) publishes a native artifact per platform —
 **both the full `kb` and the headless `kb-hardened`** — built *natively* by
-CI so the bundled SQLite is compiled against each OS's libc:
+CI so the fully pure-Rust build is exercised on each OS:
 
 | Platform      | Artifact                          | Notes                                        |
 |---------------|-----------------------------------|----------------------------------------------|
@@ -98,9 +98,8 @@ cross build from Linux/macOS (`dist/build-windows.sh`).
 ### Prerequisites
 
 A working Rust toolchain (`stable`) is the only build-time requirement.
-`rusqlite` is built with the `bundled` feature, so **no system SQLite is
-needed**. A C compiler is used transiently to compile the bundled SQLite
-C sources.
+The database is [Turso](https://turso.tech), a pure-Rust SQLite-compatible
+engine, so **no system SQLite and no C compiler are needed**.
 
 ---
 
@@ -188,7 +187,7 @@ contract. The one-paragraph version:
 
 ## Verified core
 
-The `kb-core` crate (no std I/O, no rusqlite, no clap) is checked by
+The `kb-core` crate (no std I/O, no database, no clap) is checked by
 **Verus** against a per-module spec (`kb-core/spec/*`). `gate.sh` runs
 the full verification surface on every push — that is the guarantee this
 project stands on: the pure logic is *correct by proof*, and the shell
@@ -220,7 +219,7 @@ Prereq for the `verus` stage: a Verus install on `$PATH` and `z3` at
 │   ├── src/             #   one module per concern (frontmatter, section,
 │   │                    #   identity, tags, aliases, links, search_grammar, …)
 │   └── spec/            #   Verus specs, one per module
-├── kb-db/               # SQLite/FTS5 shell (bundled, sync, no tokio)
+├── kb-db/               # Turso/FTS shell (pure Rust, sync, no tokio)
 ├── tests/               # shared integration fixtures / e2e tests
 ├── dist/                # per-platform build scripts (linux musl / windows / macos)
 │                        #   artifacts are git-ignored; the .sh scripts are tracked
@@ -255,7 +254,7 @@ one-line summaries of each:
 | [`PLAN.md`](PLAN.md) | Original design and milestone plan (M0–M9) for the single-binary KB. |
 | [`CONTRIBUTING.md`](CONTRIBUTING.md) | The dev loop (`./gate.sh`), feature-flag matrix, and shared-body gotchas. |
 | [`HARDENED_BUILD.md`](HARDENED_BUILD.md) | What `kb-hardened` strips (no ratatui, no crossterm, no unicode-width) and why. |
-| [`SECURITY_REPORT.md`](SECURITY_REPORT.md) | Threat model and hardening decisions for the SQLite + editor boundary. |
+| [`SECURITY_REPORT.md`](SECURITY_REPORT.md) | Threat model and hardening decisions for the database + editor boundary. |
 | [`PENTEST_HARDENED.md`](PENTEST_HARDENED.md) | Hardened-build-specific pentest findings, with the closure notes. |
 | [`CODEBASE_REVIEW.md`](CODEBASE_REVIEW.md) | Catalogue of findings from a codebase-level review (the *source* for many of the fixes recorded in `CHANGELOG.md`). |
 | [`TODO-palette.md`](TODO-palette.md) | TUI palette follow-ups (the "palettes are automatically bottom-tier" rule lives here too). |

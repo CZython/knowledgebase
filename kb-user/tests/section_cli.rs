@@ -743,7 +743,10 @@ fn append_text_dash_leading_value() {
         "-dash-line",
         "--yes",
     ]);
-    assert_eq!(code, 0, "a dash-leading --text must not be read as a flag ({err})");
+    assert_eq!(
+        code, 0,
+        "a dash-leading --text must not be read as a flag ({err})"
+    );
     let now = std::fs::read_to_string(&f).unwrap();
     assert!(now.contains("-dash-line"), "{now}");
 }
@@ -761,7 +764,10 @@ fn fm_append_value_dash_leading() {
         "-dash-tag",
         "--yes",
     ]);
-    assert_eq!(code, 0, "a dash-leading --value must not be read as a flag ({err})");
+    assert_eq!(
+        code, 0,
+        "a dash-leading --value must not be read as a flag ({err})"
+    );
     let (code, out, _) = run(&["show", f.to_str().unwrap(), "fm.tags"]);
     assert_eq!(code, 0);
     assert!(
@@ -930,13 +936,28 @@ fn rm_middle_section() {
         "--json",
     ]);
     assert_eq!(code, 0, "rc / err: {err}");
-    assert!(out.contains("\"changed\": true") && out.contains("\"applied\": true"), "{out}");
+    assert!(
+        out.contains("\"changed\": true") && out.contains("\"applied\": true"),
+        "{out}"
+    );
     let now = std::fs::read_to_string(&f).unwrap();
-    assert!(now.contains("# Top") && now.contains("top body"), "Top intact: {now}");
-    assert!(!now.contains("## Mid") && !now.contains("mid body"), "Mid removed: {now}");
-    assert!(now.contains("## Bot") && now.contains("bot body"), "Bot intact: {now}");
+    assert!(
+        now.contains("# Top") && now.contains("top body"),
+        "Top intact: {now}"
+    );
+    assert!(
+        !now.contains("## Mid") && !now.contains("mid body"),
+        "Mid removed: {now}"
+    );
+    assert!(
+        now.contains("## Bot") && now.contains("bot body"),
+        "Bot intact: {now}"
+    );
     // No doubled blank separators (the splice hygiene is preserved through commit).
-    assert!(!now.contains("top body\n\n\n"), "separator doubled: {now:?}");
+    assert!(
+        !now.contains("top body\n\n\n"),
+        "separator doubled: {now:?}"
+    );
     assert!(now.ends_with('\n'), "newline-terminated: {now:?}");
 }
 
@@ -953,24 +974,26 @@ fn rm_last_section() {
     ]);
     assert_eq!(code, 0, "{err}");
     let now = std::fs::read_to_string(&f).unwrap();
-    assert!(now.contains("## Mid") && now.contains("mid body"), "Mid intact: {now}");
-    assert!(!now.contains("## Bot") && !now.contains("bot body"), "Bot removed: {now}");
+    assert!(
+        now.contains("## Mid") && now.contains("mid body"),
+        "Mid intact: {now}"
+    );
+    assert!(
+        !now.contains("## Bot") && !now.contains("bot body"),
+        "Bot removed: {now}"
+    );
     // The removed last section's trailing blank is not left dangling.
-    assert!(!now.ends_with("mid body\n\n\n"), "no dangling trailing blank: {now:?}");
+    assert!(
+        !now.ends_with("mid body\n\n\n"),
+        "no dangling trailing blank: {now:?}"
+    );
     assert!(now.ends_with('\n'), "newline-terminated: {now:?}");
 }
 
 #[test]
 fn rm_whole_root_section() {
     let f = temp_md("rm_root", &sections_md());
-    let (code, _, err) = run(&[
-        "section",
-        "--file",
-        f.to_str().unwrap(),
-        "rm",
-        "1",
-        "--yes",
-    ]);
+    let (code, _, err) = run(&["section", "--file", f.to_str().unwrap(), "rm", "1", "--yes"]);
     assert_eq!(code, 0, "{err}");
     let now = std::fs::read_to_string(&f).unwrap();
     assert!(
@@ -994,11 +1017,20 @@ fn rm_section_subtree_includes_its_children() {
     ]);
     assert_eq!(code, 0, "{err}");
     let now = std::fs::read_to_string(&f).unwrap();
-    assert!(now.contains("# Root") && now.contains("root"), "Root intact: {now}");
+    assert!(
+        now.contains("# Root") && now.contains("root"),
+        "Root intact: {now}"
+    );
     assert!(!now.contains("## Alpha"), "Alpha removed: {now}");
-    assert!(!now.contains("### Alpha-Sub"), "Alpha-Sub (child) removed too: {now}");
+    assert!(
+        !now.contains("### Alpha-Sub"),
+        "Alpha-Sub (child) removed too: {now}"
+    );
     assert!(!now.contains("sub body"), "child body removed: {now}");
-    assert!(now.contains("## Beta") && now.contains("beta"), "Beta intact: {now}");
+    assert!(
+        now.contains("## Beta") && now.contains("beta"),
+        "Beta intact: {now}"
+    );
 }
 
 #[test]
@@ -1024,14 +1056,7 @@ fn rm_section_with_value_rejected() {
 #[test]
 fn rm_section_unknown_ref_exits_2() {
     let f = temp_md("rm_unknown", &sections_md());
-    let (code, _, err) = run(&[
-        "section",
-        "--file",
-        f.to_str().unwrap(),
-        "rm",
-        "9",
-        "--yes",
-    ]);
+    let (code, _, err) = run(&["section", "--file", f.to_str().unwrap(), "rm", "9", "--yes"]);
     assert_eq!(code, 2, "no such section → exit 2 (stderr: {err})");
     let now = std::fs::read_to_string(&f).unwrap();
     assert!(now.contains("## Mid"), "file untouched: {now}");
@@ -1098,7 +1123,10 @@ fn rm_section_dry_run_writes_nothing() {
     assert!(out.contains("@@"), "dry-run shows a diff: {out}");
     let now = std::fs::read_to_string(&f).unwrap();
     assert_eq!(now, before, "dry-run must not write");
-    assert!(now.contains("## Mid"), "section still present after dry-run: {now}");
+    assert!(
+        now.contains("## Mid"),
+        "section still present after dry-run: {now}"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -1338,7 +1366,8 @@ struct T6 {
 }
 impl T6 {
     fn new(tag: &str) -> Self {
-        let base = std::env::temp_dir().join(format!("kb_t6_{pid}_{tag}", pid = std::process::id()));
+        let base =
+            std::env::temp_dir().join(format!("kb_t6_{pid}_{tag}", pid = std::process::id()));
         let root = base.join("root");
         let _ = std::fs::remove_dir_all(&root);
         std::fs::create_dir_all(&root).unwrap();

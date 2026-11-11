@@ -20,9 +20,9 @@
 //! enforced by *which roots are in `roots`*).
 
 use crate::index::{self, IndexOutcome};
+use crate::sql::{params, OptionalExtension, Result};
 use crate::walk_snapshot;
 use crate::Db;
-use rusqlite::{params, OptionalExtension, Result};
 use std::fs;
 use std::path::Path;
 
@@ -77,11 +77,11 @@ impl RefreshSummary {
 
 /// List the currently-registered roots in (seq DESC) presentation order.
 fn load_roots(db: &Db) -> Result<Vec<RootRow>> {
-    let mut stmt = db
+    let stmt = db
         .conn
         .prepare("SELECT path, extra_exts, include_hidden, seq FROM roots ORDER BY seq DESC")?;
     let rows = stmt
-        .query_map([], |r| {
+        .query_map((), |r| {
             Ok(RootRow {
                 path: r.get::<_, String>(0)?,
                 extra_exts: r
@@ -244,8 +244,8 @@ fn gc_orphaned_pages(db: &Db, keep: &[String]) -> Result<usize> {
     // block so the `Statement`'s borrow of `conn` is fully ended when we
     // mutate the connection via `tx`.
     let rows: Vec<String> = {
-        let mut stmt = conn.prepare("SELECT abs_path FROM pages")?;
-        let it = stmt.query_map([], |r| r.get::<_, String>(0))?;
+        let stmt = conn.prepare("SELECT abs_path FROM pages")?;
+        let it = stmt.query_map((), |r| r.get::<_, String>(0))?;
         let collected: Result<Vec<String>> = it.collect();
 
         collected?
@@ -276,13 +276,13 @@ pub fn full_rebuild(db: &Db) -> Result<RefreshSummary> {
     };
     summ.roots_walked = roots.len();
 
-    // Wipe everything first (the row-tables, then pages). The FTS5 triggers
-    // keep `pages_fts` in sync on the DELETEs, so the index rebuilds clean.
+    // Wipe everything first (the row-tables, then pages). Turso's FTS index
+    // follows the `pages` DELETEs, so the index rebuilds clean.
     let tx = db.conn.unchecked_transaction()?;
-    tx.execute("DELETE FROM page_gates", [])?;
-    tx.execute("DELETE FROM page_tags", [])?;
-    tx.execute("DELETE FROM links", [])?;
-    let wiped = tx.execute("DELETE FROM pages", [])?;
+    tx.execute("DELETE FROM page_gates", ())?;
+    tx.execute("DELETE FROM page_tags", ())?;
+    tx.execute("DELETE FROM links", ())?;
+    let wiped = tx.execute("DELETE FROM pages", ())?;
     tx.commit()?;
     summ.gc = wiped;
 
@@ -333,8 +333,8 @@ fn candidates_to_records(db: &Db, roots: &[RootRow], summ: &mut RefreshSummary) 
     summ.skipped_no_type = outcome.skipped_no_type;
     summ.skipped_missing_slug = outcome.skipped_missing_slug;
     if !errors.is_empty() {
-        return Err(rusqlite::Error::SqliteFailure(
-            rusqlite::ffi::Error::new(-1),
+        return Err(crate::sql::Error::SqliteFailure(
+            crate::sql::ffi::Error::new(-1),
             Some(format!(
                 "kb::full_rebuild: {} page(s) failed to index: {}",
                 errors.len(),
@@ -389,7 +389,7 @@ mod tests {
         assert_eq!(summ.skipped_no_type, 1, "one no-type page skipped");
         let count: i64 = db
             .conn
-            .query_row("SELECT COUNT(*) FROM pages", [], |r| r.get(0))
+            .query_row("SELECT COUNT(*) FROM pages", (), |r| r.get(0))
             .unwrap();
         assert_eq!(count, 2);
         let _ = fs::remove_dir_all(&dir);
@@ -515,7 +515,7 @@ mod tests {
         // NOT have been deleted from the index.
         let b_present: i64 = db
             .conn
-            .query_row("SELECT COUNT(*) FROM pages WHERE title = 'B'", [], |r| {
+            .query_row("SELECT COUNT(*) FROM pages WHERE title = 'B'", (), |r| {
                 r.get(0)
             })
             .unwrap();
@@ -525,7 +525,7 @@ mod tests {
         );
         let a_present: i64 = db
             .conn
-            .query_row("SELECT COUNT(*) FROM pages WHERE title = 'A'", [], |r| {
+            .query_row("SELECT COUNT(*) FROM pages WHERE title = 'A'", (), |r| {
                 r.get(0)
             })
             .unwrap();
@@ -632,7 +632,7 @@ mod tests {
         assert_eq!(s2.indexed, 1, "surviving root re-indexed");
         let a_present: i64 = db
             .conn
-            .query_row("SELECT COUNT(*) FROM pages WHERE title = 'A'", [], |r| {
+            .query_row("SELECT COUNT(*) FROM pages WHERE title = 'A'", (), |r| {
                 r.get(0)
             })
             .unwrap();
@@ -640,7 +640,7 @@ mod tests {
         // …while the failed root's page was wiped and not re-indexed.
         let b_present: i64 = db
             .conn
-            .query_row("SELECT COUNT(*) FROM pages WHERE title = 'B'", [], |r| {
+            .query_row("SELECT COUNT(*) FROM pages WHERE title = 'B'", (), |r| {
                 r.get(0)
             })
             .unwrap();

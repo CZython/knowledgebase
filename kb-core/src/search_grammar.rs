@@ -156,14 +156,15 @@ impl ParsedQuery {
     /// string means what the grammar intends" on the *actual* engine build,
     /// per the §9 "escaping/quoting correct" bullet; see also PLAN.md §13d).
     pub fn render_fts(&self) -> String {
-        let mut clauses: Vec<String> = Vec::new();
-
+        // Turso's FTS parser (Tantivy) treats whitespace between two
+        // *positive* terms as OR, unlike SQLite FTS5's implicit AND. So the
+        // positive clauses are joined explicitly with `AND`. A `NOT` clause
+        // is appended with a bare space (an explicit `AND NOT` is rejected by
+        // the parser); this is the form the engine accepts:
+        //   "apple* AND banana* NOT pear*"  →  apple AND banana AND NOT pear
+        let mut positive: Vec<String> = Vec::new();
         if !self.or_group.is_empty() {
-            // OR-group present: it MUST lead (FTS5 rejects a bare term sitting
-            // directly before/after a paren-group). Then NOT (infix), then bare
-            // (bare *may* trail a NOT clause). Confirmed parseable on SQLite 3.46.0:
-            //   "(llm OR mllm) NOT gpt attention"  →  OK [E]
-            clauses.push(format!(
+            positive.push(format!(
                 "({})",
                 self.or_group
                     .iter()
@@ -171,32 +172,22 @@ impl ParsedQuery {
                     .collect::<Vec<_>>()
                     .join(" OR ")
             ));
-            for nt in &self.not_terms {
-                clauses.push(format!("NOT {}", render_term(nt)));
-            }
-            for t in &self.and_terms {
-                clauses.push(render_term(t));
-            }
-        } else {
-            // No OR group: bare terms lead, then NOT (each NOT is infix-after-a-term,
-            // which is the only place FTS5 accepts it). Confirmed parseable:
-            //   "apple NOT pear"  →  OK [A]
-            //   "NOT pear apple"  →  ERR (leading NOT is rejected by FTS5)
-            //
-            //   A NOT-only query (`-gpt` alone, no bare, no OR) renders as
-            //   `"NOT gpt"` which FTS5 rejects as a leading NOT — the M7 SQL
-            //   layer converts this to a column-exclusion filter (not a MATCH
-            //   clause) when `fts_present() == true` but no non-NOT clause
-            //   exists. See `semantics_spec.rs` for the spec boundary.
-            for t in &self.and_terms {
-                clauses.push(render_term(t));
-            }
-            for nt in &self.not_terms {
-                clauses.push(format!("NOT {}", render_term(nt)));
-            }
+        }
+        for t in &self.and_terms {
+            positive.push(render_term(t));
         }
 
-        clauses.join(" ")
+        let mut out = positive.join(" AND ");
+        for nt in &self.not_terms {
+            let clause = format!("NOT {}", render_term(nt));
+            if out.is_empty() {
+                out.push_str(&clause);
+            } else {
+                out.push(' ');
+                out.push_str(&clause);
+            }
+        }
+        out
     }
 }
 
@@ -212,6 +203,17 @@ impl ParsedQuery {
 /// string a valid FTS5 query* for every input.
 pub fn needs_quoting(s: &str) -> bool {
     s.is_empty() || s.contains(' ') || s.contains('"') || s.contains('*')
+}
+
+/// The stem of a bare token the user explicitly suffix-prefixed (`abc*`),
+/// or `None` if the token is not a single clean word with one trailing `*`.
+fn user_prefix_stem(text: &str) -> Option<&str> {
+    let stem = text.strip_suffix('*')?;
+    if stem.is_empty() || stem.contains(' ') || stem.contains('"') || stem.contains('*') {
+        None
+    } else {
+        Some(stem)
+    }
 }
 
 /// Render a single content term as an FTS5 token:
@@ -234,6 +236,12 @@ pub fn render_term(t: &Term) -> String {
         Term::Token { text, phrase } => {
             if *phrase {
                 format!("\"{}\"", text.replace('"', "\"\""))
+            } else if let Some(stem) = user_prefix_stem(text) {
+                // A user-typed trailing `*` (`abc*`): render a plain Turso
+                // prefix (`abc*`). Turso rejects a single-term phrase-prefix
+                // (`"abc*"*`), which is what SQLite FTS5 needed; stripping the
+                // user `*` and appending the prefix suffix is equivalent.
+                format!("{stem}*")
             } else if needs_quoting(text) {
                 format!("\"{}\"*", text.replace('"', "\"\""))
             } else {
@@ -547,10 +555,7 @@ mod tests {
                 .iter()
                 .find(|f| f.key == "language")
                 .expect("a language filter");
-            assert!(
-                f.is_null(),
-                "language:{casing} must parse as a null filter"
-            );
+            assert!(f.is_null(), "language:{casing} must parse as a null filter");
         }
     }
 
@@ -573,7 +578,7 @@ mod tests {
         // FTS5 **prefix queries** (`apple` → `apple*`) to support substring
         // *from the start* of a word (the interactive-search behavior).
         // Whitespace between tokens is still implicit AND.
-        assert_eq!(q.render_fts(), "apple* banana*");
+        assert_eq!(q.render_fts(), "apple* AND banana*");
     }
 
     #[test]
@@ -603,7 +608,7 @@ mod tests {
         // kb-db/tests/fts5.rs empirical probe that LOCKS this against the
         // bundled SQLite 3.46.0 engine).
         let q = parse("~llm ~mllm attention -gpt");
-        assert_eq!(q.render_fts(), "(llm* OR mllm*) NOT gpt* attention*");
+        assert_eq!(q.render_fts(), "(llm* OR mllm*) AND attention* NOT gpt*");
     }
 
     #[test]
@@ -647,25 +652,25 @@ mod tests {
     }
 
     #[test]
-    fn star_in_content_is_quoted() {
-        // SECURITY_REPORT 3.18: a user-typed `*` must not double up against
-        // the prefix-append rule (`abc*` → `abc**` is an FTS5 syntax error).
-        // Routing `*`-bearing tokens through the quoted branch keeps the
-        // rendered string a valid FTS5 query for every input.
+    fn star_in_content_is_a_plain_prefix() {
+        // A user-typed trailing `*` must not double up against the
+        // prefix-append rule (`abc*` → `abc**` is a syntax error). Turso also
+        // rejects single-term phrase-prefixes (`"abc*"*`), so strip the user
+        // `*` and emit a normal prefix (`abc*`) instead.
         let t = Term::Token {
             text: String::from("abc*"),
             phrase: false,
         };
-        assert_eq!(render_term(&t), "\"abc*\"*");
+        assert_eq!(render_term(&t), "abc*");
         let t = Term::Token {
             text: String::from("žltá*"),
             phrase: false,
         };
-        assert_eq!(render_term(&t), "\"žltá*\"*");
+        assert_eq!(render_term(&t), "žltá*");
         // And the whole query still parses: `render_fts` composes render_term
         // over every clause, so a `*`-bearing bare term is the regression case.
         let q = parse("abc*");
-        assert_eq!(q.render_fts(), "\"abc*\"*");
+        assert_eq!(q.render_fts(), "abc*");
     }
 
     /// F1 table-driven pin: `render_term` over the full token-class set,
@@ -687,8 +692,8 @@ mod tests {
             // plain single token → prefix, unquoted
             (bare("plain"), "plain*"),
             // user-typed `*` → quoted, then prefix (3.18 regression)
-            (bare("abc*"), "\"abc*\"*"),
-            (bare("žltá*"), "\"žltá*\"*"),
+            (bare("abc*"), "abc*"),
+            (bare("žltá*"), "žltá*"),
             // a quote in the body → doubled, then prefix
             (bare("a\"b"), "\"a\"\"b\"*"),
             // whitespace forces quoting — but a *single* bare token is

@@ -289,16 +289,13 @@ pub fn is_uri_like(s: &str) -> bool {
         return false;
     }
     let scheme = &b[..colon];
-    let ok_scheme = scheme
-        .iter()
-        .enumerate()
-        .all(|(i, &c)| {
-            if i == 0 {
-                c.is_ascii_alphabetic()
-            } else {
-                c.is_ascii_alphanumeric() || c == b'-' || c == b'+' || c == b'.'
-            }
-        });
+    let ok_scheme = scheme.iter().enumerate().all(|(i, &c)| {
+        if i == 0 {
+            c.is_ascii_alphabetic()
+        } else {
+            c.is_ascii_alphanumeric() || c == b'-' || c == b'+' || c == b'.'
+        }
+    });
     if !ok_scheme {
         return false;
     }
@@ -348,7 +345,7 @@ pub fn detect_refs(line: &str) -> Vec<RawLink> {
                 if !target.is_empty() {
                     out.push(RawLink {
                         start: content_start - 2, // the opening `[` of `[[`
-                        end: i + 2,                // just past the closing `]]`
+                        end: i + 2,               // just past the closing `]]`
                         target,
                         label: None,
                         form: TargetKind::Wikilink,
@@ -380,7 +377,7 @@ pub fn detect_refs(line: &str) -> Vec<RawLink> {
             let label = line[content_start..i].trim().to_string();
             let close_bracket = i;
             i += 1; // past `]`
-            // peek past whitespace for `(`
+                    // peek past whitespace for `(`
             let mut j = i;
             while j < n && bytes[j].is_ascii_whitespace() {
                 j += 1;
@@ -403,13 +400,13 @@ pub fn detect_refs(line: &str) -> Vec<RawLink> {
                 if close {
                     let target = line[paren_start..k].trim().to_string();
                     if !target.is_empty() {
-                    out.push(RawLink {
-                        start: open, // the opening `[`
-                        end: k + 1, // just past `)`
-                        target,
-                        label: if label.is_empty() { None } else { Some(label) },
-                        form: TargetKind::Inline,
-                    });
+                        out.push(RawLink {
+                            start: open, // the opening `[`
+                            end: k + 1,  // just past `)`
+                            target,
+                            label: if label.is_empty() { None } else { Some(label) },
+                            form: TargetKind::Inline,
+                        });
                     }
                     i = k + 1;
                 }
@@ -417,13 +414,13 @@ pub fn detect_refs(line: &str) -> Vec<RawLink> {
                 // plain form: `[ target ]`
                 let target = label; // the bracketed text is the target
                 if !target.is_empty() {
-                out.push(RawLink {
-                    start: open,
-                    end: close_bracket + 1,
-                    target,
-                    label: None,
-                    form: TargetKind::Plain,
-                });
+                    out.push(RawLink {
+                        start: open,
+                        end: close_bracket + 1,
+                        target,
+                        label: None,
+                        form: TargetKind::Plain,
+                    });
                 }
             }
         } else if c == b'<' {
@@ -587,15 +584,17 @@ pub fn classify_target(raw: &RawLink) -> Ref {
             target: raw.target.clone(),
             label: raw.label.clone(),
             kind: LinkKind::Current,
-            section: if section.is_empty() { None } else { Some(section) },
+            section: if section.is_empty() {
+                None
+            } else {
+                Some(section)
+            },
         };
     }
     // 2. `[ … ]` (a single bracket pair around the target) → `Db` (the *db*
     //    lookup key is the inner text). The *inner* brackets are stripped —
     //    the resolver consumes the slug, not the wrapper.
-    let is_bracketed = target.len() >= 2
-        && target.starts_with('[')
-        && target.ends_with(']');
+    let is_bracketed = target.len() >= 2 && target.starts_with('[') && target.ends_with(']');
     if is_bracketed {
         let inner = target[1..target.len() - 1].trim().to_string();
         return Ref {
@@ -927,9 +926,12 @@ mod tests {
         let l = "[w](/a.md) then [[ t ]] and < https://x.io >";
         let r = detect_refs(l);
         assert_eq!(
-            r.iter().map(|x| x.form)
-                .collect::<Vec<_>>(),
-            vec![TargetKind::Inline, TargetKind::Wikilink, TargetKind::External]
+            r.iter().map(|x| x.form).collect::<Vec<_>>(),
+            vec![
+                TargetKind::Inline,
+                TargetKind::Wikilink,
+                TargetKind::External
+            ]
         );
         assert!(r.windows(2).all(|w| w[0].end <= w[1].start));
     }
@@ -942,7 +944,10 @@ mod tests {
 
     #[test]
     fn classify_db_plain_and_wikilink() {
-        assert_eq!(cls("[[watchmaking guide]]"), classify_target(&detect_refs("[[watchmaking guide]]")[0]));
+        assert_eq!(
+            cls("[[watchmaking guide]]"),
+            classify_target(&detect_refs("[[watchmaking guide]]")[0])
+        );
         let w = cls("[[watchmaking guide]]");
         assert_eq!(w.kind, LinkKind::Db);
         assert_eq!(w.kind.style_str(&w.target), "wikilink");
@@ -1021,8 +1026,10 @@ mod tests {
         // both are Path — style is relative then absolute (document order).
         assert_eq!(
             rows,
-            vec![("notes/a.md".into(), "relative".into()),
-                 ("/home/u/x.md".into(), "absolute".into())]
+            vec![
+                ("notes/a.md".into(), "relative".into()),
+                ("/home/u/x.md".into(), "absolute".into())
+            ]
         );
     }
 
@@ -1065,8 +1072,7 @@ mod tests {
         // Under v2, a bare token like `papers/foo.pdf` (no brackets) is
         // *prose*, not a reference — only spelled-out link forms are rows.
         let rows = extract_ref_rows("the paper is at papers/foo.pdf");
-        assert!(rows.is_empty(),
-            "v2 retired bare-token paths: {rows:?}");
+        assert!(rows.is_empty(), "v2 retired bare-token paths: {rows:?}");
     }
 
     #[test]

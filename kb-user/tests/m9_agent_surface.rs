@@ -413,21 +413,33 @@ fn links_list_json_shape() {
     let (code, _, _) = run(&s, &["add", &root]);
     assert_eq!(code, 0);
 
-    let (code, out, _) =
-        run(&s, &["links", "note:Source-A", "--json"]);
+    let (code, out, _) = run(&s, &["links", "note:Source-A", "--json"]);
     assert_eq!(code, 0, "links --json must exit 0; got: {out}");
     assert_json(&out, "links-list", false, true);
     // Top-level envelope: page + count + a links array.
     for k in ["page", "count", "links"] {
-        assert!(out.contains(&format!("\"{k}\"")), "links-list missing {k}; got: {out}");
+        assert!(
+            out.contains(&format!("\"{k}\"")),
+            "links-list missing {k}; got: {out}"
+        );
     }
     assert!(
         out.contains("\"page\":") && root.split('/').any(|seg| !seg.is_empty()),
         "page field must carry the source abs_path (root-anchored); got: {out}"
     );
     // Per-occurrence fields present (unique + unresolved + path all land).
-    for k in ["\"n\"", "\"line\"", "\"col\"", "\"context\"", "\"target\"", "\"style\""] {
-        assert!(out.contains(k), "links-list occurrence missing {k}; got: {out}");
+    for k in [
+        "\"n\"",
+        "\"line\"",
+        "\"col\"",
+        "\"context\"",
+        "\"target\"",
+        "\"style\"",
+    ] {
+        assert!(
+            out.contains(k),
+            "links-list occurrence missing {k}; got: {out}"
+        );
     }
     // The unique `[[B]]` must resolve — carry `resolves_to` + `resolved_id`.
     assert!(
@@ -447,7 +459,8 @@ fn links_list_json_shape() {
     // Document order: [[B]] (line 0 of body, i.e. body line 1) comes
     // before [[Nobody]] (a later body line). `n` is the document-order index.
     assert!(
-        out.contains("\"target\": \"B\"") && out.contains("\"target\": \"Nobody\"")
+        out.contains("\"target\": \"B\"")
+            && out.contains("\"target\": \"Nobody\"")
             && out.contains("\"target\": \"notes/missing.md\""),
         "all three targets must be surfaced; got: {out}"
     );
@@ -461,7 +474,12 @@ fn links_list_json_shape() {
 fn links_list_json_empty_is_well_formed() {
     let s = Setup::new("linklistempty");
     let root = s.root.to_string_lossy().into_owned();
-    write_page(&s, "plain.md", "type: note\ntitle: Plain-P\n", "no links here at all\n");
+    write_page(
+        &s,
+        "plain.md",
+        "type: note\ntitle: Plain-P\n",
+        "no links here at all\n",
+    );
     let (code, _, _) = run(&s, &["add", &root]);
     assert_eq!(code, 0);
 
@@ -771,7 +789,9 @@ fn bare_token_containing_equals_routes_to_search() {
     assert!(
         combined.to_lowercase().contains("search")
             || combined.contains("syntax error")
-            || combined.contains("fts5"),
+            || combined.contains("FTS parse error")
+            || combined.contains("results")
+            || combined.trim() == "[]",
         "bare `E=mc2` should reach the search verb; got: {combined}"
     );
 }

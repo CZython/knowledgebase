@@ -14,7 +14,7 @@
 // The **multi-file namespace** (DB-backed: `add` / `drop-root` / `search` /
 // `browse` / `tag` / `link` / …) is implemented in M5/M7 — full root
 // registration, FTS search, tag/alias, and link operations backed by the
-// `kb-db` crate's SQLite + FTS5 store.
+// `kb-db` crate's Turso + FTS store.
 //
 // ## Agent contract (locked, PLAN §13f)
 // * **Read** is scoped + minimal: `kb toc <file>` (outline only),
@@ -45,7 +45,7 @@ use kb_core::tags as kbtags;
 // `kb-user` package — the full build — keeps it on, mirroring the `editor` gate).
 #[cfg(feature = "tui")]
 mod tui;
-use rusqlite::{params, OptionalExtension};
+use kb_db::sql::{self as rusqlite, params, OptionalExtension};
 use kb_db::refresh as kb_refresh;
 use kb_db::Db;
 // D2: the gate-phrase column name now comes from one owner (kb-db), not a
@@ -93,7 +93,7 @@ pub const VARIANT: &str = if cfg!(feature = "editor") { "user" } else { "hardene
     } else {
         env!("CARGO_PKG_VERSION")
     },
-    about = "A single-binary Markdown knowledge base over embedded SQLite + FTS5 —\nindex a tree of notes, search them, and edit them by section.",
+    about = "A single-binary Markdown knowledge base over embedded Turso + FTS —\nindex a tree of notes, search them, and edit them by section.",
     // F3: the about/long_about text was identical in both builds, so a
     // hardened agent reading `kb-hardened --help` saw a promise ("ships a TUI
     // plus an in-editor flow") the build does not keep. Now variant-aware, the
@@ -103,7 +103,7 @@ pub const VARIANT: &str = if cfg!(feature = "editor") { "user" } else { "hardene
     long_about = if VARIANT == "hardened" {
         concat!(
             "kb is a single-binary Markdown knowledge base backed by an embedded\n",
-            "SQLite + FTS5 index. Register roots of note files, search them (with\n",
+            "Turso + FTS index. Register roots of note files, search them (with\n",
             "`type:`/`tag:` filters, OR/NOT, phrases, and tag-alias expansion), and\n",
             "correctly-shaped edits that take a whole new section's bytes in place of\n",
             "a diff, or apply external `diff -u` / `git diff` patches. All of the\n",
@@ -112,7 +112,7 @@ pub const VARIANT: &str = if cfg!(feature = "editor") { "user" } else { "hardene
             "build: headless for agents — no TUI, no in-editor flow."
         )
     } else {
-        "kb is a single-binary Markdown knowledge base backed by an embedded\nSQLite + FTS5 index. Register roots of note files, search them (with\n`type:`/`tag:` filters, OR/NOT, phrases, and tag-alias expansion), and\ncorrectly-shaped edits that take a whole new section's bytes in place of\na diff, or apply external `diff -u` / `git diff` patches. All of the\nedit / resolve / alias / index logic is in a Verus-verified pure-Rust\ncrate; the DB shell is an assumed boundary. This is the full build: it\nships a TUI plus an in-editor flow; the hardened variant is headless for\nagents."
+        "kb is a single-binary Markdown knowledge base backed by an embedded\nTurso + FTS index. Register roots of note files, search them (with\n`type:`/`tag:` filters, OR/NOT, phrases, and tag-alias expansion), and\ncorrectly-shaped edits that take a whole new section's bytes in place of\na diff, or apply external `diff -u` / `git diff` patches. All of the\nedit / resolve / alias / index logic is in a Verus-verified pure-Rust\ncrate; the DB shell is an assumed boundary. This is the full build: it\nships a TUI plus an in-editor flow; the hardened variant is headless for\nagents."
     },
 )]
 pub(crate) struct Cli {
@@ -1011,12 +1011,12 @@ fn reindex_after_write(dbpath: Option<&Path>, path: &Path, json: bool) -> Kb {
 }
 
 pub(crate) fn roots_with_seq(db: &Db) -> Result<Vec<(String, i64)>, (String, i32)> {
-    let mut stmt = db
+    let stmt = db
         .conn
         .prepare("SELECT path, seq FROM roots ORDER BY seq")
         .map_err(|e| (format!("prepare roots: {e}"), EXIT_ERR))?;
     let rows = stmt
-        .query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?)))
+        .query_map((), |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?)))
         .map_err(|e| (format!("query roots: {e}"), EXIT_ERR))?
         .collect::<Result<Vec<_>, _>>()
         .map_err(|e| (format!("read roots: {e}"), EXIT_ERR))?;
@@ -1071,11 +1071,11 @@ pub(crate) fn load_corpus(db: &Db) -> Result<Vec<resolver::Page>, (String, i32)>
     // `body` is carried on `Page` for the T8 section-level gate (`section_present`
     // on the target page). `COALESCE(body,'')` mirrors the established caller
     // pattern in `links.rs` / `tui/mod.rs` so the row type stays `String`.
-    let mut stmt = db.conn
+    let stmt = db.conn
         .prepare("SELECT abs_path, title, type, rel_path, COALESCE(body, '') FROM pages")
         .map_err(|e| (format!("prepare corpus: {e}"), EXIT_ERR))?;
     let rows = stmt
-        .query_map([], |r| {
+        .query_map((), |r| {
             Ok((
                 r.get::<_, String>(0)?,
                 r.get::<_, Option<String>>(1)?,

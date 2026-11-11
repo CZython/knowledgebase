@@ -4,18 +4,18 @@ pub(crate) fn cmd_tag(dbpath: Option<&Path>, tag: &str, json: bool) -> Kb {
     let db = open_db(dbpath)?;
 
     let aliases: Vec<(String, String)> = {
-        let mut stmt = db.conn.prepare("SELECT alias, canonical FROM tag_aliases")
+        let stmt = db.conn.prepare("SELECT alias, canonical FROM tag_aliases")
             .map_err(|e| (format!("prepare aliases: {e}"), EXIT_ERR))?;
-        let rows = stmt.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))
+        let rows = stmt.query_map((), |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))
             .map_err(|e| (format!("aliases: {e}"), EXIT_ERR))?
             .collect::<Result<_, _>>()
             .map_err(|e| (format!("aliases rows: {e}"), EXIT_ERR))?;
         rows
     };
     let all_tags: Vec<String> = {
-        let mut stmt = db.conn.prepare("SELECT DISTINCT tag FROM page_tags")
+        let stmt = db.conn.prepare("SELECT DISTINCT tag FROM page_tags")
             .map_err(|e| (format!("prepare tags: {e}"), EXIT_ERR))?;
-        let rows = stmt.query_map([], |r| r.get::<_, String>(0))
+        let rows = stmt.query_map((), |r| r.get::<_, String>(0))
             .map_err(|e| (format!("tags: {e}"), EXIT_ERR))?
             .collect::<Result<_, _>>()
             .map_err(|e| (format!("tag rows: {e}"), EXIT_ERR))?;
@@ -52,10 +52,10 @@ pub(crate) fn cmd_tag(dbpath: Option<&Path>, tag: &str, json: bool) -> Kb {
         in_list.join(",")
     );
 
-    let mut stmt = db.conn.prepare(&sql)
+    let stmt = db.conn.prepare(&sql)
         .map_err(|e| (format!("prepare tag query: {e}"), EXIT_ERR))?;
     let pages: Vec<(String, String, String, Option<String>, String, String)> = stmt
-        .query_map([], |r| {
+        .query_map((), |r| {
             Ok((
                 r.get::<_, String>(0)?,
                 r.get::<_, String>(1)?,
@@ -127,11 +127,11 @@ pub(crate) fn cmd_tag(dbpath: Option<&Path>, tag: &str, json: bool) -> Kb {
 
 /// Read the full `tag_aliases` table, sorted by alias (deterministic).
 pub(crate) fn read_all_aliases(db: &Db) -> Result<Vec<(String, String)>, (String, i32)> {
-    let mut stmt = db.conn
+    let stmt = db.conn
         .prepare("SELECT alias, canonical FROM tag_aliases ORDER BY alias")
         .map_err(|e| (format!("prepare: {e}"), EXIT_ERR))?;
     let rows = stmt
-        .query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))
+        .query_map((), |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))
         .map_err(|e| (format!("query: {e}"), EXIT_ERR))?
         .collect::<Result<Vec<_>, _>>()
         .map_err(|e| (format!("rows: {e}"), EXIT_ERR))?;
@@ -192,11 +192,11 @@ pub(crate) fn cmd_tag_alias(dbpath: Option<&Path>, o: &TagAliasOpts, json: bool)
     }
 
     if list {
-        let mut stmt = db.conn
+        let stmt = db.conn
             .prepare("SELECT alias, canonical FROM tag_aliases ORDER BY alias")
             .map_err(|e| (format!("prepare: {e}"), EXIT_ERR))?;
         let aliases = stmt
-            .query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))
+            .query_map((), |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))
             .map_err(|e| (format!("query: {e}"), EXIT_ERR))?
             .collect::<Result<Vec<_>, _>>()
             .map_err(|e| (format!("rows: {e}"), EXIT_ERR))?;
@@ -315,7 +315,7 @@ fn do_import(db: &Db, file: Option<&Path>, json: bool) -> Kb {
         .unchecked_transaction()
         .map_err(|e| (format!("begin import: {e}"), EXIT_ERR))?;
     {
-        let mut upsert = tx
+        let upsert = tx
             .prepare(
                 "INSERT INTO tag_aliases(alias, canonical) VALUES (?1, ?2)\n\
                   ON CONFLICT(alias) DO UPDATE SET canonical = excluded.canonical",

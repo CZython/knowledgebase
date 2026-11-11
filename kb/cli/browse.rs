@@ -34,7 +34,7 @@ fn fetch_browse_pages(
                 ORDER BY abs_path",
                 gate = GATE_COL
             );
-            let mut stmt = db.conn
+            let stmt = db.conn
                 .prepare(&browslike)
                 .map_err(|e| (format!("prepare browse: {e}"), EXIT_ERR))?;
             let rows = stmt
@@ -51,11 +51,11 @@ fn fetch_browse_pages(
                 ORDER BY root, rel_path",
                 gate = GATE_COL
             );
-            let mut stmt = db.conn
+            let stmt = db.conn
                 .prepare(&browseall)
                 .map_err(|e| (format!("prepare browse: {e}"), EXIT_ERR))?;
             let rows = stmt
-                .query_map([], &map_row)
+                .query_map((), &map_row)
                 .map_err(|e| (format!("browse query: {e}"), EXIT_ERR))?
                 .collect::<Result<Vec<_>, _>>()
                 .map_err(|e| (format!("browse rows: {e}"), EXIT_ERR))?;

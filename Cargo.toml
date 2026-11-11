@@ -2,7 +2,7 @@
 # Three crates — one verified core, one DB shell, one CLI:
 #
 #   kb-core     pure Rust + Verus (no std IO) — the *proven* logic
-#   kb-db       rusqlite + FTS5 — the *assumed* shell (FFI/SQL)
+#   kb-db       turso + FTS — the *assumed* shell (SQL/engine)
 #   kb-user     full CLI binary `kb` (clap) — TUI + editor + all verbs
 #   kb-hardened headless CLI binary `kb-hardened` — same body, tui+editor off
 #
@@ -37,7 +37,7 @@ license = "MIT"
 # `cargo publish` / docs.rs state the true floor.
 rust-version = "1.98.1"
 # Fallback description (each binary package overrides this below).
-description = "kb — a single-binary Markdown knowledge base over SQLite + FTS5, with a Verus-verified zero-dependency core"
+description = "kb — a single-binary Markdown knowledge base over Turso + FTS, with a Verus-verified zero-dependency core"
 
 [profile.release]
 # For a CLI we ship as a single binary (`cargo install` + the prebuilt
@@ -67,10 +67,19 @@ kb-db   = { path = "kb-db",   version = "0.1.0" }
 # metadata won't match what Verus expects.
 vstd = "=0.0.0-2026-09-06-0133"
 
-# --- SQLite (rusqlite + bundled SQLite C) ---
-# `bundled` compiles SQLite from source (needs a C compiler — probed at
-# M0. See §13.1). Avoids a system-wide libsqlite3.
-rusqlite = { version = "0.32", features = ["bundled"] }
+# --- Turso (pure-Rust SQLite-compatible engine) ---
+# There is deliberately NO C toolchain in the build. `default-features =
+# false` drops `mimalloc` (which bundles a C allocator) and only enables
+# `fts`, Turso's Tantivy-backed full-text search (SQLite FTS5 is not
+# supported by Turso). The `sync` feature — the one that pulls in tokio /
+# hyper for cloud sync — stays off: this is the embedded, local-only
+# engine, driven from sync code.
+turso = { version = "0.9.0-pre.5", default-features = false, features = ["fts"] }
+
+# A runtime-free executor for the few `async` Turso entry points. This is
+# NOT an async runtime: `block_on` polls the future to completion on the
+# calling thread and spawns nothing. `futures` is pure Rust.
+futures = { version = "0.3", default-features = false, features = ["executor"] }
 
 # --- CLI ---
 clap = { version = "4.5", features = ["derive"] }

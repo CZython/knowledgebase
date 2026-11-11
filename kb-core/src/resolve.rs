@@ -19,7 +19,7 @@
 //! A corpus is a sequence of [`Page`] rows (the `pages` table projected to its
 //! identity columns). A `Page` carries only what resolution reads: the
 //! canonical `abs_path`, the display `slug`, the `type`, and the
-//! root-relative `rel_path`. The resolver is **pure** — no IO, no `rusqlite` —
+//! root-relative `rel_path`. The resolver is **pure** — no IO, no database —
 //! so it runs under `cargo build`/`cargo test` *and* its outcome shape is
 //! pinned by `spec/resolve_spec.rs` (the 3-way `Unique | Candidates | Empty`
 //! partition, the uniqueness⟹single contract, `type:slug`-stage precedence,
@@ -482,26 +482,44 @@ mod tests {
     #[test]
     fn section_present_true_when_section_in_body() {
         let body = "# Page\n\n## Target\ncontent here\n\n## Other\ntoo\n";
-        assert!(section_present(body, "Target"), "unique title match → present");
-        assert!(section_present(body, "target"), "case-insensitive → present");
+        assert!(
+            section_present(body, "Target"),
+            "unique title match → present"
+        );
+        assert!(
+            section_present(body, "target"),
+            "case-insensitive → present"
+        );
         assert!(section_present(body, "1.1"), "dotted number → present");
-        assert!(section_present(body, "Page > Other"), "title path → present");
+        assert!(
+            section_present(body, "Page > Other"),
+            "title path → present"
+        );
     }
 
     #[test]
     fn section_present_false_when_missing() {
         let body = "# Page\n\n## A\nx\n\n## B\ny\n";
         assert!(!section_present(body, "C"), "section not in body → missing");
-        assert!(!section_present(body, "9.9"), "dotted ref not in body → missing");
+        assert!(
+            !section_present(body, "9.9"),
+            "dotted ref not in body → missing"
+        );
         assert!(!section_present("", "A"), "empty body → missing");
         assert!(!section_present(body, ""), "empty section ref → missing");
-        assert!(!section_present(body, "   "), "whitespace section ref → missing");
+        assert!(
+            !section_present(body, "   "),
+            "whitespace section ref → missing"
+        );
     }
 
     #[test]
     fn section_present_false_when_ambiguous() {
         let body = "# Root\n\n## Dup\na\n\n## Dup\nb\n";
-        assert!(!section_present(body, "Dup"), "two match → ambiguous → not present");
+        assert!(
+            !section_present(body, "Dup"),
+            "two match → ambiguous → not present"
+        );
     }
 
     #[test]

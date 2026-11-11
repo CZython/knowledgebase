@@ -20,3 +20,4 @@ verus-cache/
 --db=
 err.log
 out.json
+bundle

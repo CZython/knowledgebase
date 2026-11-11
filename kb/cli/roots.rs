@@ -2,11 +2,11 @@ use crate::*;
 
 pub(crate) fn cmd_roots(dbpath: Option<&Path>, json: bool) -> Kb {
     let db = open_db(dbpath)?;
-    let mut stmt = db.conn
+    let stmt = db.conn
         .prepare("SELECT path, added_at, extra_exts, include_hidden\nFROM roots\nORDER BY seq DESC, path")
         .map_err(|e| (format!("prepare: {e}"), EXIT_ERR))?;
     let roots = stmt
-        .query_map([], |r| {
+        .query_map((), |r| {
             Ok((
                 r.get::<_, String>(0)?,
                 r.get::<_, Option<String>>(1)?,

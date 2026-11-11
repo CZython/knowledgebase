@@ -107,7 +107,7 @@ Workspace root `members` becomes
         name = if cfg!(feature = "editor") { "kb" } else { "kb-hardened" },
         version = if cfg!(feature = "editor") { env!("CARGO_PKG_VERSION") }
                   { concat!(env!("CARGO_PKG_VERSION"), " [hardened]") },
-        about = "knowledgebase — single Rust CLI over embedded SQLite+FTS5",
+        about = "knowledgebase — single Rust CLI over embedded Turso+FTS",
     )]
     ```
    (`editor` is the proxy for "full variant": it is on only for `kb-user`.)

@@ -165,7 +165,7 @@ fn handle_browse(app: &mut App, ev: KeyEvent) -> bool {
             }
             false
         }
-        // `s` opens the Search mode (M8.4): full FTS5 power search with
+        // `s` opens the Search mode (M8.4): full FTS power search with
         // inline tag completion.
         KeyCode::Char('s') => {
             if let Err((msg, _)) = app.open_search() {
@@ -1046,6 +1046,7 @@ fn filter_edit_note(app: &App) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use kb_db::sql as rusqlite;
 
     fn key(c: char) -> KeyEvent {
         KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE)

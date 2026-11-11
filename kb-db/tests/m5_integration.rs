@@ -18,9 +18,9 @@
 
 use kb_db::index;
 use kb_db::refresh::{full_rebuild, refresh};
+use kb_db::sql::OptionalExtension;
 use kb_db::walk_snapshot;
 use kb_db::Db;
-use rusqlite::OptionalExtension;
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -62,12 +62,12 @@ impl Drop for Setup {
 
 fn count(db: &Db, table: &str) -> i64 {
     let sql = format!("SELECT COUNT(*) FROM {table}");
-    db.conn.query_row(&sql, [], |r| r.get(0)).unwrap()
+    db.conn.query_row(&sql, (), |r| r.get(0)).unwrap()
 }
 
 fn strings(db: &Db, sql: &str) -> Vec<String> {
-    let mut stmt = db.conn.prepare(sql).unwrap();
-    let it = stmt.query_map([], |r| r.get::<_, String>(0)).unwrap();
+    let stmt = db.conn.prepare(sql).unwrap();
+    let it = stmt.query_map((), |r| r.get::<_, String>(0)).unwrap();
     it.collect::<Result<Vec<_>, _>>().unwrap()
 }
 
@@ -110,13 +110,14 @@ fn index_derives_all_row_tables_and_fts() {
     // FTS is in sync via the *trigger* — search by description text.
     let hits = strings(
         &s.db,
-        "SELECT p.id FROM pages_fts JOIN pages p ON p.rowid = pages_fts.rowid
-           WHERE pages_fts MATCH 'attention' ORDER BY rank",
+        "SELECT id FROM pages
+           WHERE fts_match(title, description, body, frontmatter_text, 'attention')
+           ORDER BY id",
     );
     assert_eq!(
         hits,
         vec!["note:Attention API"],
-        "trigger must keep FTS in sync"
+        "Turso FTS index must stay in sync automatically"
     );
 
     // 2 tag rows.
@@ -431,13 +432,13 @@ fn reindex_single_page_preserves_language() {
     // (the `strings` helper above does `r.get::<_,String>(0)`, which errors
     // on a `NULL` value, so we coalesce in-SQL).
     fn read_lang(db: &Db, abs_path: &str) -> String {
-        let mut stmt = db
+        let stmt = db
             .conn
-            .prepare(&format!(
+            .prepare(format!(
                 "SELECT COALESCE(language, '__NULL__') FROM pages WHERE abs_path = '{abs_path}'"
             ))
             .unwrap();
-        let mut rows = stmt.query_map([], |r| r.get::<_, String>(0)).unwrap();
+        let mut rows = stmt.query_map((), |r| r.get::<_, String>(0)).unwrap();
         rows.next().unwrap().unwrap()
     }
     assert_eq!(

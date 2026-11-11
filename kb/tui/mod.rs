@@ -73,6 +73,7 @@ use ratatui::backend::CrosstermBackend;
 use ratatui::Terminal;
 
 use kb_db::Db;
+use kb_db::sql as rusqlite;
 #[cfg(test)]
 use unicode_width::UnicodeWidthStr;
 use kb_core::frontmatter as fm;
@@ -3851,9 +3852,9 @@ fn search_rows_to_pages(db: &Db, rows: &[crate::cli::search::SearchRow]) -> Vec<
     // Batched tags + gates load (the same two queries `list_pages` runs).
     fn batch_load(db: &Db) -> (std::collections::HashMap<String, Vec<String>>, std::collections::HashMap<String, Vec<String>>) {
         let mut tags_by: std::collections::HashMap<String, Vec<String>> = Default::default();
-        if let Ok(mut st) = db.conn.prepare("SELECT abs_path, tag FROM page_tags ORDER BY tag") {
+        if let Ok(st) = db.conn.prepare("SELECT abs_path, tag FROM page_tags ORDER BY tag") {
             if let Ok(items) = st
-                .query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))
+                .query_map((), |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))
                 .and_then(|rows| rows.collect::<Result<Vec<_>, _>>())
             {
                 for (ap, tag) in items {
@@ -3862,9 +3863,9 @@ fn search_rows_to_pages(db: &Db, rows: &[crate::cli::search::SearchRow]) -> Vec<
             }
         }
         let mut gates_by: std::collections::HashMap<String, Vec<String>> = Default::default();
-        if let Ok(mut st) = db.conn.prepare("SELECT abs_path, term FROM page_gates ORDER BY term") {
+        if let Ok(st) = db.conn.prepare("SELECT abs_path, term FROM page_gates ORDER BY term") {
             if let Ok(items) = st
-                .query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))
+                .query_map((), |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))
                 .and_then(|rows| rows.collect::<Result<Vec<_>, _>>())
             {
                 for (ap, term) in items {
@@ -3927,19 +3928,19 @@ fn suggest_tags(db: &Db, partial: &str) -> Vec<TagSuggestion> {
 
     // All distinct tags in the corpus.
     let mut tags: Vec<String> = Vec::new();
-    if let Ok(mut st) = db.conn.prepare("SELECT DISTINCT tag FROM page_tags ORDER BY tag") {
-        if let Ok(items) = st.query_map([], |r| r.get::<_, String>(0)).and_then(|rows| rows.collect::<Result<Vec<_>, _>>()) {
+    if let Ok(st) = db.conn.prepare("SELECT DISTINCT tag FROM page_tags ORDER BY tag") {
+        if let Ok(items) = st.query_map((), |r| r.get::<_, String>(0)).and_then(|rows| rows.collect::<Result<Vec<_>, _>>()) {
             tags = items;
         }
     }
     // All aliases (alias, canonical) — sorted by alias for stable output.
     let mut aliases: Vec<(String, String)> = Vec::new();
-    if let Ok(mut st) = db
+    if let Ok(st) = db
         .conn
         .prepare("SELECT alias, canonical FROM tag_aliases ORDER BY alias")
     {
         if let Ok(items) = st
-            .query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))
+            .query_map((), |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))
             .and_then(|rows| rows.collect::<Result<Vec<_>, _>>())
         {
             aliases = items;
@@ -4161,12 +4162,12 @@ pub fn corpus_for(db: &Db, field: EditField) -> Vec<String> {
         }
         _ => return Vec::new(),
     };
-    let mut stmt = match db.conn.prepare(sql) {
+    let stmt = match db.conn.prepare(sql) {
         Ok(s) => s,
         Err(_) => return Vec::new(),
     };
     let out: std::result::Result<Vec<String>, rusqlite::Error> = stmt
-        .query_map([], |r| r.get(0))
+        .query_map((), |r| r.get(0))
         .and_then(|rows| rows.collect());
     out.unwrap_or_default()
 }
@@ -4212,12 +4213,12 @@ fn truncate_str(s: &str, max: usize) -> String {
 /// `cmd_tag_alias --list`, ordered `alias ASC` — deterministic, so the
 /// render never reshuffles on a re-load).
 fn list_aliases(db: &Db) -> KbResult<Vec<AliasRow>> {
-    let mut stmt = db
+    let stmt = db
         .conn
         .prepare("SELECT alias, canonical FROM tag_aliases ORDER BY alias")
         .map_err(|e| (format!("prepare aliases: {e}"), EXIT_ERR))?;
     let out = stmt
-        .query_map([], |r| Ok(AliasRow { alias: r.get(0)?, canonical: r.get(1)? }))
+        .query_map((), |r| Ok(AliasRow { alias: r.get(0)?, canonical: r.get(1)? }))
         .map_err(|e| (format!("query aliases: {e}"), EXIT_ERR))?
         .collect::<Result<Vec<_>, _>>()
         .map_err(|e| (format!("rows aliases: {e}"), EXIT_ERR))?;
@@ -4228,14 +4229,14 @@ fn list_aliases(db: &Db) -> KbResult<Vec<AliasRow>> {
 /// `Db::list_roots` surface, ordered `path ASC` — the same order the CLI
 /// list uses). `extra_exts` is the raw column (the render trims/joins it).
 fn list_roots(db: &Db) -> KbResult<Vec<RootsRow>> {
-    let mut stmt = db
+    let stmt = db
         .conn
         .prepare(
             "SELECT path, extra_exts, include_hidden, added_at FROM roots ORDER BY path",
         )
         .map_err(|e| (format!("prepare roots: {e}"), EXIT_ERR))?;
     let out = stmt
-        .query_map([], |r| {
+        .query_map((), |r| {
             Ok(RootsRow {
                 path: r.get::<_, String>(0)?,
                 extra_exts: r.get::<_, Option<String>>(1)?,
@@ -4270,7 +4271,7 @@ fn canonicalize_dir_for_add(raw: &str) -> KbResult<String> {
 /// Snapshot all pages (the same query as `cmd_browse`, no filter, ordered
 /// by `root, rel_path`).
 fn list_pages(db: &Db) -> KbResult<Vec<PageRow>> {
-    let mut stmt = db.conn
+    let stmt = db.conn
         .prepare(
             "SELECT abs_path, id, type, title, root, rel_path\n\
              FROM pages\n\
@@ -4278,7 +4279,7 @@ fn list_pages(db: &Db) -> KbResult<Vec<PageRow>> {
         )
         .map_err(|e| (format!("prepare: {e}"), EXIT_ERR))?;
     let mut rows: Vec<PageRow> = stmt
-        .query_map([], |r| {
+        .query_map((), |r| {
             Ok(PageRow {
                 abs_path: r.get::<_, String>(0)?,
                 id: r.get::<_, String>(1)?,
@@ -4299,11 +4300,11 @@ fn list_pages(db: &Db) -> KbResult<Vec<PageRow>> {
     let mut tags_by: std::collections::HashMap<String, Vec<String>> =
         std::collections::HashMap::new();
     {
-        let mut st = db.conn
+        let st = db.conn
             .prepare("SELECT abs_path, tag FROM page_tags ORDER BY tag")
             .map_err(|e| (format!("prepare page_tags: {e}"), EXIT_ERR))?;
         let items: Vec<(String, String)> = st
-            .query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))
+            .query_map((), |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))
             .map_err(|e| (format!("query page_tags: {e}"), EXIT_ERR))?
             .collect::<Result<Vec<_>, _>>()
             .map_err(|e| (format!("page_tags rows: {e}"), EXIT_ERR))?;
@@ -4314,11 +4315,11 @@ fn list_pages(db: &Db) -> KbResult<Vec<PageRow>> {
     let mut gates_by: std::collections::HashMap<String, Vec<String>> =
         std::collections::HashMap::new();
     {
-        let mut st = db.conn
+        let st = db.conn
             .prepare("SELECT abs_path, term FROM page_gates ORDER BY term")
             .map_err(|e| (format!("prepare page_gates: {e}"), EXIT_ERR))?;
         let items: Vec<(String, String)> = st
-            .query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))
+            .query_map((), |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))
             .map_err(|e| (format!("query page_gates: {e}"), EXIT_ERR))?
             .collect::<Result<Vec<_>, _>>()
             .map_err(|e| (format!("page_gates rows: {e}"), EXIT_ERR))?;
@@ -4382,7 +4383,7 @@ fn load_fm_meta(db: &Db, abs_path: &str) -> KbResult<FmMeta> {
         )
         .map_err(|e| (format!("meta lookup for {abs_path}: {e}"), EXIT_ERR))?;
     let mut tags: Vec<String> = Vec::new();
-    if let Ok(mut stmt) = db
+    if let Ok(stmt) = db
         .conn
         .prepare("SELECT tag FROM page_tags WHERE abs_path = ?1 ORDER BY tag")
     {
@@ -6441,12 +6442,12 @@ mod tests {
     }
     fn roots_count(db: &Db) -> usize {
         db.conn
-            .query_row("SELECT COUNT(*) FROM roots", [], |r| r.get::<_, i64>(0))
+            .query_row("SELECT COUNT(*) FROM roots", (), |r| r.get::<_, i64>(0))
             .unwrap() as usize
     }
     fn pages_count(db: &Db) -> usize {
         db.conn
-            .query_row("SELECT COUNT(*) FROM pages", [], |r| r.get::<_, i64>(0))
+            .query_row("SELECT COUNT(*) FROM pages", (), |r| r.get::<_, i64>(0))
             .unwrap() as usize
     }
 

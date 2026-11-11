@@ -1186,9 +1186,18 @@ mod tests {
         let d = Doc::new(b"# Top\ntop\n\n## Mid\nmid\n\n## Bot\nbot\n".to_vec());
         let new = d.remove_section("1.1").unwrap();
         let s = String::from_utf8(new).unwrap();
-        assert!(s.contains("## Bot") && s.contains("bot"), "sibling after survives: {s:?}");
-        assert!(s.contains("# Top") && s.contains("top"), "sibling before survives: {s:?}");
-        assert!(!s.contains("## Mid") && !s.contains("mid"), "target gone: {s:?}");
+        assert!(
+            s.contains("## Bot") && s.contains("bot"),
+            "sibling after survives: {s:?}"
+        );
+        assert!(
+            s.contains("# Top") && s.contains("top"),
+            "sibling before survives: {s:?}"
+        );
+        assert!(
+            !s.contains("## Mid") && !s.contains("mid"),
+            "target gone: {s:?}"
+        );
         // No doubled blank where the section used to be.
         assert!(!s.contains("top\n\n\n"), "separator doubled: {s:?}");
         assert!(s.ends_with('\n'), "newline-terminated: {s:?}");
@@ -1199,8 +1208,14 @@ mod tests {
         let d = Doc::new(b"# Top\ntop\n\n## Bot\nbot\n".to_vec());
         let new = d.remove_section("1.1").unwrap();
         let s = String::from_utf8(new).unwrap();
-        assert!(s.contains("# Top") && s.contains("top"), "Top survives: {s:?}");
-        assert!(!s.contains("## Bot") && !s.contains("bot"), "Bot gone: {s:?}");
+        assert!(
+            s.contains("# Top") && s.contains("top"),
+            "Top survives: {s:?}"
+        );
+        assert!(
+            !s.contains("## Bot") && !s.contains("bot"),
+            "Bot gone: {s:?}"
+        );
         // The trailing separator of the removed last section is folded into a
         // single newline (the ensure_trailing_newline convention).
         assert!(s.ends_with("top\n"), "exactly one trailing newline: {s:?}");
@@ -1210,20 +1225,31 @@ mod tests {
     fn remove_section_whole_root_empties_buffer() {
         let d = Doc::new(b"# Top\ntop\n\n## Mid\nmid\n".to_vec());
         let new = d.remove_section("1").unwrap();
-        assert!(new.is_empty(), "removing the root section yields an empty buffer: {new:?}");
+        assert!(
+            new.is_empty(),
+            "removing the root section yields an empty buffer: {new:?}"
+        );
     }
 
     #[test]
     fn remove_section_includes_its_subtree() {
         // Refs: Root=1, Alpha=1.1, Alpha-Sub=1.1.1, Beta=1.2.
-        let d = Doc::new(b"# Root\nroot\n\n## Alpha\nalpha\n\n### Alpha-Sub\nsub\n\n## Beta\nbeta\n".to_vec());
+        let d = Doc::new(
+            b"# Root\nroot\n\n## Alpha\nalpha\n\n### Alpha-Sub\nsub\n\n## Beta\nbeta\n".to_vec(),
+        );
         let new = d.remove_section("1.1").unwrap();
         let s = String::from_utf8(new).unwrap();
-        assert!(s.contains("# Root") && s.contains("root"), "Root intact: {s:?}");
+        assert!(
+            s.contains("# Root") && s.contains("root"),
+            "Root intact: {s:?}"
+        );
         assert!(!s.contains("## Alpha"), "Alpha gone: {s:?}");
         assert!(!s.contains("### Alpha-Sub"), "child also gone: {s:?}");
         assert!(!s.contains("\nsub\n"), "child body gone: {s:?}");
-        assert!(s.contains("## Beta") && s.contains("beta"), "sibling Beta intact: {s:?}");
+        assert!(
+            s.contains("## Beta") && s.contains("beta"),
+            "sibling Beta intact: {s:?}"
+        );
     }
 
     #[test]
@@ -1265,7 +1291,10 @@ mod tests {
         let d = Doc::new(b"# Root\n\n## A\ncurrent A body\n\n## B\nb body\n".to_vec());
         let new = d.append_section("1.1", "new line\n\n").unwrap();
         let s = String::from_utf8(new).unwrap();
-        assert_eq!(s, "# Root\n\n## A\ncurrent A body\n\nnew line\n\n## B\nb body\n");
+        assert_eq!(
+            s,
+            "# Root\n\n## A\ncurrent A body\n\nnew line\n\n## B\nb body\n"
+        );
     }
 
     #[test]
@@ -1274,7 +1303,10 @@ mod tests {
         let d = Doc::new(b"# Root\n\n## A\ncurrent A body\n\n## B\nb body\n".to_vec());
         let new = d.append_section("1.1", "\nnew line").unwrap();
         let s = String::from_utf8(new).unwrap();
-        assert_eq!(s, "# Root\n\n## A\ncurrent A body\n\nnew line\n\n## B\nb body\n");
+        assert_eq!(
+            s,
+            "# Root\n\n## A\ncurrent A body\n\nnew line\n\n## B\nb body\n"
+        );
     }
 
     #[test]
@@ -1418,7 +1450,10 @@ mod tests {
     fn t7_lookup_single_h1_resolves_to_line_zero() {
         // a page that is itself one H1 with no sub-structure still resolves
         assert_eq!(section_lookup("# Only Heading\nbody\n", "1"), Ok(Some(0)));
-        assert_eq!(section_lookup("# Only Heading\nbody\n", "Only Heading"), Ok(Some(0)));
+        assert_eq!(
+            section_lookup("# Only Heading\nbody\n", "Only Heading"),
+            Ok(Some(0))
+        );
     }
 
     #[test]
@@ -1430,6 +1465,9 @@ mod tests {
         // lines: 0="# Root" 1="" 2="## A" 3="x" 4="" 5="## A" 6="y"
         assert_eq!(section_lookup_line(body, "1.1"), Some(2));
         // clean (non-ambiguous) page → returns the line
-        assert_eq!(section_lookup_line("# Root\n\n## A\nx\n\n## B\ny\n", "B"), Some(5));
+        assert_eq!(
+            section_lookup_line("# Root\n\n## A\nx\n\n## B\ny\n", "B"),
+            Some(5)
+        );
     }
 }

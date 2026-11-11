@@ -1,22 +1,24 @@
-//! # kb-db — the *assumed* shell over SQLite (PLAN.md §10)
+//! # kb-db — the *assumed* shell over Turso (PLAN.md §10)
 //!
-//! Talks to `rusqlite` (bundled, sync — **no tokio / no async**; see
-//! PLAN.md §2.3 and §13.7). The boundary between "proven" (`kb-core`)
-//! and "assumed" (`kb-db`) is *visible* in the dependency graph:
-//! `kb-db` depends on `kb-core`, never the other way round.
+//! Talks to Turso (pure-Rust, sync façade — **no tokio / no async runtime**;
+//! see [`sql`]). The boundary between "proven" (`kb-core`) and "assumed"
+//! (`kb-db`) is *visible* in the dependency graph: `kb-db` depends on
+//! `kb-core`, never the other way round.
 //!
 //! M0 contents: a `Db` newtype that opens the file, one tiny schema
 //! (the `roots` table — the only *non-derivable* state we commit to
 //! on disk), and a smoke test that opens an in-memory DB and writes a
-//! row. FTS5 probes (`bm25` / `snippet` shape / multiprocess WAL) come
+//! row. FTS probes (`fts_score` / `fts_highlight` shape / multiprocess WAL) come
 //! in M1 (PLAN.md §12) as focused integration tests.
 
 pub mod index;
+pub mod legacy;
 pub mod migrate;
 pub mod refresh;
+pub mod sql;
 pub mod walk_snapshot;
 
-use rusqlite::{Connection, Result};
+use crate::sql::{Connection, Result};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -34,6 +36,11 @@ pub struct Db {
 // distinct temp files and never share a database with one another.
 static TEST_DB_COUNTER: AtomicU64 = AtomicU64::new(0);
 
+fn is_missing_fts5(e: &crate::sql::Error) -> bool {
+    e.to_string()
+        .contains("Virtual table module not found: fts5")
+}
+
 impl Db {
     /// Open or create the SQLite DB at `path`.
     ///
@@ -46,7 +53,25 @@ impl Db {
         let conn = if is_memory {
             Connection::open_in_memory()?
         } else {
-            Connection::open(path)?
+            match Connection::open(path) {
+                Ok(conn) => conn,
+                Err(e) if is_missing_fts5(&e) => {
+                    // A DB created by the old SQLite/FTS5 build has a
+                    // `pages_fts` virtual table Turso cannot load. Neutralise
+                    // that schema entry in place, then retry the open.
+                    crate::legacy::neutralize_fts5_vtables(path).map_err(|io| {
+                        crate::sql::Error::SqliteFailure(
+                            crate::sql::ffi::Error::new(-1),
+                            Some(format!(
+                                "cannot migrate legacy FTS5 database {}: {io}",
+                                path.display()
+                            )),
+                        )
+                    })?;
+                    Connection::open(path)?
+                }
+                Err(e) => return Err(e),
+            }
         };
         if !is_memory {
             conn.pragma_update(None, "journal_mode", "WAL")?;
@@ -77,8 +102,8 @@ impl Db {
         let n = TEST_DB_COUNTER.fetch_add(1, Ordering::Relaxed);
         let dir = std::env::temp_dir().join("kb_db_tests");
         std::fs::create_dir_all(&dir).map_err(|e| {
-            rusqlite::Error::SqliteFailure(
-                rusqlite::ffi::Error::new(-1),
+            crate::sql::Error::SqliteFailure(
+                crate::sql::ffi::Error::new(-1),
                 Some(format!("create_dir_all failed: {e}")),
             )
         })?;
@@ -109,11 +134,11 @@ impl Db {
     /// share one code path.
     pub fn open_default() -> Result<Db> {
         let path = Self::default_db_path()
-            .ok_or_else(|| rusqlite::Error::InvalidPath(PathBuf::from(".")))?;
+            .ok_or_else(|| crate::sql::Error::InvalidPath(PathBuf::from(".")))?;
         if let Some(dir) = path.parent() {
             std::fs::create_dir_all(dir).map_err(|e| {
-                rusqlite::Error::SqliteFailure(
-                    rusqlite::ffi::Error::new(-1),
+                crate::sql::Error::SqliteFailure(
+                    crate::sql::ffi::Error::new(-1),
                     Some(format!("create_dir_all failed: {e}")),
                 )
             })?;
@@ -151,7 +176,7 @@ impl Db {
     ) -> Result<usize> {
         let next_seq: i64 = self
             .conn
-            .query_row("SELECT COALESCE(MAX(seq), 0) + 1 FROM roots", [], |r| {
+            .query_row("SELECT COALESCE(MAX(seq), 0) + 1 FROM roots", (), |r| {
                 r.get::<_, i64>(0)
             })
             .unwrap_or(1);
@@ -175,9 +200,9 @@ impl Db {
 
     /// M0 smoke: list the roots. Empty vec if the table is empty.
     pub fn list_roots(&self) -> Result<Vec<String>> {
-        let mut stmt = self.conn.prepare("SELECT path FROM roots ORDER BY path")?;
+        let stmt = self.conn.prepare("SELECT path FROM roots ORDER BY path")?;
         let out = stmt
-            .query_map([], |r| r.get::<_, String>(0))?
+            .query_map((), |r| r.get::<_, String>(0))?
             .collect::<Result<Vec<_>>>()?;
         Ok(out)
     }
@@ -187,12 +212,14 @@ impl Db {
     /// survive if they are still under another remaining root (the GC
     /// happens on the next `refresh`).
     pub fn drop_root(&self, path: &str) -> Result<usize> {
-        self.conn
-            .execute("DELETE FROM roots WHERE path = ?1", rusqlite::params![path])
+        self.conn.execute(
+            "DELETE FROM roots WHERE path = ?1",
+            crate::sql::params![path],
+        )
     }
 
     /// Apply the full M5 schema (roots + pages + page_gates + page_tags +
-    /// meta + tag_aliases + links + pages_fts + the FTS5 sync triggers),
+    /// meta + tag_aliases + links + the native FTS index),
     /// idempotently. Called once by the CLI on startup; `open` /
     /// `open_in_memory_test` do NOT call it automatically, so the M0
     /// smoke tests (which create their own minimal schema) stay green.
@@ -203,7 +230,7 @@ impl Db {
     /// The current schema version tag (from `meta.version`), or `None` if
     /// the DB has not been migrated yet.
     pub fn schema_version(&self) -> Result<Option<String>> {
-        use rusqlite::OptionalExtension;
+        use crate::sql::OptionalExtension;
         // SECURITY_REPORT 3.15: an *unmigrated* DB has no `meta` table, so the
         // `SELECT … FROM meta` below would `SqliteFailure("no such
         // table:meta")` — and `.optional()?` only swallows `NoRows` (an empty
@@ -220,7 +247,7 @@ impl Db {
         }
         let v: Option<String> = self
             .conn
-            .query_row("SELECT value FROM meta WHERE key='version'", [], |r| {
+            .query_row("SELECT value FROM meta WHERE key='version'", (), |r| {
                 r.get(0)
             })
             .optional()?;

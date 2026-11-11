@@ -16,7 +16,7 @@ fn resolve_target_path(
         return Ok(Some(target.to_string()));
     }
     if target.contains(':') {
-        let mut stmt = db.conn
+        let stmt = db.conn
             .prepare("SELECT abs_path FROM pages WHERE id = ?1")
             .map_err(|e| (format!("prepare id lookup: {e}"), EXIT_ERR))?;
         return stmt
@@ -24,7 +24,7 @@ fn resolve_target_path(
             .optional()
             .map_err(|e| (format!("id lookup: {e}"), EXIT_ERR));
     }
-    let mut stmt = db.conn
+    let stmt = db.conn
         .prepare("SELECT abs_path FROM pages WHERE abs_path = ?1 OR abs_path LIKE '%' || ?1")
         .map_err(|e| (format!("prepare path lookup: {e}"), EXIT_ERR))?;
     stmt.query_row(rusqlite::params![target], |r| r.get::<_, String>(0))
@@ -60,7 +60,7 @@ pub(crate) fn cmd_links(dbpath: Option<&Path>, target: &str, dedup: bool, json: 
         // forward links — resolve raw wikilink/path targets to their page id.
         // Collect into (to_path, style, Some(resolved_abs) | None) so the
         // human + JSON renderers share the exact same resolution.
-        let mut fwd_stmt = db.conn
+        let fwd_stmt = db.conn
             .prepare("SELECT to_path, style FROM links WHERE from_path = ?1 ORDER BY to_path, style")
             .map_err(|e| (format!("prepare fwd: {e}"), EXIT_ERR))?;
         let forward_raw: Vec<(String, String)> = fwd_stmt
@@ -87,10 +87,10 @@ pub(crate) fn cmd_links(dbpath: Option<&Path>, target: &str, dedup: bool, json: 
         // of re-preparing the statement per corpus page (N prepares for N
         // pages).
         let edges_by_from: std::collections::BTreeMap<String, Vec<String>> = {
-            let mut e = db.conn
+            let e = db.conn
                 .prepare("SELECT from_path, to_path FROM links")
                 .map_err(|e| (format!("prepare back-edge: {e}"), EXIT_ERR))?;
-            let rows = e.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))
+            let rows = e.query_map((), |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))
                 .map_err(|e| (format!("back-edge query: {e}"), EXIT_ERR))?;
             let mut map: std::collections::BTreeMap<String, Vec<String>> = std::collections::BTreeMap::new();
             for row in rows {

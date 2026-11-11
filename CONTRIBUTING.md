@@ -69,7 +69,7 @@ There is no `kb/` package; it is a plain directory that both binaries share.
 | Path                    | Role                                                    |
 |-------------------------|---------------------------------------------------------|
 | `kb-core/`              | Pure, Verus-verified core (frontmatter, identity, FTS grammar, etc.) |
-| `kb-db/`                | SQLite + FTS5 shell around `kb-core`                    |
+| `kb-db/`                | Turso + FTS shell around `kb-core`                      |
 | `kb/main.rs`            | Shared CLI body (~3 267 lines) — clap, TUI, `$EDITOR`, section ops |
 | `kb-user/`              | Thin package → binary `kb` (TUI + editor + every verb)  |
 | `kb-hardened/`          | Thin package → binary `kb-hardened` (no TUI, no editor) |

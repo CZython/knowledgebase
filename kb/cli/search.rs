@@ -49,35 +49,41 @@ fn build_search_sql(
     let mut wheres: Vec<String> = Vec::new();
 
     let fts_render = parsed.render_fts();
-    // A NOT-only query (no AND, no OR) can't be expressed as a single FTS5
-    // MATCH string (leading NOT is rejected). SECURITY_REPORT 3.5: this was
-    // previously a *silent no-op* — the query returned the whole corpus up to
-    // `LIMIT` with a reassuring note. We keep the FTS join active and add one
-    // `NOT (pages_fts MATCH <term>)` clause per NOT term instead, the same
-    // exclusion FTS5's own NOT gives when a positive term is present.
+    // Turso's FTS is function-based: there is no `pages_fts` table and no
+    // `MATCH` operator. `fts_match(cols, ?q)` filters against the Tantivy
+    // index built over these columns, and `fts_score(cols, ?q)` yields the
+    // BM25 relevance score.
+    //
+    // A NOT-only query (no AND, no OR) has no positive FTS string, so it
+    // gets one `NOT fts_match(cols, ?term)` predicate per excluded term and
+    // no relevance score (there is nothing to rank against).
+    let fts_cols = "title, description, body, frontmatter_text";
     let not_only = !has_match && has_not;
-    let fts_active = has_match && !fts_render.is_empty() || not_only;
+    let _fts_active = (has_match && !fts_render.is_empty()) || not_only;
+    let mut fts_param_idx: Option<usize> = None;
     if has_match && !fts_render.is_empty() {
         params_vec.push(fts_render);
-        wheres.push(format!("pages_fts MATCH ?{}", params_vec.len()));
+        fts_param_idx = Some(params_vec.len());
+        wheres.push(format!(
+            "fts_match({fts_cols}, ?{})",
+            params_vec.len()
+        ));
     }
     if not_only {
         for t in &parsed.not_terms {
-            // FTS5 `MATCH` must appear as a top-level WHERE predicate of a
-            // SELECT that directly queries the FTS5 table — `NOT (pages_fts
-            // MATCH ?)` in an outer WHERE on a non-FTS5 main table is rejected
-            // ("unable to use function MATCH in the requested context"). The
-            // subquery satisfies the requirement: its FROM is the FTS5 table.
-            //
-            // Each NOT term is pushed as an FTS5 **prefix query** (via
-            // `render_term`'s `*` suffix for non-phrase tokens), matching the
-            // AND-side bare-word behavior: `-watch` excludes pages whose
-            // FTS5 tokens start with `watch` (e.g. `watchmaking`), while
-            // quoted phrases still take the exact phrase-semantic path.
+            // Each NOT term is a **prefix query** (via `render_term`'s `*`
+            // suffix for non-phrase tokens), matching the AND-side bare-word
+            // behavior: `-watch` excludes pages whose tokens start with
+            // `watch` (e.g. `watchmaking`), while quoted phrases keep the
+            // exact phrase semantics.
+            // `NOT fts_match(...)` alone is not accepted by Turso's planner
+            // (it insists on a positive FTS index query), so phrase the
+            // exclusion as a correlated `NOT EXISTS` subquery — the same
+            // shape the SQLite/FTS5 build used.
             params_vec.push(search_grammar::render_term(t));
             wheres.push(format!(
-                "NOT EXISTS (SELECT 1 FROM pages_fts WHERE rowid = pages.rowid \
-                  AND pages_fts MATCH ?{})",
+                "NOT EXISTS (SELECT 1 FROM pages p2 WHERE p2.rowid = pages.rowid \
+                  AND fts_match({fts_cols}, ?{}))",
                 params_vec.len()
             ));
         }
@@ -141,33 +147,24 @@ fn build_search_sql(
         ));
     }
 
+    let score_expr = match fts_param_idx {
+        Some(idx) => format!("fts_score({fts_cols}, ?{idx}) AS score"),
+        None => "NULL AS score".to_string(),
+    };
+    let select_sql = format!(
+        "SELECT pages.abs_path, pages.id, pages.type,\n\
+          pages.title, pages.description, pages.root, pages.rel_path,\n\
+          pages.{gate}, {score_expr}\n",
+        gate = GATE_COL
+    );
     let mut sql = String::new();
-    if fts_active {
-        let search_fts_sql = format!(
-            "SELECT pages.abs_path, pages.id, pages.type,\n\
-              pages.title, pages.description, pages.root, pages.rel_path,\n\
-              pages.{gate}, bm25(pages_fts) AS score\n",
-            gate = GATE_COL
-        );
-        sql.push_str(&search_fts_sql);
-        sql.push_str(
-            "FROM pages\n\
-              JOIN pages_fts ON pages.rowid = pages_fts.rowid\n"
-        );
-    } else {
-        let search_nofts_sql = format!(
-            "SELECT pages.abs_path, pages.id, pages.type,\n\
-              pages.title, pages.description, pages.root, pages.rel_path,\n\
-              pages.{gate}, NULL AS score\n",
-            gate = GATE_COL
-        );
-        sql.push_str(&search_nofts_sql);
-        sql.push_str("FROM pages\n");
-    }
+    sql.push_str(&select_sql);
+    sql.push_str("FROM pages\n");
     sql.push_str("WHERE ");
     sql.push_str(&wheres.join("\nAND "));
-    if fts_active {
-        sql.push_str("\nORDER BY score ASC");
+    if fts_param_idx.is_some() {
+        // Tantivy/BM25: higher score = more relevant (best first).
+        sql.push_str("\nORDER BY score DESC");
     } else {
         sql.push_str("\nORDER BY pages.title COLLATE NOCASE");
     }
@@ -252,18 +249,18 @@ pub(crate) fn search_rows(
     let has_tag_filter = parsed.filters.iter().any(|f| f.is_tag());
     let (aliases, all_tags) = if has_tag_filter {
         let aliases: Vec<(String, String)> = {
-            let mut stmt = db.conn.prepare("SELECT alias, canonical FROM tag_aliases")
+            let stmt = db.conn.prepare("SELECT alias, canonical FROM tag_aliases")
                 .map_err(|e| (format!("prepare aliases: {e}"), EXIT_ERR))?;
-            let rows = stmt.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))
+            let rows = stmt.query_map((), |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))
                 .map_err(|e| (format!("aliases: {e}"), EXIT_ERR))?
                 .collect::<Result<_, _>>()
                 .map_err(|e| (format!("aliases rows: {e}"), EXIT_ERR))?;
             rows
         };
         let all_tags: Vec<String> = {
-            let mut stmt = db.conn.prepare("SELECT DISTINCT tag FROM page_tags")
+            let stmt = db.conn.prepare("SELECT DISTINCT tag FROM page_tags")
                 .map_err(|e| (format!("prepare tags: {e}"), EXIT_ERR))?;
-            let rows = stmt.query_map([], |r| r.get::<_, String>(0))
+            let rows = stmt.query_map((), |r| r.get::<_, String>(0))
                 .map_err(|e| (format!("tags: {e}"), EXIT_ERR))?
                 .collect::<Result<_, _>>()
                 .map_err(|e| (format!("tag rows: {e}"), EXIT_ERR))?;
@@ -292,7 +289,7 @@ pub(crate) fn search_rows(
     let (sql, params_vec) =
         build_search_sql(&parsed, &gate_text, &tag_match_sets, has_match, has_not, limit);
 
-    let mut stmt = db.conn.prepare(&sql).map_err(|e| {
+    let stmt = db.conn.prepare(&sql).map_err(|e| {
         let msg = if std::env::var_os("KB_DEBUG_SQL").is_some() {
             format!("prepare search: {e}\nSQL: {sql}")
         } else {
@@ -339,7 +336,7 @@ pub(crate) fn cmd_search(dbpath: Option<&Path>, query: &str, json: bool, limit: 
 
 
 pub(crate) fn page_tags_str(db: &Db, abs_path: &str) -> String {
-    let mut stmt = match db.conn.prepare("SELECT tag FROM page_tags WHERE abs_path = ?1 ORDER BY tag") {
+    let stmt = match db.conn.prepare("SELECT tag FROM page_tags WHERE abs_path = ?1 ORDER BY tag") {
         Ok(s) => s,
         Err(_) => return String::new(),
     };

@@ -1093,8 +1093,18 @@ fn language_positive_filter_includes_match_and_excludes_other_and_null() {
         "type: note\ntitle: Alphabetic\nlanguage: en\n",
         "alphabetic body content\n",
     );
-    write_page(&s, "no-lang.md", "type: note\ntitle: Beta\n", "beta body content\n");
-    write_page(&s, "fr.md", "type: note\ntitle: Gamma\nlanguage: fr\n", "gamma body content\n");
+    write_page(
+        &s,
+        "no-lang.md",
+        "type: note\ntitle: Beta\n",
+        "beta body content\n",
+    );
+    write_page(
+        &s,
+        "fr.md",
+        "type: note\ntitle: Gamma\nlanguage: fr\n",
+        "gamma body content\n",
+    );
     add(&s);
 
     // The filter narrows the corpus to pages whose `language:` column
@@ -1102,14 +1112,23 @@ fn language_positive_filter_includes_match_and_excludes_other_and_null() {
     let (code, out, err) = run(&s, &["search", "alphabetic language:en"]);
     assert_eq!(code, 0, "stderr: {err}");
     assert!(out.contains("Alphabetic"), "positive match: {out}");
-    assert!(!out.contains("Beta"), "page without language must not match: {out}");
-    assert!(!out.contains("Gamma"), "page with the wrong language must not match: {out}");
+    assert!(
+        !out.contains("Beta"),
+        "page without language must not match: {out}"
+    );
+    assert!(
+        !out.contains("Gamma"),
+        "page with the wrong language must not match: {out}"
+    );
 
     // The *absence* filter is the complementary path: `language:Null` matches
     // only the page *without* the field.
     let (code, out, err) = run(&s, &["search", "beta language:Null"]);
     assert_eq!(code, 0, "stderr: {err}");
-    assert!(out.contains("Beta"), "absence path returns the field-less page: {out}");
+    assert!(
+        out.contains("Beta"),
+        "absence path returns the field-less page: {out}"
+    );
     assert!(
         !out.contains("Alphabetic") && !out.contains("Gamma"),
         "pages that HAVE a language field must not match: {out}"
@@ -1146,17 +1165,26 @@ fn gate_hides_from_generic_search_and_unlocks_by_phrase() {
     // Generic search: the un-gated page is found, the gated page is hidden.
     let (code, out, err) = run(&s, &["search", "gated"]);
     assert_eq!(code, 0, "stderr: {err}");
-    assert!(!out.contains("Gated"), "gated page hidden without gate phrase: {out}");
+    assert!(
+        !out.contains("Gated"),
+        "gated page hidden without gate phrase: {out}"
+    );
 
     // The ungated page matches the same query.
     let (code, out, err) = run(&s, &["search", "ungated"]);
     assert_eq!(code, 0, "stderr: {err}");
-    assert!(out.contains("Ungated"), "ungated page is a normal search hit: {out}");
+    assert!(
+        out.contains("Ungated"),
+        "ungated page is a normal search hit: {out}"
+    );
 
     // Adding the gate phrase to the query unlocks the gated page.
     let (code, out, err) = run(&s, &["search", "gated secretword"]);
     assert_eq!(code, 0, "stderr: {err}");
-    assert!(out.contains("Gated"), "gate phrase in query unlocks the page: {out}");
+    assert!(
+        out.contains("Gated"),
+        "gate phrase in query unlocks the page: {out}"
+    );
 }
 
 /// The gate × `language:` composition: the gate rule and the language filter
@@ -1301,7 +1329,12 @@ fn label_page_gated_and_language_restricted_composes() {
 #[test]
 fn multi_outgoing_links_fan_out_to_each_target_and_backlink() {
     let s = Setup::new("multi_out_link");
-    write_page(&s, "a.md", "type: note\ntitle: A\n", "see [[B]] and also [[C]]\n");
+    write_page(
+        &s,
+        "a.md",
+        "type: note\ntitle: A\n",
+        "see [[B]] and also [[C]]\n",
+    );
     write_page(&s, "b.md", "type: note\ntitle: B\n", "the B target\n");
     write_page(&s, "c.md", "type: note\ntitle: C\n", "the C target\n");
     add(&s);
@@ -1310,9 +1343,18 @@ fn multi_outgoing_links_fan_out_to_each_target_and_backlink() {
     // style in this case).
     let (code, out, err) = run(&s, &["links", "note:A", "--dedup"]);
     assert_eq!(code, 0, "stderr: {err}");
-    assert!(out.contains("forward links (2)"), "A has exactly two outbound links: {out}");
-    assert!(out.contains("[ wikilink ]  B"), "B in A's forward list: {out}");
-    assert!(out.contains("[ wikilink ]  C"), "C in A's forward list: {out}");
+    assert!(
+        out.contains("forward links (2)"),
+        "A has exactly two outbound links: {out}"
+    );
+    assert!(
+        out.contains("[ wikilink ]  B"),
+        "B in A's forward list: {out}"
+    );
+    assert!(
+        out.contains("[ wikilink ]  C"),
+        "C in A's forward list: {out}"
+    );
 
     // B's backlinks: exactly A.
     let (code, out, err) = run(&s, &["links", "note:B", "--dedup"]);
@@ -1321,7 +1363,10 @@ fn multi_outgoing_links_fan_out_to_each_target_and_backlink() {
         out.contains("backlinks (1)") && (out.contains("a.md") || out.contains("note:A")),
         "B's only backlink is A: {out}"
     );
-    assert!(!out.contains("note:C"), "C must not appear in B's backlinks: {out}");
+    assert!(
+        !out.contains("note:C"),
+        "C must not appear in B's backlinks: {out}"
+    );
 
     // C's backlinks: exactly A.
     let (code, out, err) = run(&s, &["links", "note:C", "--dedup"]);
@@ -1330,7 +1375,10 @@ fn multi_outgoing_links_fan_out_to_each_target_and_backlink() {
         out.contains("backlinks (1)") && (out.contains("a.md") || out.contains("note:A")),
         "C's only backlink is A: {out}"
     );
-    assert!(!out.contains("note:B"), "B must not appear in C's backlinks: {out}");
+    assert!(
+        !out.contains("note:B"),
+        "B must not appear in C's backlinks: {out}"
+    );
 }
 
 /// A 2-cycle (A↔B): each page has one forward link to the other, and each
@@ -1386,7 +1434,12 @@ fn two_cycle_is_directed_with_no_self_loop() {
 #[test]
 fn self_link_shows_in_forward_but_is_filtered_from_backlinks() {
     let s = Setup::new("self_link");
-    write_page(&s, "a.md", "type: note\ntitle: A\n", "self-reference: [[A]]\n");
+    write_page(
+        &s,
+        "a.md",
+        "type: note\ntitle: A\n",
+        "self-reference: [[A]]\n",
+    );
     add(&s);
 
     let (code, out, err) = run(&s, &["links", "note:A", "--dedup"]);

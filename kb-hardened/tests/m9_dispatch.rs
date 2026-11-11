@@ -96,7 +96,8 @@ fn hardened_bare_md_routes_to_search_not_info() {
 
     // A search on an absolute path containing `/` will either:
     //   (a) succeed with 0 results (rc 0, "0 results"), or
-    //   (b) fail with an FTS5 syntax error on `/` (rc != 0, "fts5").
+    //   (b) fail with an FTS syntax error on `/` (rc != 0, Turso reports
+    //       `FTS parse error` / `SyntaxError`).
     // Either way: it is NOT the info output (which would print
     // `title:`, `type:`, `desc:`, `links:`, etc.).
     let is_info = out.contains("title:") && out.contains("type:");
@@ -104,7 +105,9 @@ fn hardened_bare_md_routes_to_search_not_info() {
         !is_info,
         "hardened bare .md must NOT route to info — got output:\n{out}\nstderr: {err}"
     );
-    let looks_like_search_err = err.contains("fts5") || err.contains("syntax error");
+    let looks_like_search_err = err.contains("fts5")
+        || err.contains("FTS parse error")
+        || err.to_ascii_lowercase().contains("syntax error");
     let looks_like_search_0 = code == 0 && (out.contains("0 results") || out.trim() == "[]");
     assert!(
         looks_like_search_err || looks_like_search_0,

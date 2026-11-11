@@ -103,10 +103,10 @@ pub(crate) fn cmd_info(dbpath: Option<&Path>, path: &Path, json: bool) -> Kb {
 pub(crate) fn cmd_stats(dbpath: Option<&Path>, json: bool) -> Kb {
     let db = open_db(dbpath)?;
     let roots: Vec<(String, Option<String>, i32)> = {
-        let mut stmt = db.conn
+        let stmt = db.conn
             .prepare("SELECT path, extra_exts, include_hidden FROM roots ORDER BY seq DESC")
             .map_err(|e| (format!("prepare roots: {e}"), EXIT_ERR))?;
-        let rows = stmt.query_map([], |r| {
+        let rows = stmt.query_map((), |r| {
             Ok((r.get(0)?, r.get(1)?, r.get(2)?))
         }).map_err(|e| (format!("roots: {e}"), EXIT_ERR))?
         .collect::<Result<Vec<_>, _>>()
@@ -154,16 +154,16 @@ pub(crate) fn cmd_stats(dbpath: Option<&Path>, json: bool) -> Kb {
     // B7: `COUNT(*)` belt-and-suspenders is gone — a failure here is a real DB
     // error and should surface, not be reported as a `0` total with exit 0.
     let total: i64 = db.conn
-        .query_row("SELECT COUNT(*) FROM pages", [], |r| r.get(0))
+        .query_row("SELECT COUNT(*) FROM pages", (), |r| r.get(0))
         .map_err(|e| (format!("stats count pages: {e}"), EXIT_ERR))?;
     let tag_count: i64 = db.conn
-        .query_row("SELECT COUNT(DISTINCT tag) FROM page_tags", [], |r| r.get(0))
+        .query_row("SELECT COUNT(DISTINCT tag) FROM page_tags", (), |r| r.get(0))
         .map_err(|e| (format!("stats count tags: {e}"), EXIT_ERR))?;
     let link_count: i64 = db.conn
-        .query_row("SELECT COUNT(*) FROM links", [], |r| r.get(0))
+        .query_row("SELECT COUNT(*) FROM links", (), |r| r.get(0))
         .map_err(|e| (format!("stats count links: {e}"), EXIT_ERR))?;
     let alias_count: i64 = db.conn
-        .query_row("SELECT COUNT(*) FROM tag_aliases", [], |r| r.get(0))
+        .query_row("SELECT COUNT(*) FROM tag_aliases", (), |r| r.get(0))
         .map_err(|e| (format!("stats count tag_aliases: {e}"), EXIT_ERR))?;
     // db file size (derive from `default_db_display()` — one shared,
     // OS-correct source of the default path; consistent with `open_default`,

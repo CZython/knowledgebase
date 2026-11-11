@@ -28,12 +28,8 @@ impl Setup {
     fn new(tag: &str) -> Self {
         static SEQ: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
         let seq = SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        let base = std::env::temp_dir().join(format!(
-            "kbverify_{}_{}_{}",
-            std::process::id(),
-            seq,
-            tag
-        ));
+        let base =
+            std::env::temp_dir().join(format!("kbverify_{}_{}_{}", std::process::id(), seq, tag));
         let _ = fs::remove_dir_all(&base);
         fs::create_dir_all(&base).unwrap();
         Setup { root: base }
@@ -112,7 +108,10 @@ fn verify_ok_exit_zero_human() {
     );
     let (code, out, _) = run(&s, &["verify", p.to_str().unwrap()]);
     assert_eq!(code, 0, "verify of a good page exits 0");
-    assert!(out.contains("verdict: ok"), "human render should show verdict: ok; got {out:?}");
+    assert!(
+        out.contains("verdict: ok"),
+        "human render should show verdict: ok; got {out:?}"
+    );
 }
 
 #[test]
@@ -121,7 +120,10 @@ fn verify_error_missing_type_exit_one() {
     let p = s.file("no_type.md", "---\ntitle: x\n---\n\n# x\nBody.\n");
     let (code, out, _) = run(&s, &["verify", p.to_str().unwrap()]);
     assert_eq!(code, 1, "missing type is an error");
-    assert!(out.contains("missing-type"), "human render should list missing-type; got {out:?}");
+    assert!(
+        out.contains("missing-type"),
+        "human render should list missing-type; got {out:?}"
+    );
 }
 
 #[test]
@@ -130,7 +132,10 @@ fn verify_error_unknown_type_exit_one() {
     let p = s.file("bad.md", "---\ntype: labbel\ntitle: x\n---\n\n# x\n");
     let (code, out, _) = run(&s, &["verify", p.to_str().unwrap()]);
     assert_eq!(code, 1, "unknown type is an error");
-    assert!(out.contains("labbel"), "human render should surface the raw type value; got {out:?}");
+    assert!(
+        out.contains("labbel"),
+        "human render should surface the raw type value; got {out:?}"
+    );
 }
 
 #[test]
@@ -139,7 +144,10 @@ fn verify_error_no_frontmatter_exit_one() {
     let p = s.file("plain.md", "# Just a title\n\nBody.\n");
     let (code, out, _) = run(&s, &["verify", p.to_str().unwrap()]);
     assert_eq!(code, 1, "no frontmatter is an error");
-    assert!(out.contains("no-frontmatter"), "human render should mention no-frontmatter; got {out:?}");
+    assert!(
+        out.contains("no-frontmatter"),
+        "human render should mention no-frontmatter; got {out:?}"
+    );
 }
 
 #[test]
@@ -148,7 +156,10 @@ fn verify_non_md_exit_one() {
     let p = s.file("page.txt", "---\ntype: note\ntitle: x\n---\n\n# x\n");
     let (code, out, _) = run(&s, &["verify", p.to_str().unwrap()]);
     assert_eq!(code, 1, "non-md is an error");
-    assert!(out.contains("non-md"), "human render should flag non-md extension; got {out:?}");
+    assert!(
+        out.contains("non-md"),
+        "human render should flag non-md extension; got {out:?}"
+    );
 }
 
 #[test]
@@ -156,7 +167,10 @@ fn verify_directory_exit_two() {
     let s = Setup::new("dir");
     let (code, _, err) = run(&s, &["verify", "."]);
     assert_eq!(code, 2, "directory is a usage error");
-    assert!(err.to_lowercase().contains("directory"), "stderr should explain: {err:?}");
+    assert!(
+        err.to_lowercase().contains("directory"),
+        "stderr should explain: {err:?}"
+    );
 }
 
 #[test]
@@ -164,7 +178,10 @@ fn verify_missing_exit_two() {
     let s = Setup::new("ghost");
     let (code, _, err) = run(&s, &["verify", "does_not_exist.md"]);
     assert_eq!(code, 2, "missing file is a usage error");
-    assert!(!err.is_empty(), "stderr should carry an error message: {err:?}");
+    assert!(
+        !err.is_empty(),
+        "stderr should carry an error message: {err:?}"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -184,8 +201,14 @@ fn verify_strict_escalates_description_warning() {
 
     let (strict, out, _) = run(&s, &["verify", "--strict", p.to_str().unwrap()]);
     assert_eq!(strict, 1, "--strict escalates to 1");
-    assert!(out.contains("description-too-long"), "human render should list the warning; got {out:?}");
-    assert!(out.contains("ok-with-warnings"), "verdict should be ok-with-warnings; got {out:?}");
+    assert!(
+        out.contains("description-too-long"),
+        "human render should list the warning; got {out:?}"
+    );
+    assert!(
+        out.contains("ok-with-warnings"),
+        "verdict should be ok-with-warnings; got {out:?}"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -198,18 +221,33 @@ fn verify_via_h1_fallback() {
     let p = s.file("untitled.md", "---\ntype: note\n---\n\n# My Page\n");
     let (code, out, _) = run(&s, &["verify", p.to_str().unwrap()]);
     assert_eq!(code, 0, "H1 title satisfies slug");
-    assert!(out.contains("My Page"), "human render should surface the slug; got {out:?}");
-    assert!(out.contains("(h1)"), "should mark the source as h1; got {out:?}");
+    assert!(
+        out.contains("My Page"),
+        "human render should surface the slug; got {out:?}"
+    );
+    assert!(
+        out.contains("(h1)"),
+        "should mark the source as h1; got {out:?}"
+    );
 }
 
 #[test]
 fn verify_via_filename_fallback() {
     let s = Setup::new("fname");
-    let p = s.file("my-note.md", "---\ntype: note\n---\n\nJust a body, no H1, no title field.\n");
+    let p = s.file(
+        "my-note.md",
+        "---\ntype: note\n---\n\nJust a body, no H1, no title field.\n",
+    );
     let (code, out, _) = run(&s, &["verify", p.to_str().unwrap()]);
     assert_eq!(code, 0, "filename stem satisfies slug");
-    assert!(out.contains("my-note"), "human render should surface the slug; got {out:?}");
-    assert!(out.contains("(filename)"), "should mark the source as filename; got {out:?}");
+    assert!(
+        out.contains("my-note"),
+        "human render should surface the slug; got {out:?}"
+    );
+    assert!(
+        out.contains("(filename)"),
+        "should mark the source as filename; got {out:?}"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -229,9 +267,15 @@ fn verify_json_is_one_well_formed_object() {
     // The key shape is documented in DESIGN-verify.md.
     for key in ["file", "verdict", "exit", "checks"] {
         let needle = format!("\"{key}\"");
-        assert!(out.contains(needle.as_str()), "missing key {key} in JSON: {out:?}");
+        assert!(
+            out.contains(needle.as_str()),
+            "missing key {key} in JSON: {out:?}"
+        );
     }
-    assert!(out.contains("\"verdict\": \"ok\""), "verdict should be 'ok' in JSON: {out:?}");
+    assert!(
+        out.contains("\"verdict\": \"ok\""),
+        "verdict should be 'ok' in JSON: {out:?}"
+    );
 }
 
 #[test]
@@ -241,8 +285,14 @@ fn verify_json_error_lists_errors_array() {
     let (code, out, err) = run(&s, &["verify", "--json", p.to_str().unwrap()]);
     assert_eq!(code, 1, "stderr: {err}");
     assert_json_object(&out, "verify --json (error case)");
-    assert!(out.contains("\"verdict\": \"error\""), "verdict should be 'error': {out:?}");
-    assert!(out.contains("\"unknown-type\""), "errors array should list unknown-type: {out:?}");
+    assert!(
+        out.contains("\"verdict\": \"error\""),
+        "verdict should be 'error': {out:?}"
+    );
+    assert!(
+        out.contains("\"unknown-type\""),
+        "errors array should list unknown-type: {out:?}"
+    );
 }
 
 #[test]
@@ -256,8 +306,14 @@ fn verify_json_warning_lists_warnings_array() {
     let (code, out, err) = run(&s, &["verify", "--json", p.to_str().unwrap()]);
     assert_eq!(code, 0, "stderr: {err}");
     assert_json_object(&out, "verify --json (warning case)");
-    assert!(out.contains("\"verdict\": \"ok-with-warnings\""), "verdict: {out:?}");
-    assert!(out.contains("\"description-too-long\""), "warnings array: {out:?}");
+    assert!(
+        out.contains("\"verdict\": \"ok-with-warnings\""),
+        "verdict: {out:?}"
+    );
+    assert!(
+        out.contains("\"description-too-long\""),
+        "warnings array: {out:?}"
+    );
 }
 
 #[test]
@@ -270,7 +326,10 @@ fn verify_strict_json_bumps_exit() {
     );
     let (code, out, err) = run(&s, &["verify", "--json", "--strict", p.to_str().unwrap()]);
     assert_eq!(code, 1, "strict + warning exits 1; stderr: {err}");
-    assert!(out.contains("\"exit\": 1"), "JSON should echo the exit code: {out:?}");
+    assert!(
+        out.contains("\"exit\": 1"),
+        "JSON should echo the exit code: {out:?}"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -280,15 +339,20 @@ fn verify_strict_json_bumps_exit() {
 #[test]
 fn verify_accepts_a_db_flag() {
     let s = Setup::new("dbflag");
-    let p = s.file(
-        "page.md",
-        "---\ntype: note\ntitle: Page\n---\n\n# Page\n",
-    );
+    let p = s.file("page.md", "---\ntype: note\ntitle: Page\n---\n\n# Page\n");
     let (code, _out, err) = run(
         &s,
-        &["verify", "--db", "/tmp/kb_verify_nonexistent.db", p.to_str().unwrap()],
+        &[
+            "verify",
+            "--db",
+            "/tmp/kb_verify_nonexistent.db",
+            p.to_str().unwrap(),
+        ],
     );
-    assert_eq!(code, 0, "--db is parsed and feeds the corpus load; stderr: {err}");
+    assert_eq!(
+        code, 0,
+        "--db is parsed and feeds the corpus load; stderr: {err}"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -336,9 +400,18 @@ fn verify_phase2_dead_link_warns() {
     with_corpus(&s);
     let (code, out, _err) = with_db(&s, &["verify", page.to_str().unwrap()]);
     assert_eq!(code, 0, "dead link is a warning, not an error; got {out:?}");
-    assert!(out.contains("dead-link"), "warnings should include dead-link; got {out:?}");
-    assert!(out.contains("does-not-exist"), "human render should name the dead target; got {out:?}");
-    assert!(out.contains("ok-with-warnings"), "verdict should be ok-with-warnings; got {out:?}");
+    assert!(
+        out.contains("dead-link"),
+        "warnings should include dead-link; got {out:?}"
+    );
+    assert!(
+        out.contains("does-not-exist"),
+        "human render should name the dead target; got {out:?}"
+    );
+    assert!(
+        out.contains("ok-with-warnings"),
+        "verdict should be ok-with-warnings; got {out:?}"
+    );
 }
 
 #[test]
@@ -349,11 +422,11 @@ fn verify_phase2_strict_escalates_dead_link() {
         "---\ntype: wiki\ntitle: P2 Strict\n---\n\n# P2 Strict\n\nSee [[nonexistent-thing]].\n",
     );
     with_corpus(&s);
-    let (code, out, _err) = with_db(
-        &s,
-        &["verify", "--strict", page.to_str().unwrap()],
+    let (code, out, _err) = with_db(&s, &["verify", "--strict", page.to_str().unwrap()]);
+    assert_eq!(
+        code, 1,
+        "--strict must escalate dead-link to exit 1; got {out:?}"
     );
-    assert_eq!(code, 1, "--strict must escalate dead-link to exit 1; got {out:?}");
 }
 
 #[test]
@@ -415,7 +488,10 @@ fn verify_phase2_label_files_present() {
     );
     with_corpus(&s);
     let (code, out, _err) = with_db(&s, &["verify", label.to_str().unwrap()]);
-    assert_eq!(code, 0, "a label naming an existing file is clean; got {out:?}");
+    assert_eq!(
+        code, 0,
+        "a label naming an existing file is clean; got {out:?}"
+    );
     assert!(
         out.contains("label:") && out.contains("files"),
         "human render should report the label as applying to files; got {out:?}"
@@ -435,7 +511,10 @@ fn verify_phase2_label_missing_file_warns() {
     );
     with_corpus(&s);
     let (code, out, _err) = with_db(&s, &["verify", label.to_str().unwrap()]);
-    assert_eq!(code, 0, "label-file-missing is a warning, not an error; got {out:?}");
+    assert_eq!(
+        code, 0,
+        "label-file-missing is a warning, not an error; got {out:?}"
+    );
     assert!(
         out.contains("label-file-missing:nope.txt"),
         "warning should name the missing file; got {out:?}"
@@ -444,11 +523,11 @@ fn verify_phase2_label_missing_file_warns() {
         out.contains("missing: nope.txt"),
         "label render should list missing; got {out:?}"
     );
-    let (scode, sout, _err) = with_db(
-        &s,
-        &["verify", "--strict", label.to_str().unwrap()],
+    let (scode, sout, _err) = with_db(&s, &["verify", "--strict", label.to_str().unwrap()]);
+    assert_eq!(
+        scode, 1,
+        "--strict escalates label-file-missing; got {sout:?}"
     );
-    assert_eq!(scode, 1, "--strict escalates label-file-missing; got {sout:?}");
 }
 
 #[test]
@@ -476,13 +555,16 @@ fn verify_phase2_json_links_shape() {
         "---\ntype: wiki\ntitle: P2 JSON\n---\n\n# P2 JSON\n\nOne [[missing-thing]].\n",
     );
     with_corpus(&s);
-    let (code, out, err) = with_db(
-        &s,
-        &["verify", "--json", page.to_str().unwrap()],
-    );
+    let (code, out, err) = with_db(&s, &["verify", "--json", page.to_str().unwrap()]);
     assert_eq!(code, 0, "stderr: {err}");
     assert_json_object(&out, "p2 link json");
-    for k in ["\"links\"", "\"total\"", "\"resolved\"", "\"dead\"", "\"ambiguous\""] {
+    for k in [
+        "\"links\"",
+        "\"total\"",
+        "\"resolved\"",
+        "\"dead\"",
+        "\"ambiguous\"",
+    ] {
         assert!(out.contains(k), "missing {k} in p2 link JSON: {out:?}");
     }
     assert!(
@@ -503,14 +585,14 @@ fn verify_phase2_json_label_shape() {
         "---\ntype: label\ntitle: P2 Label JSON\n---\n\n# P2 Label JSON\n\n## Files\nnope.txt\n",
     );
     with_corpus(&s);
-    let (code, out, err) = with_db(
-        &s,
-        &["verify", "--json", label.to_str().unwrap()],
-    );
+    let (code, out, err) = with_db(&s, &["verify", "--json", label.to_str().unwrap()]);
     assert_eq!(code, 0, "stderr: {err}");
     assert_json_object(&out, "p2 label json");
     assert!(out.contains("\"label\""), "missing label key: {out:?}");
-    assert!(out.contains("\"applies\": \"files\""), "label JSON should say files; got {out:?}");
+    assert!(
+        out.contains("\"applies\": \"files\""),
+        "label JSON should say files; got {out:?}"
+    );
     assert!(
         out.contains("\"missing\"") && out.contains("nope.txt"),
         "label JSON should list the missing file; got {out:?}"
@@ -530,7 +612,10 @@ fn verify_phase2_json_strict_bumps_exit() {
         &["verify", "--json", "--strict", page.to_str().unwrap()],
     );
     assert_eq!(code, 1, "stderr: {err}");
-    assert!(out.contains("\"exit\": 1"), "JSON should echo exit 1; got {out:?}");
+    assert!(
+        out.contains("\"exit\": 1"),
+        "JSON should echo exit 1; got {out:?}"
+    );
 }
 
 /// Verify the *non-label* branch on a label page (`label: applies: na` is
@@ -538,10 +623,7 @@ fn verify_phase2_json_strict_bumps_exit() {
 #[test]
 fn verify_phase2_label_empty_body_is_folder() {
     let s = Setup::new("p2emptylabel");
-    let label = s.file(
-        "empty.md",
-        "---\ntype: label\ntitle: Empty label\n---\n\n",
-    );
+    let label = s.file("empty.md", "---\ntype: label\ntitle: Empty label\n---\n\n");
     with_corpus(&s);
     let (code, out, _err) = with_db(&s, &["verify", label.to_str().unwrap()]);
     assert_eq!(code, 0);

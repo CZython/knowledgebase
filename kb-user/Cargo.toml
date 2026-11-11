@@ -21,7 +21,7 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 rust-version.workspace = true
-description = "kb — the full knowledge-base CLI (interactive TUI + $EDITOR flow + every verb): search, browse, and section/patch edits over a Markdown corpus in SQLite/FTS5. Package `kb-user`, binary `kb`."
+description = "kb — the full knowledge-base CLI (interactive TUI + $EDITOR flow + every verb): search, browse, and section/patch edits over a Markdown corpus in Turso/FTS. Package `kb-user`, binary `kb`."
 
 [lints]
 # Inherit the workspace lint levels verbatim (`unsafe_code = "forbid"`).
@@ -47,12 +47,10 @@ clap_complete = { workspace = true, optional = true }
 kb-core = { workspace = true }
 kb-db   = { workspace = true }
 dirs    = { workspace = true }
-# The CLI writes SQL directly against `Db.conn` (a `rusqlite::Connection`),
-# so it needs the crate for `params!` / `OptionalExtension` / the FTS5
-# `snippet`/`bm25` functions — matching `kb-db`'s own dep (same bundled
-# build, one SQLite in the tree).
-rusqlite = { workspace = true }
-# M8 — the TUI shell (assumed, like clap/rusqlite). Only the `kb` binary
+# The CLI writes SQL directly against `Db.conn` (a `turso::Connection` wrapper),
+# so it uses `kb-db`'s synchronous Turso façade (`kb_db::sql`) for
+# `params!` / `OptionalExtension` / `fts_*` functions.
+# M8 — the TUI shell (assumed, like clap/turso). Only the `kb` binary
 # links these; `kb-core` + `kb-db` stay TUI-free so the verified/assumed
 # boundary stays visible in the crate graph (PLAN §9/§10).
 # Optional + feature-gated behind `tui` (see [features]): a hardened

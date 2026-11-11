@@ -23,13 +23,13 @@
 //! 8. `INSERT ... ON CONFLICT(abs_path) DO UPDATE` (single-statement
 //!    upsert; the triggers keep `pages_fts` in sync).
 
+use crate::sql::{params, Result};
 use crate::Db;
 use kb_core::frontmatter;
 use kb_core::identity;
 use kb_core::links;
 use kb_core::meta::NoteType;
 use kb_core::tags as kb_tags;
-use rusqlite::{params, Result};
 use std::path::Path;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -360,15 +360,15 @@ pub fn upsert_page(db: &Db, rec: &PageRecord) -> Result<usize> {
     // 1–3. Replace the row-table entries wholesale.
     tx.execute(
         "DELETE FROM page_gates WHERE abs_path = ?1",
-        rusqlite::params![rec.abs_path],
+        crate::sql::params![rec.abs_path],
     )?;
     tx.execute(
         "DELETE FROM page_tags WHERE abs_path = ?1",
-        rusqlite::params![rec.abs_path],
+        crate::sql::params![rec.abs_path],
     )?;
     tx.execute(
         "DELETE FROM links WHERE from_path = ?1",
-        rusqlite::params![rec.abs_path],
+        crate::sql::params![rec.abs_path],
     )?;
 
     // 4. The page row. The FTS5 triggers (migrate) keep `pages_fts` in
@@ -376,7 +376,7 @@ pub fn upsert_page(db: &Db, rec: &PageRecord) -> Result<usize> {
     let now = now_iso8601();
     let gate = super::migrate::COL_SEARCH_REQUIRED_PHRASE;
     let res = tx.execute(
-        &format!(
+        format!(
             r#"
          INSERT INTO pages (
            abs_path, id, type, root, rel_path, title, language,
@@ -426,7 +426,7 @@ pub fn upsert_page(db: &Db, rec: &PageRecord) -> Result<usize> {
     )?;
 
     // 5. Gate rows.
-    let mut ins_gate =
+    let ins_gate =
         tx.prepare_cached("INSERT OR IGNORE INTO page_gates (abs_path, term) VALUES (?1, ?2)")?;
     for t in &rec.gate_terms {
         ins_gate.execute(params![rec.abs_path, t])?;
@@ -434,7 +434,7 @@ pub fn upsert_page(db: &Db, rec: &PageRecord) -> Result<usize> {
     drop(ins_gate);
 
     // 6. Tag rows.
-    let mut ins_tag =
+    let ins_tag =
         tx.prepare_cached("INSERT OR IGNORE INTO page_tags (abs_path, tag) VALUES (?1, ?2)")?;
     for t in &rec.tag_rows {
         ins_tag.execute(params![rec.abs_path, t])?;
@@ -442,7 +442,7 @@ pub fn upsert_page(db: &Db, rec: &PageRecord) -> Result<usize> {
     drop(ins_tag);
 
     // 7. Link rows.
-    let mut ins_link = tx.prepare_cached(
+    let ins_link = tx.prepare_cached(
         "INSERT OR IGNORE INTO links (from_path, to_path, style) VALUES (?1, ?2, ?3)",
     )?;
     for (target, style) in &rec.link_rows {
@@ -509,8 +509,8 @@ pub fn upsert_or_skip(
             out.skipped_missing_slug += 1;
             Ok(())
         }
-        Err(IndexError::Read(msg)) => Err(rusqlite::Error::SqliteFailure(
-            rusqlite::ffi::Error::new(-1),
+        Err(IndexError::Read(msg)) => Err(crate::sql::Error::SqliteFailure(
+            crate::sql::ffi::Error::new(-1),
             Some(format!("index: {msg}")),
         )),
     }
