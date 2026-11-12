@@ -1988,6 +1988,16 @@ impl App {
     /// `open_read` that cleared the address) never resurrects a second
     /// search.
     pub fn close_read(&mut self) {
+        // The Read body is a wrapped/scrollable `Paragraph` that fills the
+        // *whole* content pane, whereas the modes we pop back into (Browse /
+        // Search) paint a `List` that only writes cells for its own items and
+        // leaves the rest of the area untouched. On the next `terminal.draw`,
+        // ratatui does a *diff-only* redraw against the stale reader buffer,
+        // so the reader's text would linger in the cells the `List` never
+        // touched — the same "holes" the editor path already guards against.
+        // Force a full repaint on the next frame so the list repaints from
+        // scratch.
+        self.needs_clear = true;
         // Linked-Read return takes precedence (most specific): a Read opened
         // *from* a link picker lands back on the incoming Read, not Browse.
         if let Some(rs) = self.read_return.take() {
@@ -5015,6 +5025,31 @@ mod tests {
         if let Mode::Read(r) = &app.mode {
             assert!(r.body.contains("body"), "body text was loaded from the DB");
         }
+    }
+
+    /// Closing a Read (which paints a full-pane wrapped `Paragraph`) back into
+    /// a list-backed mode (Browse / Search) must force a full repaint on the
+    /// next frame. Without it, ratatui's diff-only redraw leaves the reader's
+    /// text stranded in the cells the `List` never overwrites — the reported
+    /// "spare characters in the main menu after opening a file in the reader".
+    /// The editor path already sets `needs_clear`; the reader path must match.
+    #[test]
+    fn close_read_flags_a_full_repaint() {
+        let db = Db::open_in_memory_test().unwrap();
+        db.migrate().unwrap();
+        let _ = insert_page(&db, "alpha", "Alpha", "# H\nbody\n");
+        let mut app = App::new(db).unwrap();
+        assert!(!app.needs_clear, "fresh App has no pending clear");
+
+        app.open_read().unwrap();
+        assert!(matches!(app.mode, Mode::Read(_)));
+
+        app.close_read();
+        assert!(matches!(app.mode, Mode::Browse), "pops back to Browse");
+        assert!(
+            app.needs_clear,
+            "close_read must flag a full repaint so the stale reader text does not linger"
+        );
     }
 
     /// `open_read` on an empty view (nothing selected) is a clean no-op —
