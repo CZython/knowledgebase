@@ -78,8 +78,8 @@ fn build_search_sql(
             // exact phrase semantics.
             // `NOT fts_match(...)` alone is not accepted by Turso's planner
             // (it insists on a positive FTS index query), so phrase the
-            // exclusion as a correlated `NOT EXISTS` subquery — the same
-            // shape the SQLite/FTS5 build used.
+            // exclusion as a correlated `NOT EXISTS` subquery — the form Turso
+            // accepts for a lone NOT term with no positive FTS term.
             params_vec.push(search_grammar::render_term(t));
             wheres.push(format!(
                 "NOT EXISTS (SELECT 1 FROM pages p2 WHERE p2.rowid = pages.rowid \

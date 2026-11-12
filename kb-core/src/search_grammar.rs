@@ -1,6 +1,6 @@
 //! search_grammar — parse a raw `kb search` query into FTS content +
 //! whitelisted filters, and render the FTS portion as a well-formed,
-//! correctly-quoted FTS5 string (M3).
+//! correctly-quoted FTS string (M3).
 //!
 //! §5 (Search model) + §9 (Verification):
 //!
@@ -96,7 +96,7 @@ impl Filter {
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub enum Term {
     /// A single token, e.g. `apple` or a quoted `"a b"`. `phrase == true`
-    /// means render as an FTS5 phrase (quoted, inner quotes doubled).
+    /// means render as an FTS phrase (quoted, inner quotes doubled).
     Token { text: String, phrase: bool },
 }
 
@@ -122,38 +122,40 @@ impl ParsedQuery {
         !self.and_terms.is_empty() || !self.or_group.is_empty() || !self.not_terms.is_empty()
     }
 
-    /// Render the FTS **content** portion as a well-formed FTS5 query string
-    /// (the value for `pages_fts MATCH <fts_query>`). Top-level clauses are
-    /// **space-joined** (a space in FTS5 *is* implicit AND), the `~` group is
-    /// one **parenthesised** `(a OR b OR …)` clause, a `-term` becomes a
-    /// `NOT <term>` clause, and ambiguous terms are **quoted** (inner `"`
-    /// doubled). Filter-only queries render as the empty string (the M7 layer
-    /// then omits the `MATCH` clause).
+    /// Render the FTS **content** portion as a well-formed Turso FTS query
+    /// string (Tantivy query language, passed to `fts_match(cols, ?)`).
+    /// The `~` group is one **parenthesised** `(a OR b OR …)` clause; the
+    /// `~` group and the bare AND terms are joined with **explicit**
+    /// `AND` (a whitespace-adjacent pair is plain OR in Tantivy, so the
+    /// old space-implicit-AND form of SQLite FTS5 is not usable here);
+    /// a `-term` becomes a `NOT <term>` clause; ambiguous terms are
+    /// **quoted** (inner `"` doubled). Filter-only queries render as the
+    /// empty string (the CLI layer then omits the FTS predicate).
     ///
-    /// # Clause order (proven-parseable on the bundled SQLite FTS5)
+    /// # Clause order (proven-parseable on Turso)
     ///
-    /// The render order is **OR-group first, then NOT terms, then bare AND
-    /// terms** — all space-joined. This is not arbitrary: on the bundled
-    /// build (SQLite 3.46.0), FTS5 *rejects* a bare term sitting directly
-    /// after a parenthesized group (`attention (llm OR mllm)` → syntax error
-    /// near `OR`) and also rejects explicit `AND NOT` (`a AND NOT b` →
-    /// syntax error near `NOT`). The *only* confirmed-parseable ordering
-    /// for the AND/OR/NOT structure is the one we emit here:
+    /// The render order is **OR-group first, then bare AND terms, then
+    /// NOT terms**:
     ///
-    /// | shape              | render                              | FTS5 parse (SQLite 3.46.0) |
-    /// |--------------------|-------------------------------------|----------------------------|
-    /// | `a b`              | `a b`                               | `a AND b` (implicit)       |
-    /// | `a b -c`           | `a b NOT c`                         | `a AND b AND NOT c`        |
-    /// | `~a ~b`            | `(a OR b)`                          | `a OR b`                   |
-    /// | `~a ~b -c`         | `(a OR b) NOT c`                    | `(a OR b) AND NOT c`       |
-    /// | `~a ~b a' -c`      | `(a OR b) NOT c a'`                 | `(a OR b) AND NOT c AND a'`|
-    /// | `t:… a` (filter)   | `a`                                 | (filter is a SQL join, §5) |
+    /// | shape            | render                              | meaning            |
+    /// |------------------|-------------------------------------|--------------------|
+    /// | `a b`            | `a* AND b*`                         | `a AND b`          |
+    /// | `a b -c`         | `a* AND b* NOT c*`                  | `a AND b AND NOT c`|
+    /// | `~a ~b`          | `(a* OR b*)`                        | `a OR b`           |
+    /// | `~a ~b -c`       | `(a* OR b*) NOT c*`                 | `(a OR b) AND NOT c`|
+    /// | `~a ~b c -d`     | `(a* OR b*) AND c* NOT d*`          | as written         |
+    /// | `t:… a` (filter) | `a*`                                | (filter is a SQL join, §5) |
+    ///
+    /// Turso's planner rejects a *bare* `NOT` (no positive FTS term to
+    /// anchor it), so a NOT-only query renders `NOT <term>…` and the CLI
+    /// instead phrases each exclusion as a correlated `NOT EXISTS`
+    /// (`kb/cli/search.rs`).
     ///
     /// Proven by `kb-db/tests/fts5.rs` →
     /// `canonical_fts_render_means_what_the_grammar_intends` (an empirical
-    /// FTS5 probe that seeds known rows and asserts the exact row set each
+    /// probe that seeds known rows and asserts the exact row set each
     /// rendered string returns — the load-bearing guarantee that "the render
-    /// string means what the grammar intends" on the *actual* engine build,
+    /// string means what the grammar intends" on the *actual* engine,
     /// per the §9 "escaping/quoting correct" bullet; see also PLAN.md §13d).
     pub fn render_fts(&self) -> String {
         // Turso's FTS parser (Tantivy) treats whitespace between two
@@ -191,16 +193,16 @@ impl ParsedQuery {
     }
 }
 
-/// Is `s` ambiguous as a bare FTS5 token (so it *must* be quoted)?
+/// Is `s` ambiguous as a bare FTS token (so it *must* be quoted)?
 ///
 /// A term is ambiguous if it is empty, or contains whitespace, or contains a
-/// double-quote, or contains an FTS5 **operator character** — `*` being the
+/// double-quote, or contains an FTS **operator character** — `*` being the
 /// one that bites us: the bare-term path appends a prefix `*` to every
 /// non-phrase token, so a user-typed `*` would otherwise double up
-/// (`abc*` → `abc**`) and FTS5 rejects the double prefix at parse time
-/// (SECURITY_REPORT 3.18). Quoting a `*`-bearing token routes it through
-/// the phrase branch (which does not double-append), keeping the *rendered
-/// string a valid FTS5 query* for every input.
+/// (`abc*` → `abc**`) and the FTS engine rejects the double prefix at
+/// parse time (SECURITY_REPORT 3.18). Route a `*`-bearing token through
+/// the `user_prefix_stem` branch (a plain `stem*`) instead, so the
+/// *rendered string stays a valid FTS query* for every input.
 pub fn needs_quoting(s: &str) -> bool {
     s.is_empty() || s.contains(' ') || s.contains('"') || s.contains('*')
 }
@@ -216,15 +218,16 @@ fn user_prefix_stem(text: &str) -> Option<&str> {
     }
 }
 
-/// Render a single content term as an FTS5 token:
-/// - A **phrase** (`phrase: true`) is an exact FTS5 phrase — double-quoted,
+/// Render a single content term as an FTS token:
+/// - A **phrase** (`phrase: true`) is an exact phrase — double-quoted,
 ///   inner `"` doubled, no prefix. A phrase is a *contiguous sequence* by
 ///   definition; prefixing any of its tokens would break phrase semantics.
 /// - A **single bare word** (`phrase: false`) renders as a **prefix
 ///   match**: `apple` → `apple*`, so a bare `watch` hits `watchmaking`
 ///   (the intended interactive-search behavior — the user is still typing
-///   out the word when they look for a match). FTS5 `unicode61` is
-///   full-token by default, so the suffix is the mechanism for substring
+///   out the word when they look for a match). Turso's index is
+///   full-token by default (like the old FTS5 `unicode61` tokenizer),
+///   so the `*` suffix is the mechanism for matching substring
 ///   *from the start* of a word.
 ///
 /// # Quoting rule (the "escaping/quoting correct" contract)
@@ -575,9 +578,9 @@ mod tests {
         assert!(q.not_terms.is_empty());
         assert_eq!(q.and_terms.len(), 2);
         // Bare single-word content terms are non-phrases, so they render as
-        // FTS5 **prefix queries** (`apple` → `apple*`) to support substring
+        // FTS **prefix queries** (`apple` → `apple*`) to support substring
         // *from the start* of a word (the interactive-search behavior).
-        // Whitespace between tokens is still implicit AND.
+        // Positive clauses are explicitly AND-joined (see render_fts).
         assert_eq!(q.render_fts(), "apple* AND banana*");
     }
 
@@ -591,10 +594,10 @@ mod tests {
 
     #[test]
     fn dash_term_is_not() {
-        // `-pear` → a `NOT pear` clause; `apple` is the AND term (space = implicit AND).
-        // The canonical order is [NOT] → [bare], since bare cannot directly
-        // follow a paren-group on the bundled SQLite FTS5 build (see render_fts
-        // doc). Here there's no OR group, so it's simply `apple NOT pear`.
+        // `-pear` → a `NOT pear` clause; `apple` is the AND term.
+        // The canonical order is [positive clauses] → [NOT terms]
+        // (see render_fts doc). Here there's no OR group, so it's simply
+        // `apple* NOT pear*`.
         let q = parse("apple -pear");
         assert_eq!(q.not_terms.len(), 1);
         // Both AND- and NOT-clause bare words prefix; NOT stays infix.
@@ -603,10 +606,10 @@ mod tests {
 
     #[test]
     fn or_and_not_coexist() {
-        // Canonical render order: OR-group → NOT → bare AND terms (see
-        // render_fts doc for the FTS5 parse-order rationale and the
+        // Canonical render order: OR-group → bare AND terms → NOT terms
+        // (see render_fts doc for the rationale and the
         // kb-db/tests/fts5.rs empirical probe that LOCKS this against the
-        // bundled SQLite 3.46.0 engine).
+        // Turso engine).
         let q = parse("~llm ~mllm attention -gpt");
         assert_eq!(q.render_fts(), "(llm* OR mllm*) AND attention* NOT gpt*");
     }
@@ -711,7 +714,7 @@ mod tests {
     #[test]
     fn bare_word_gets_prefix_suffix() {
         assert!(!needs_quoting("apple"));
-        // Non-phrase bare word → FTS5 prefix query (`apple*`), so a user
+        // Non-phrase bare word → FTS prefix query (`apple*`), so a user
         // typing `apple-pie` as a bare single token would hit `applepie`.
         assert_eq!(
             render_term(&Term::Token {

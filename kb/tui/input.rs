@@ -1328,7 +1328,7 @@ mod tests {
     fn read_armed_l_opens_picker_without_find() {
         let db = crate::tui::Db::open_in_memory_test().unwrap();
         db.migrate().unwrap();
-        // One `execute` per page (rusqlite's `execute` is single-statement).
+        // One `execute` per page (this façade's `execute` is single-statement).
         let body = String::from("see [[q]]\nand [[r]]\n");
         db.conn
             .execute(

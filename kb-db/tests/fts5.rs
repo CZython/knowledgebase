@@ -119,7 +119,7 @@ fn bm25_orders_matches_best_first() {
     // note's title+description+body. A term that hits *more* columns should
     // rank above a term that hits *fewer*. We approximate: search a term
     // present in both, and confirm the multi-column one tops the list.
-    // (Loose assertion — FTS5 bm25 weighting is the implementation detail;
+    // (Loose assertion — Turso's ranking function is the implementation detail;
     //  we only need deterministic, relevance-ordered output.)
     let st2 = db
         .conn
@@ -327,9 +327,9 @@ fn canonical_fts_render_means_what_the_grammar_intends() {
 
     // (1) space = implicit AND: "apple banana" → rows with BOTH → only A.
     //     Both tokens are bare single-word content (non-phrase), so render_fts
-    //     emits them as FTS5 prefix queries (`apple*`, `banana*`) — the
+    //     emits them as FTS prefix queries (`apple*`, `banana*`) — the
     //     substring *from the start* semantic that supports interactive-type
-    //     search. The AND (implicit whitespace) structure is unchanged.
+    //     search. Positive clauses are explicitly AND-joined (Turso).
     let q = parse("apple banana").render_fts();
     assert_eq!(q, "apple* AND banana*");
     assert_eq!(run(&q), vec!["gram:A"]);
@@ -347,9 +347,9 @@ fn canonical_fts_render_means_what_the_grammar_intends() {
     assert_eq!(q, "apple* NOT pear*");
     assert_eq!(run(&q), vec!["gram:A"]);
 
-    // (4) AND + OR + NOT — canonical order [OR] → [NOT] → [bare]:
+    // (4) AND + OR + NOT — canonical order [OR] → [bare] → [NOT]:
     //     "(llm* OR mllm*) AND attention* NOT gpt*" → rows with (llm OR mllm) AND
-    //     NOT gpt AND attention → only E (D has gpt; F lacks llm/mllm; A/B/C
+    //     attention AND NOT gpt → only E (D has gpt; F lacks llm/mllm; A/B/C
     //     lack attention and llm/mllm).
     let q = parse("~llm ~mllm attention -gpt").render_fts();
     assert_eq!(q, "(llm* OR mllm*) AND attention* NOT gpt*");
@@ -376,10 +376,10 @@ fn canonical_fts_render_means_what_the_grammar_intends() {
     );
 
     // (7) SECURITY_REPORT 3.18 / CODEBASE_REVIEW F3: a user-typed `*` in a
-    //     bare content token is rendered as a valid FTS5 phrase + prefix
-    //     (`"abc*"*`), and the engine accepts *and* matches it — a page whose
-    //     body contains a token beginning with `abc` (e.g. `abc`, `abcs`)
-    //     hits. Pre-fix, the render was `abc**` (a double prefix) and FTS5
+    //     bare content token renders as a valid FTS prefix query (`abc*`),
+    //     and the engine accepts *and* matches it — a page whose body
+    //     contains a token beginning with `abc` (e.g. `abc`, `abcs`) hits.
+    //     Pre-fix, the render was `abc**` (a double prefix) and the engine
     //     raised a syntax error before any row was ever compared.
     let q = parse("abc*").render_fts();
     assert_eq!(q, "abc*");
@@ -396,7 +396,7 @@ fn canonical_fts_render_means_what_the_grammar_intends() {
     //     unit tests (string-level) — the two pins stay consistent (F3).
     let q = parse("watch* watchmaking").render_fts();
     assert_eq!(q, "watch* AND watchmaking*");
-    // `run` panics on a FTS5 syntax error; reaching a row set (even empty)
+    // `run` panics on a FTS syntax error; reaching a row set (even empty)
     // is the guarantee — pre-fix this render was `watch**` and errored.
     let _rows = run(&q);
 }

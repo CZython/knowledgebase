@@ -3,7 +3,7 @@
 //! Two layers coexist in this crate:
 //!
 //! 1. **Exec** — pure Rust data + helpers, lives in `src/lib.rs` (and
-//!    modules like `src/meta.rs`). No `std::io`, no `rusqlite`, no `clap`,
+//!    modules like `src/meta.rs`). No `std::io`, no DB engine, no `clap`,
 //!    no side effects. Runs under `cargo build` / `cargo test`.
 //!
 //! 2. **Spec (verified)** — the invariants we commit to, written as

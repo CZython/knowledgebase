@@ -1,12 +1,13 @@
 //! M5 — `kb-db` indexer, end-to-end (PLAN §10 `walk_snapshot`/`index`/`refresh`).
 //!
-//! These are *feature* tests (not FTS5 probes — those live in `fts5.rs`):
+//! These are *feature* tests (not FTS probes — those live in `fts5.rs`):
 //! a real temp tree is walked, indexed, searched, and reconciled. They pin
 //! the M5 contract that M7 (the multi-file CLI) builds on:
 //!
-//! - `migrate` gives a full schema + working FTS5 *triggers* (so `INSERT`
-//!   into `pages` is findable by `pages_fts MATCH` without manual index
-//!   upserts — §13a "M5 index/refresh code generates both").
+//! - `migrate` gives a full schema + a working FTS index (so `INSERT`
+//!   into `pages` is findable by `fts_match(...)` without manual index
+//!   upserts — the engine auto-maintains lockstep, §13a "M5 index/refresh
+//!   code generates both").
 //! - `pages` / `page_gates` / `page_tags` / `links` rows are derived 1:1
 //!   from the tree; pages with no `type:` are *skipped and counted*.
 //! - nested/overlapping roots dedupe on `abs_path`; innermost / most-recent
@@ -107,7 +108,7 @@ fn index_derives_all_row_tables_and_fts() {
     // 1 page indexed.
     assert_eq!(count(&s.db, "pages"), 1);
 
-    // FTS is in sync via the *trigger* — search by description text.
+    // FTS is in sync (Turso auto-maintains the index) — search by description text.
     let hits = strings(
         &s.db,
         "SELECT id FROM pages

@@ -153,9 +153,9 @@ const PAGES_COLUMNS: &[&str] = &[
 /// Column *renames* to apply, `(old_name, new_name)`, in order. A rename is
 /// distinct from an addition: the underlying column already exists carrying
 /// live data, so it must be **`ALTER TABLE … RENAME COLUMN`**'d (data
-/// preserved) rather than dropped and re-added. SQLite ≥ 3.25 rewrites the
-/// references in any triggers/views/indexes that name the column, so the
-/// FTS5 sync triggers survive it. The one rename in this codebase's history
+/// preserved) rather than dropped and re-added. The Turso FTS index is
+/// (re)built *after* the reconcile, so a rename touching an indexed column
+/// cannot strand a stale index. The one rename in this codebase's history
 /// is `search_terms` → `search_required_phrase` (`d38340e`, SCHEMA_VERSION
 /// 1→2 — the authors assumed "no on-disk DBs to migrate"; a live DB proves
 /// otherwise). A live DB on that column is exactly your `refresh` /

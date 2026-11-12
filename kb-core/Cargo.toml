@@ -7,7 +7,7 @@ rust-version.workspace = true
 description = "kb-core — the pure, Verus-verified half of `kb`: frontmatter parsing, section splice, identity, tags/aliases, links, and the search grammar. Zero std I/O, zero external deps."
 #
 # NOTE (PLAN.md §10): this crate is the *proven* half of the project.
-# It should never depend on std IO, rusqlite, or clap. Any future
+# It should never depend on std IO, a DB engine, or clap. Any future
 # addition to this crate must stay in the "pure, no side-effects" zone
 # that Verus can discharge.
 [dependencies]

@@ -12,10 +12,10 @@
 //   > `semantics` … AND/OR/NOT structure preserved.
 //
 // The *code* is `src/search_grammar.rs`; the concrete render cases are pinned
-// by its unit tests *and* by the **empirical FTS5 probe** in
+// by its unit tests *and* by the **empirical FTS probe** in
 // `kb-db/tests/fts5.rs` (which seeds known rows and asserts each rendered
-// string returns the intended row set on the actual bundled SQLite 3.46.0
-// engine — the load-bearing guarantee we don't want to re-derive from memory).
+// string returns the intended row set on the Turso engine — the
+// load-bearing guarantee we don't want to re-derive from memory).
 //
 // This file proves the *shape*:
 //
@@ -29,11 +29,12 @@
 //       inner `"` is *doubled*; an unambiguous bare word is not quoted. The
 //       two cases partition every term (well-formedness of the render).
 //   (R) **render order / structure preserved**: the canonical FTS string
-//       emits clauses in the FTS5-confirmed order **[OR group] → [NOT terms]
-//       → [bare AND terms]**, space-joined (space = implicit AND). A bare term
-//       may *trail* a NOT clause; a bare term may NOT sit directly before
-//       or after a paren-group (that form is a syntax error on the build);
-//       `NOT` reads as the infix-after-prefix FTS5 accepts.
+//       emits clauses as **[OR group] → [bare AND terms] → [NOT terms]**,
+//       with explicit `AND` between positive clauses and ` ` + `NOT <term>`
+//       appended for NOT clauses (Turso rejects a bare `NOT` with no positive
+//       FTS term to anchor it — see render_fts doc). NOT terms *must* trail
+//       the positive clauses (a bare term may NOT sit before a NOT clause
+//       when it is the last positive term).
 //   (C) **AND-term commutativity**: two AND-term *sets* that are equal produce
 //       the same rendered clause multiset (the §9 "order doesn't matter" half
 //       on the content axis).
@@ -142,7 +143,7 @@ verus! {
     //
     // A term *requires* quoting iff it is empty, contains a space, or
     // contains a double-quote. When quoted, an inner `"` is doubled
-    // (FTS5 string-literal rule). An unambiguous bare word renders bare.
+    // (same doubling rule as SQLite FTS5 string literals). An unambiguous bare word renders bare.
     // The two cases (quote-required vs bare) partition every term — that's
     // the "well-formed" half of the §9 bullet.
 
@@ -151,14 +152,14 @@ verus! {
 
     // (Q1) the empty string is *quote-required* (the degenerate case —
     //      `""` renders as the empty-string literal, so quoting is the only
-    //      way FTS5 reads it as "no term" rather than the start of a bare).
+    //      way the FTS engine reads it as "no term" rather than the start of a bare).
     pub open spec fn is_empty(s: &str) -> bool { s == "" }
     #[verifier::proof]
     fn empty_requires_quoting()
         ensures is_empty("") != !is_empty("") {}
 
     // (Q2) a space in a term forces quoting (a bare word cannot contain
-    //      whitespace — FTS5 would split it into two terms, changing the
+    //      whitespace — the FTS engine would split it into two terms, changing the
     //      meaning — so we must quote to keep it one phrase). Witness: the
     //      predicate flips on presence of a space.
     pub open spec fn has_space(s: &str) -> bool { false }   // opaque: the exec's `s.contains(' ')`
@@ -178,7 +179,7 @@ verus! {
         ensures !needs_quoting("apple", false, false, false) {}
 
     // (Q4) a quote inside a bare word forces quoting AND doubling of the
-    //      inner quote (the FTS5 string-literal rule). Witness the
+    //      inner quote (the FTS string-literal rule). Witness the
     //      doubling-claim on a concrete input: `a"b` renders as `"a""b"`.
     pub open spec fn doubles_an_inner_quote(in_text: &str, rendered: &str) -> bool
         { in_text == "a\"b" && rendered == "\"a\"\"b\"" }
@@ -198,12 +199,14 @@ verus! {
 
     // ===================== (R) render order / AND-OR-NOT structure (§5) =====
     //
-    // The canonical render (space-joined implicit AND) emits clauses in the
-    // order that the bundled SQLite FTS5 engine accepts:
+    // The canonical render emits clauses as
     //
-    //   [OR group] → [NOT terms] → [bare AND terms]
+    //   [OR group] → [bare AND terms] → [NOT terms]
     //
-    // (Proven by the `kb-db/tests/fts5.rs` probe, not re-derived here: this
+    // (positive AND joined with explicit `AND`; NOT terms appended at the end
+    //  as ` <NOT term>` — see render_fts doc)
+    //
+    // (Proven by the `kb-db/tests/fts5.rs` probe on the Turso engine, not re-derived here: this
     // spec pins the *shape* (the order is a clean, total, disjoint clause
     // classification — a clause is exactly one of the three kinds) and the
     // *witnesses* for each position, so a future refactor that re-orders

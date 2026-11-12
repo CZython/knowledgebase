@@ -444,9 +444,9 @@ fn search_not_only_is_a_documented_limited_path() {
     write_page(&s, "a.md", "type: note\ntitle: Alpha\n", "alpha\n");
     write_page(&s, "b.md", "type: note\ntitle: Beta\n", "beta\n");
     add(&s);
-    // A leading-`-` (NOT) term alone -> FTS5 can't take a lone NOT, so the
-    // engine turns it into `NOT EXISTS (SELECT 1 FROM pages_fts WHERE rowid =
-    // pages.rowid AND pages_fts MATCH <term>)` per NOT term. SECURITY_REPORT
+    // A leading-`-` (NOT) term alone -> Turso's FTS planner can't take a
+    // lone NOT (there is no positive FTS term to anchor it), so the CLI
+    // phrases it as a correlated `NOT EXISTS` per NOT term. SECURITY_REPORT
     // 3.5: before that fix, `-beta` alone was a *silent no-op* (returned the
     // whole corpus up to `LIMIT`). Now the exclusion must actually drop the
     // page that has "beta" content.

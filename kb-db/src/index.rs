@@ -1,9 +1,10 @@
 //! index — upsert one page into `pages` + `page_gates` + `page_tags` +
 //! `links` (PLAN §10 `index.rs`).
 //!
-//! `pages_fts` is kept in lockstep **by the triggers installed in
-//! `migrate`** — the indexer never touches `pages_fts` directly (§13a
-//! "M5 index/refresh code generates both" is satisfied automatically).
+//! `pages_fts` is kept in lockstep **by the engine** —
+//! Turso's native FTS auto-maintains the index on `pages` (no triggers,
+//! no manual upsert; §13a "M5 index/refresh code generates both" holds
+//! automatically).
 //!
 //! Per-page pipeline (drives exactly the pure `kb-core` surface):
 //!
@@ -21,7 +22,7 @@
 //! 7. `etag_of(bytes)` (FNV-1a 64, 16-hex) + `fs::metadata::modified` →
 //!    `content_hash` / `mtime_ns`;
 //! 8. `INSERT ... ON CONFLICT(abs_path) DO UPDATE` (single-statement
-//!    upsert; the triggers keep `pages_fts` in sync).
+//!    upsert; the FTS index auto-maintains).
 
 use crate::sql::{params, Result};
 use crate::Db;
@@ -349,7 +350,7 @@ impl std::error::Error for IndexError {}
 /// 2. `DELETE FROM page_tags WHERE abs_path = ?` — same rationale.
 /// 3. `DELETE FROM links WHERE from_path = ?` — same.
 /// 4. `INSERT INTO pages ... ON CONFLICT(abs_path) DO UPDATE SET ...` — the
-///    page row; the FTS5 triggers fire on the UPDATE/INSERT.
+///    page row; the FTS index auto-maintains on the UPDATE/INSERT.
 /// 5. `INSERT OR IGNORE` the gate rows.
 /// 6. `INSERT OR IGNORE` the tag rows.
 /// 7. `INSERT OR IGNORE` the link rows.
@@ -371,8 +372,8 @@ pub fn upsert_page(db: &Db, rec: &PageRecord) -> Result<usize> {
         crate::sql::params![rec.abs_path],
     )?;
 
-    // 4. The page row. The FTS5 triggers (migrate) keep `pages_fts` in
-    //    lockstep — we do not touch it directly.
+    // 4. The page row. The FTS index (Turso, auto-maintained on INSERT
+    //    /UPDATE) keeps `idx_pages_fts` in sync — we do not touch it directly.
     let now = now_iso8601();
     let gate = super::migrate::COL_SEARCH_REQUIRED_PHRASE;
     let res = tx.execute(

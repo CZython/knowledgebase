@@ -13,7 +13,7 @@
 //! ## Assumed vs proven (PLAN §9)
 //!
 //! `ratatui` renders; `crossterm` drives the terminal (raw mode + event
-//! loop). Both are *assumed* shells, exactly like `clap`/`rusqlite` —
+//! loop). Both are *assumed* shells, exactly like `clap`/`turso` —
 //! they may misbehave in ways we do not prove. Everything **inside**
 //! this module — the state machine, selection logic, key-binding table,
 //! filter-match, the frontmatter-edit pipeline — is plain Rust over the
@@ -54,7 +54,8 @@
 //! ## Boring-shell conventions
 //!
 //! - **Single-threaded.** The crossterm event loop is the heartbeat; no
-//!   async, no `tokio` (same as the rest of `kb` — `rusqlite` is sync).
+//!   async, no `tokio` (same as the rest of `kb` — the `turso` driver
+//!   is sync).
 //! - **One `App` value, no hidden state.** Add a `Read`/`Edit`/`Aliases`
 //!   variant on `Mode` and the existing loop dispatches it.
 //! - **Terminal restore is a `Drop` guard.** If we return (or panic) out
@@ -212,12 +213,12 @@ pub enum Mode {
     Alias(AliasState),
     /// Manage registered roots: list, add, drop. M8.3.
     Roots(RootsState),
-    /// Power search (M8.4): full FTS5 search_grammar + live tag
+    /// Power search (M8.4): full FTS search_grammar + live tag
     /// suggestions. Armed by `s` from Browse.
     Search(SearchState),
 }
 
-/// The **Search** mode (M8.4): full `search_grammar` FTS5 + live tag
+/// The **Search** mode (M8.4): full `search_grammar` FTS + live tag
 /// suggestions. The query buffer supports the same grammar `kb search`
 /// does (`tag:…`, `type:…`, `not …`, `"quoted phrase"`, etc.). Live
 /// results appear in the left pane; tag suggestions (with alias→canonical

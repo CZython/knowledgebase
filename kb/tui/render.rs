@@ -21,7 +21,7 @@
 //!  status bar (colored by severity)
 //! ```
 //!
-//! Search (M8.4 — the real `search_grammar` FTS5 engine, not a substring
+//! Search (M8.4 — the real `search_grammar` FTS engine, not a substring
 //! filter; `s` from Browse):
 //! ```text
 //!  kb tui — search · 3 result(s) · 2 tag hint(s)  (↑↓ move · Tab inject tag · Enter open · Esc back)
@@ -1021,7 +1021,7 @@ fn draw_roots(
 }
 
 /// The **Search** mode (M8.4): a command-palette layout over the full
-/// FTS5 engine. Three rows:
+/// FTS engine. Three rows:
 /// ```text
 ///  header:  kb tui — search (n result(s), m tag hint(s))
 ///  row 1:   query prompt (full width)
@@ -1086,7 +1086,7 @@ fn draw_search(
     let list_title = if ss.results.as_ref().is_some_and(|r| r.is_empty()) {
         " 0 result — type a query".to_string()
     } else {
-        format!(" {n_res} result(s) — FTS5")
+        format!(" {n_res} result(s) — FTS")
     };
     let widget = RatList::new(items)
         .highlight_style(app.palette.selection)
@@ -1394,10 +1394,14 @@ fn is_heading(raw: &str) -> bool {
 /// Render a Markdown body line into styled spans. Inline emphasis is
 /// recognized for **bold** (`**…**`), _italic_ (`*…*`/`_…_`),
 /// ~~strikethrough~~ (`~~…~~`), and inline code (`` `…` ``); unmatched
-/// delimiters pass through as literal text. Headings are the one exception
-/// — they render in the `label` role unmodified (the heading's own styling
-/// wins, so a `#` heading with `**bold**` inside stays a single `label`
-/// span). The inner text of a code span is opaque: any `**bold**`, `*it*`,
+/// delimiters pass through as literal text. A backslash escapes the
+/// immediately following special char (`*`, `_`, `~`, `` ` ``, `\`):
+/// that char renders literal and the backslash is *consumed* — the one way
+/// to keep a math formula like `y = x*a*b` from italicising its middle,
+/// is to write it `y = x\*a\*b`. Headings are the one exception — they
+/// render in the `label` role unmodified (the heading's own styling wins,
+/// so a `#` heading with `**bold**` inside stays a single `label` span).
+/// The inner text of a code span is opaque: any `**bold**`, `*it*`,
 /// or `~~st~~` inside a `…` span is literal (standard markdown semantics).
 ///
 /// This is *not* a full Markdown engine: there is no HTML tag, no URL,
@@ -1431,9 +1435,9 @@ fn render_markdown_text(p: &Palette, raw: &str) -> Line<'static> {
                 }
                 let run = delimiter_run(bytes, i);
                 let matched = match run {
-                    2 if bytes[i] == b'*' => find_close_delim(i + 2, 2, bytes),
-                    1 if bytes[i] == b'*' => find_close_delim(i + 1, 1, bytes),
-                    1 if bytes[i] == b'_' => find_close_delim(i + 1, 1, bytes),
+                    2 if bytes[i] == b'*' => find_close_delim(i + 2, 2, bytes, true),
+                    1 if bytes[i] == b'*' => find_close_delim(i + 1, 1, bytes, true),
+                    1 if bytes[i] == b'_' => find_close_delim(i + 1, 1, bytes, true),
                     _ => None,
                 };
                 if let Some(close) = matched {
@@ -1443,7 +1447,7 @@ fn render_markdown_text(p: &Palette, raw: &str) -> Line<'static> {
                     let inner = &raw[i + run..close];
                     if !inner.is_empty() {
                         let style = if run == 2 { p.md_bold } else { p.md_italic };
-                        spans.push(Span::styled(inner.to_string(), style));
+                        spans.push(Span::styled(unescape_inline(inner), style));
                     }
                     i = close + run;
                 } else {
@@ -1454,7 +1458,7 @@ fn render_markdown_text(p: &Palette, raw: &str) -> Line<'static> {
             }
             b'~' => {
                 let close = if i + 1 < bytes.len() && bytes[i + 1] == b'~' {
-                    find_close_delim(i + 2, 2, bytes)
+                    find_close_delim(i + 2, 2, bytes, true)
                 } else {
                     None
                 };
@@ -1464,7 +1468,7 @@ fn render_markdown_text(p: &Palette, raw: &str) -> Line<'static> {
                     }
                     let inner = &raw[i + 2..close];
                     if !inner.is_empty() {
-                        spans.push(Span::styled(inner.to_string(), p.md_strike));
+                        spans.push(Span::styled(unescape_inline(inner), p.md_strike));
                     }
                     i = close + 2;
                 } else {
@@ -1487,7 +1491,7 @@ fn render_markdown_text(p: &Palette, raw: &str) -> Line<'static> {
                     i += 1;
                     continue;
                 }
-                let close = find_close_delim(i + 1, 1, bytes);
+                let close = find_close_delim(i + 1, 1, bytes, false);
                 if let Some(close) = close {
                     if !buf.is_empty() {
                         spans.push(Span::styled(std::mem::take(&mut buf), p.default));
@@ -1499,6 +1503,22 @@ fn render_markdown_text(p: &Palette, raw: &str) -> Line<'static> {
                     i = close + 1;
                 } else {
                     buf.push('`');
+                    i += 1;
+                }
+            }
+            b'\\' => {
+                // Backslash escape: `\*`, `\_`, `\~`, `` \` ``, and `\\`
+                // render the escaped char literal and consume the backslash
+                // — the way to keep a formula like `y = x\*a\*b` from
+                // italicising its middle. A backslash before a non-special
+                // char (or at end-of-line) is itself literal.
+                if i + 1 < bytes.len()
+                    && matches!(bytes[i + 1], b'*' | b'_' | b'~' | b'`' | b'\\')
+                {
+                    buf.push(bytes[i + 1] as char);
+                    i += 2;
+                } else {
+                    buf.push('\\');
                     i += 1;
                 }
             }
@@ -1549,10 +1569,17 @@ fn delimiter_run(bytes: &[u8], i: usize) -> usize {
 /// From `start`, find the *next* occurrence of `count` consecutive
 /// delimiters matching the byte at `start - 1`. Returns the index of the
 /// first `*` (or `_`) of the closer, or `None` if no closer exists.
+/// A backslash shields the byte after it: a `\X` pair is scanned over the
+/// whole pair, so an escaped delimiter (`\*`, `\_`, …) is *not* a closer
+/// candidate — `*a \* b*` closes on the final `*`, not on the `\*`. This
+/// applies only for `escape_aware` delimiters (`*`/`_`/`~`); inside a code
+/// span a backslash is *not* an escape character (standard markdown), so
+/// the backtick closer scan passes it through.
 fn find_close_delim(
     start: usize,
     count: usize,
     bytes: &[u8],
+    escape_aware: bool,
 ) -> Option<usize> {
     if start >= bytes.len() {
         return None;
@@ -1560,6 +1587,12 @@ fn find_close_delim(
     let target = bytes[start.saturating_sub(1)]; // the delimiter char
     let mut i = start;
     while i < bytes.len() {
+        if escape_aware && bytes[i] == b'\\' {
+            // Escaped byte — step over the pair, the shielded byte is
+            // literal and cannot end the span.
+            i += 2;
+            continue;
+        }
         if bytes[i] == target {
             // Check for enough consecutive matches.
             let mut j = 0;
@@ -1573,6 +1606,46 @@ fn find_close_delim(
         i += 1;
     }
     None
+}
+
+/// Resolves the inner text of a matched emphasis span: backslash
+/// escapes (`\*`, `\_`, …) render the escaped char literally and drop the
+/// backslash, so that `**x \* y**` → `x * y`. (The top-level scanner's
+/// backslash arm handles same-tier escapes; this is for the inner slice
+/// that `find_close_delim` skips past — see `render_markdown_text`.)
+/// `\\` → `\`, and any single backslash before a non-special char
+/// survives literally (standard markdown).
+fn unescape_inline(s: &str) -> String {
+    let bytes = s.as_bytes();
+    let mut out = String::with_capacity(s.len());
+    let mut i = 0usize;
+    while i < bytes.len() {
+        if bytes[i] == b'\\' && i + 1 < bytes.len()
+            && matches!(bytes[i + 1], b'*' | b'_' | b'~' | b'`' | b'\\')
+        {
+            out.push(bytes[i + 1] as char);
+            i += 2;
+        } else {
+            if bytes[i] < 0x80 {
+                out.push(bytes[i] as char);
+                i += 1;
+            } else {
+                match std::str::from_utf8(&bytes[i..]) {
+                    Ok(st) => {
+                        let mut it = st.chars();
+                        let c = it.next().unwrap();
+                        out.push(c);
+                        i += c.len_utf8();
+                    }
+                    Err(_) => {
+                        out.push(bytes[i] as char);
+                        i += 1;
+                    }
+                }
+            }
+        }
+    }
+    out
 }
 
 /// Truncate to at most `max` **chars** (not bytes) so a multi-byte title
@@ -2740,6 +2813,69 @@ mod tests {
         assert_eq!(one_t.spans.len(), 1);
         assert_eq!(one_t.spans[0].style, p.default);
         assert_eq!(one_t.spans[0].content.as_ref(), "a ~ b");
+    }
+    /// A backslash escapes the next special char: `\*` → literal `*`,
+    /// `\_` → literal `_`, `\~` → `~`, `` \` `` → `` ` ``, `\\` → `\`, and
+    /// the backslash itself is consumed — the way a formula like
+    /// `y=x\*a\*b` stays literal. A backslash before a non-special char
+    /// (or at EOL) survives verbatim. Matches standard markdown.
+    #[test]
+    fn markdown_backslash_escapes_render_literal() {
+        let p = Palette::default_palette();
+        // The original repro: `y=x\*a\*b` must render `y=x*a*b` as one
+        // plain span — neither `*` opens an italic, and no backslash leaks.
+        let formula = render_markdown_text(&p, "y=x\\*a\\*b");
+        assert_eq!(formula.spans.len(), 1, "no spurious spans: {:#?}", formula.spans);
+        assert_eq!(formula.spans[0].style, p.default);
+        assert_eq!(formula.spans[0].content.as_ref(), "y=x*a*b");
+        // `\_` is literal too.
+        let u = render_markdown_text(&p, "a\\_b");
+        assert_eq!(u.spans.len(), 1);
+        assert_eq!(u.spans[0].content.as_ref(), "a_b");
+        // `\~` and `` \` `` and `\\`.
+        let t = render_markdown_text(&p, "a\\~b \\`c\\\\d");
+        assert_eq!(t.spans.len(), 1);
+        assert_eq!(t.spans[0].content.as_ref(), "a~b `c\\d");
+        // A backslash before a non-special char (and a trailing backslash)
+        // is itself verbatim — no consumption, no crash.
+        let plain = render_markdown_text(&p, "a\\b");
+        assert_eq!(plain.spans.len(), 1);
+        assert_eq!(plain.spans[0].content.as_ref(), "a\\b");
+        let trailing = render_markdown_text(&p, "abc\\");
+        assert_eq!(trailing.spans.len(), 1);
+        assert_eq!(trailing.spans[0].content.as_ref(), "abc\\");
+    }
+    /// Escapes interact with *matched* emphasis: `*a \* b*` italicises
+    /// `a \* b` → the inner text renders `a * b` (the escape is resolved
+    /// in the styled span, standard markdown). Inside a code span, though,
+    /// a backslash is *not* an escape: `` `a\*b` `` keeps `\*` verbatim.
+    #[test]
+    fn markdown_escape_inside_emphasis_and_code() {
+        let p = Palette::default_palette();
+        // `*a \* b*` — the escaped `\*` is literal inside the italic.
+        let it = render_markdown_text(&p, "*a \\* b*");
+        assert_eq!(it.spans.len(), 1, "single italic span: {:#?}", it.spans);
+        assert_eq!(it.spans[0].style, p.md_italic);
+        assert_eq!(it.spans[0].content.as_ref(), "a * b");
+        // `**x \* y**` — bold inner text resolves `\*` → `*`.
+        let b = render_markdown_text(&p, "**x \\* y**");
+        assert_eq!(b.spans.len(), 1);
+        assert_eq!(b.spans[0].style, p.md_bold);
+        assert_eq!(b.spans[0].content.as_ref(), "x * y");
+        // An escaped `\*` must not *close* a span: `it\*x \*y* z` … the
+        // real case: a lone leading `*` with a shielded `\*` in between
+        // still pairs with a later unescaped `*`.
+        let shielded = render_markdown_text(&p, "*a \\* b* c");
+        assert_eq!(shielded.spans.len(), 2, ": {:#?}", shielded.spans);
+        assert_eq!(shielded.spans[0].style, p.md_italic);
+        assert_eq!(shielded.spans[0].content.as_ref(), "a * b");
+        assert_eq!(shielded.spans[1].style, p.default);
+        assert_eq!(shielded.spans[1].content.as_ref(), " c");
+        // Code spans are opaque: a backslash inside is NOT an escape.
+        let code = render_markdown_text(&p, "`a\\*b`");
+        assert_eq!(code.spans.len(), 1);
+        assert_eq!(code.spans[0].style, p.md_code);
+        assert_eq!(code.spans[0].content.as_ref(), "a\\*b");
     }
     /// `***bold_italic***` falls through to literal (we don't match a 3-char
     /// run). `**bold** *ital*` and `**bold**_ital_` are two spans each.
