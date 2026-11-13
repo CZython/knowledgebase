@@ -2026,10 +2026,12 @@ impl App {
     /// nothing to open).
     ///
     /// The *mode* is left in `Browse` / `Read` (the editor launches
-    /// synchronously — the TUI does not repaint until it returns). A
-    /// successful editor exit re-reads the page (so any `kb refresh` or
-    /// manual `Esc`-back sees the freshest body); this is the same refresh
-    /// `open_read` / `close_read` implicitly rely on.
+    /// synchronously — the TUI does not repaint until it returns). On a
+    /// successful editor exit we **re-index the page** (so the DB cache, FTS,
+    /// tags and links catch up to disk — the same path a write verb uses) and
+    /// **refresh every view** that shows page state (the Browse list, and the
+    /// open Read body if we're viewing that page), so a stale "re-index with
+    /// `kb refresh`" note never lingers — the re-index already happened here.
     #[cfg(feature = "editor")]
     pub fn open_in_editor(&mut self) -> KbResult<()> {
         let row = match self.selected_row() {
@@ -2041,11 +2043,12 @@ impl App {
         };
         let path = std::path::PathBuf::from(&row.abs_path);
         crate::edit_in_place(&path)?;
-        // Best-effort re-read: if the user edited the file, the *DB* is
-        // still on the old bytes until `kb refresh` — but the *file* is the
-        // source of truth, so we re-load the Read body if we're in Read
-        // (cheap: one fs read + one DB parse; a failure is a no-op so the
-        // TUI stays usable on a transient io error).
+        // Re-index the edited page against our live DB (best-effort; disk is
+        // authoritative and `kb refresh` repairs a transient failure).
+        let _ = crate::reindex_page(&self.db, &path, false);
+        // Refresh the open Read view if it shows this page: re-load the body
+        // and reset scroll to the top, matching how `kb show` re-renders a
+        // freshly-written file. Failure is a no-op (TUI stays usable).
         if let Mode::Read(r) = &mut self.mode {
             if let Ok((body, outline, fm)) = load_body(&self.db, &path.to_string_lossy()) {
                 r.body = body;
@@ -2054,9 +2057,11 @@ impl App {
                 r.scroll_top = 0;
             }
         }
-        // Also re-snapshot the row's file bytes (in Browse mode the row's
-        // `abs_path` is already what we'd read next — no state to update).
-        self.set_success(format!("opened {} — Esc back (the file is now source of truth; re-index with `kb refresh`)", row.abs_path));
+        // Refresh the Browse list so any title/desc/tags/search changes in the
+        // edited page are visible without a manual refresh — and park any
+        // stale Search result rows (a search ran before this edit).
+        self.reload_rows();
+        self.set_success(format!("edited {} — re-indexed & refreshed (Esc back)", row.abs_path));
         // The editor held our TTY (raw mode + alt-screen) for its whole
         // lifetime; on exit the real terminal buffer is diverged from
         // ratatui's internal model, so a plain diff-redraw leaves "holes".

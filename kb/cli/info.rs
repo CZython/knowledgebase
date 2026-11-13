@@ -55,6 +55,21 @@ pub(crate) fn cmd_info(dbpath: Option<&Path>, path: &Path, json: bool) -> Kb {
     let secs_f = (mtime_ns as f64) / 1e9;
     let mtime_str = format!("{secs_f:.1}s since unix epoch");
     let search_required_phrase = search_required_phrase.unwrap_or_default();
+    // `wc` (lines/chars/words) of the page body. Disk is the source of truth
+    // (the file may be newer than the cache); fall back to the cached DB body
+    // when the file is missing (a page removed from disk but still indexed) so
+    // the metric degrades instead of erroring.
+    let body_str: String = match std::fs::read_to_string(&abs_path) {
+        Ok(s) => s,
+        Err(_) => db.conn
+            .query_row(
+                "SELECT COALESCE(body, '') FROM pages WHERE abs_path = ?1",
+                params![abs_path],
+                |r| r.get::<_, String>(0),
+            )
+            .unwrap_or_default(),
+    };
+    let (wc_lines, wc_chars, wc_words) = text_wc(&body_str);
     if json {
         let tag_arr: Vec<String> = tags.split(',')
             .filter(|s| !s.trim().is_empty()).map(|s| s.trim().to_string()).collect();
@@ -71,6 +86,11 @@ pub(crate) fn cmd_info(dbpath: Option<&Path>, path: &Path, json: bool) -> Kb {
         links.i("out", fwd_count);
         links.i("in", back_count);
         o.raw("links", links.render());
+        let mut wc = JObject::new();
+        wc.i("lines", wc_lines as i64);
+        wc.i("chars", wc_chars as i64);
+        wc.i("words", wc_words as i64);
+        o.raw("wc", wc.render_compact());
         o.n1("mtime", secs_f);
         o.opt("created_at", &created_at);
         println!("{}", o.render());
@@ -90,6 +110,7 @@ pub(crate) fn cmd_info(dbpath: Option<&Path>, path: &Path, json: bool) -> Kb {
     }
     if !tags.is_empty() { println!("tags:    {tags}"); }
     println!("links:   {fwd_count} out / {back_count} in");
+    println!("wc:      {wc_lines} lines, {wc_chars} chars, {wc_words} words");
     println!("mtime:   {mtime_str}");
     if let Some(c) = created_at {
         println!("created: {c}");

@@ -20,6 +20,24 @@ pub(crate) mod textsrc;
 pub(crate) mod verify;
 pub(crate) mod writeops;
 
+/// Word-count metrics (lines, chars, words) of a whole text — the one owner
+/// so `info` (`wc`), `show` (`lines`/`bytes`), and `toc` never drift.
+///
+/// * `lines` — `str::lines().count()`; matches `Doc::total_lines` exactly
+///   (both count line-starts; a trailing `\n` adds no phantom line) and is
+///   the same number `kbn show` reports as `lines`.
+/// * `chars` — Unicode scalar count (what `wc -m` and a human mean by
+///   "chars"); `Doc` reports `bytes`, but `info` promises chars, so we keep
+///   the scalar semantics here. Callers that need bytes can `len()` the text.
+/// * `words` — whitespace-separated token count, same as `wc -w`.
+pub(crate) fn text_wc(s: &str) -> (usize, usize, usize) {
+    (
+        s.lines().count(),
+        s.chars().count(),
+        s.split_whitespace().count(),
+    )
+}
+
 pub(crate) use browse::*;
 pub(crate) use cmd_add::*;
 pub(crate) use create::*;

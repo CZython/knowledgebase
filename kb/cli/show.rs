@@ -53,15 +53,22 @@ pub(crate) fn cmd_show(file: &Path, ref_: Option<&str>, body: bool, full: bool, 
 
     let Some(r) = ref_ else {
         // No ref → whole file.
+        let text = String::from_utf8_lossy(&doc.data);
+        if show_etag {
+            println!("{}", etag_of(&doc.data));
+            return Ok(EXIT_OK);
+        }
         if json {
             println!(
-                "{{\"file\":{},\"lines\":{},\"bytes\":{}}}",
+                "{{\"file\":{},\"lines\":{},\"bytes\":{},\"etag\":{},\"text\":{}}}",
                 jstr(&file.display().to_string()),
                 doc.total_lines,
-                doc.data.len()
+                doc.data.len(),
+                jstr(&etag_of(&doc.data)),
+                jstr(&text)
             );
         } else {
-            print!("{}", String::from_utf8_lossy(&doc.data));
+            print!("{text}");
         }
         return Ok(EXIT_OK);
     };

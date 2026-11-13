@@ -976,13 +976,23 @@ pub(crate) fn refresh_all(db: &Db, full: bool, json: bool) -> Kb {
 /// repairs later. Under `--json` the warning goes to stderr to keep stdout
 /// a single clean JSON document.
 fn reindex_after_write(dbpath: Option<&Path>, path: &Path, json: bool) -> Kb {
+    let db = match open_db(dbpath) { Ok(d) => d, Err(_) => return Ok(EXIT_OK) };
+    reindex_page(&db, path, json)
+}
+
+/// Re-index one page against an *already-open* `db` — the core of
+/// `reindex_after_write`, split out so an in-process caller (the TUI's editor
+/// exit, which holds its own `Db`) can re-index without re-opening the
+/// database from a `dbpath`. `json` only governs stderr verbosity, never
+/// success/failure. Returns the canonical `Kb` result (`Ok(EXIT_OK)` when
+/// nothing to do — a best-effort no-op is not an error).
+pub(crate) fn reindex_page(db: &Db, path: &Path, json: bool) -> Kb {
     let abs = match std::fs::canonicalize(path) {
         Ok(a) => a,
         Err(_) => return Ok(EXIT_OK),
     };
     let abs_str = abs.to_string_lossy().to_string();
-    let db = match open_db(dbpath) { Ok(d) => d, Err(_) => return Ok(EXIT_OK) };
-    let roots = match roots_with_seq(&db) { Ok(r) => r, Err(_) => return Ok(EXIT_OK) };
+    let roots = match roots_with_seq(db) { Ok(r) => r, Err(_) => return Ok(EXIT_OK) };
     if roots.is_empty() {
         if !json { eprintln!("kb: note: no roots registered — skipped re-index (run `kb add <dir>` first)"); }
         return Ok(EXIT_OK);
@@ -994,7 +1004,7 @@ fn reindex_after_write(dbpath: Option<&Path>, path: &Path, json: bool) -> Kb {
         }
         Some((root, rel)) => {
             match kb_db::index::build_page(&abs, &root, &rel, true) {
-                Ok(rec) => match kb_db::index::upsert_page(&db, &rec) {
+                Ok(rec) => match kb_db::index::upsert_page(db, &rec) {
                     Ok(_) => Ok(EXIT_OK),
                     Err(e) => {
                         if !json { eprintln!("kb: note: re-index upsert failed: {e} (disk is authoritative; `kb refresh` repairs)"); }

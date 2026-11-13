@@ -372,6 +372,20 @@ fn resolve_info_links_json() {
             out.contains("Unique-Slug-A"),
             "info must carry the title; got: {out}"
         );
+        // `wc` counts the whole file (frontmatter + body), the classic `wc`
+        // semantics. `write_page` writes `---\n<fm>---\n<body>`; with
+        // fm=`type: note\ntitle: Unique-Slug-A\n` and body=`alpha\n` that is
+        // 5 lines, 46 chars, 7 whitespace-tokens.
+        for k in ["wc", "lines", "chars", "words"] {
+            assert!(
+                out.contains(&format!("\"{k}\"")),
+                "info must carry the wc.{k} metric; got: {out}"
+            );
+        }
+        assert!(
+            out.contains("\"lines\":5") && out.contains("\"chars\":46") && out.contains("\"words\":7"),
+            "info wc values must match the whole file; got: {out}"
+        );
     }
     // links
     {

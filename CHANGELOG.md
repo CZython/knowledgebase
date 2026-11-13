@@ -7,6 +7,18 @@ the API is still moving; breaking changes are called out explicitly.
 ## [Unreleased]
 
 ### Added
+- **`kb info` now reports a `wc` object (word-count) of the page.** A single
+  shared `text_wc` helper (`kb/cli/mod.rs`) — so `info` / `show` / `toc` can
+  never drift — computes `(lines, chars, words)` over the page's whole file
+  (frontmatter + body, the classic `wc` semantics; `chars` is the Unicode
+  scalar count, `words` is the whitespace-token count). `kb info` emits it in
+  both the `--json` output (a nested `"wc":{...}` object, matching the unix
+  `wc` naming) and the human text view (`wc: 11 lines, 103 chars, 20 words`).
+  The body is read from **disk** (the source of truth — the cache may be
+  stale) with a fall-back to the `pages.body` column if the file has been
+  removed from disk but is still indexed, so the metric degrades instead of
+  erroring. Pin: `kb-user::m9 resolve_info_links_json` (asserts the `wc` keys
+  plus the exact 5/46/7 values for its fixture page).
 - **TUI `l` picker reworked to find-style single-link focus (T2).** The link
   picker (`l` in Read) is no longer a flat numbered list. It is now a
   two-pane view mirroring the reader-find (`f`) model: a left body pane
@@ -187,6 +199,21 @@ the API is still moving; breaking changes are called out explicitly.
   and ran `kb --version` → `kb 0.1.0` under wine-9.0.
 
 ### Fixed
+- **TUI `v` (open in `$EDITOR`) now auto-refreshes after the editor exits,
+  and no longer leaves a stale "re-index with `kb refresh`" note.** Previously
+  `open_in_editor` only re-read the page body when the TUI was in **Read**
+  mode — in **Browse** the list stayed on the pre-edit bytes, and the success
+  toast told the user to re-index by hand even though we now do it for them.
+  `open_in_editor` now: (1) re-indexes the edited page against the TUI's live
+  `Db` via a newly-extracted `reindex_page` (`kb/main.rs`) that the CLI's
+  `reindex_after_write` delegates to — so the DB cache, FTS, tags and links
+  all catch up to disk, exactly like a write verb's `reindex_after_write`;
+  (2) re-reads the body **and** repopulates the Browse rows (`reload_rows`)
+  so any title/description/tags/search changes are visible without a manual
+  refresh, parking a stale Search context along the way; and (3) replaces the
+  stale note with `edited … — re-indexed & refreshed (Esc back)`. The
+  repaint (`needs_clear = true`) is unchanged. This is self-contained: `v` in
+  Browse, `v` in Read, and `v` opened-from-Search all take the same path now.
 - **`kb refresh` / `kb full-rebuild` no longer fail with
   `table pages has no column named search_required_phrase` on a DB created
   by a pre-rename version of `kb`.** The schema migration was
@@ -215,6 +242,15 @@ the API is still moving; breaking changes are called out explicitly.
   asserting a fresh DB is a no-op.
 
 ### Changed
+- **`kb show <FILE> --json` (no ref) now emits `etag` + `text`.** The
+  no-ref whole-file path previously returned only
+  `{"file","lines","bytes"}` — the `etag` and `text` fields were only
+  present in the ref-scoped path. The `kb-mcp` server was designed against
+  the full shape, so this was a contract gap. The no-ref path now emits
+  `{"file","lines","bytes","etag","text"}` and honours `--etag` (prints
+  the etag-only, matching the ref path's behaviour). This is a **breaking
+  change** to the `kb show <FILE> --json` output shape (two new fields
+  added); the ref-scoped shape is unchanged.
 - **`kb links` now shows the per-occurrence link list by default; the old
   edge set + backlinks view moves behind `--dedup`.** `kb links <target>`
   (and `kb links <target> --json`) now emits the numbered per-occurrence
