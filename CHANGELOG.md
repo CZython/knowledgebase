@@ -35,9 +35,9 @@ the API is still moving; breaking changes are called out explicitly.
   also carry the reference `end` byte offset (CLI-facing; the TUI highlights
   by the visible text). `render::tests::span_*` (highlight-helper) and
   `splice_*` (display-text splicing, incl. multi-link-per-line ordering) unit
-  tests pin the contracts. See `TODO-links-rework.md` (T2).
+   tests pin the contracts (the T2 rework).
 - **`[ label ]( [ target ] )` / `< https://… >` / `# section` reference
-  grammar, shell end-to-end (DESIGN-links.md phase 1, rewire).** The shell
+   grammar, shell end-to-end (FEATURES-links.md phase 1, rewire).** The shell
   (`kb`) is now rewired onto the unified reference grammar
   (`kb-core::links::detect_refs` + `classify_target`, commit `a9e1add`):
   `AnnotatedLink` carries `kind` / `label` / `section`, and the three surfaces
@@ -52,8 +52,8 @@ the API is still moving; breaking changes are called out explicitly.
   (`[[ db ]]`, `[ path ]`, `[ label ]( path|… )`, `< uri >`) are. Padding
   around the inner content is trimmed before classification, so
   `[# link-test]` ≡ `[ # link-test ]` and `[lang-test.md]` ≡ `[ lang-test.md ]`.
-  Status addendum + verification log: `DESIGN-links-rewire.md`.
-- **`kb verify <FILE>` — target-driven page lint (DESIGN-verify.md, Phases 1+2).**
+   Status addendum + verification log: the rework plan.
+ - **`kb verify <FILE>` — target-driven page lint (FEATURES-verify.md, Phases 1+2).**
   Scriptable one-file check answering "is this a well-formed kb page, clean
   exit code, every link resolves, and (for a label) does it still name real
   files?" Checks (a) valid markdown extension, (b) frontmatter framing, (c)
@@ -65,7 +65,7 @@ the API is still moving; breaking changes are called out explicitly.
   Phase 2's dead/ambiguous/link findings and missing-label-file findings are
   **warnings** (not errors): `--strict` escalates them → exit 1 (CI mode),
   without it they stay exit 0 (human-friendly). `--json` emits a single JSON
-  document on stdout with the full shape `DESIGN-verify.md` locks (file,
+   document on stdout with the full shape `FEATURES-verify.md` locks (file,
   verdict, exit, per-check `pass`/`frame`/`value`/`source`, the `links`
   block — `total`/`resolved`/`external` + `dead[]` / `ambiguous[]` — and the
   `label` block — `type`/`applies` + `files`/`missing` or `entries` — plus
@@ -230,7 +230,7 @@ the API is still moving; breaking changes are called out explicitly.
   `kb links` help text rewritten to state the new default. m7 edge-set
    regression pins re-pointed at `--dedup`; the m9 JSON-surface pins now
    omit `--list` (default) and use `--dedup` for the forward/backlinks
-   shape. See `TODO-links-rework.md` (T1).
+   shape (the T1 rework).
 - **`kb-hardened` (the agent build) no longer special-cases a bare `.md` file
   to `info`** — a bare positional token always routes to `search`.
   Previously the pre-parse entry point in `main.rs` probed
@@ -256,7 +256,7 @@ the API is still moving; breaking changes are called out explicitly.
    asserting zero. Moving it into `kb-user/tests/` (where the env var is
    always set) makes the user-side half of the divergence actually
    exercised on every gate invocation.
- - **Two further SECURITY_REPORT 3.1 invariants that were *silently
+  - **Two further audit invariants that were *silently
    skipped* by the gate are now exercised on every run.** Both were
    `#[cfg(not(feature = "editor"))]` tests in `kb-user/tests/`, but
    `kb-user` defaults `editor` ON, so the gate's `cargo test --workspace`
@@ -559,22 +559,20 @@ the API is still moving; breaking changes are called out explicitly.
    `kb-db` tests, per-test `.db` files inside removed by `Db::drop` — and
    `kbdb_schema_version_3_15/` — a schema-version marker dir), not a per-
    call accumulation. No new dependency; the guards are ~20 lines each.
-- **`D5` / `D6` — `SECURITY_REPORT.md` and `PLAN.md` now each carry a
-   table-of-contents / findings-index at the top, so the ~25
-   `SECURITY_REPORT 3.x` and ~30 `PLAN §N` cross-refs in the source comments
-   can be resolved against a single anchor table (previously a reader had to
-   open the target file *and* scroll to the right numbered section).** The
-   SECURITY_REPORT table maps every `3.x` finding to its one-line summary and
-   stable `#…` anchor; the PLAN table maps `§1`–`§13o` to their headings
+ - **`D5` / `D6` — `PLAN.md` now carries a
+    table-of-contents / findings-index at the top, so the ~30
+    `PLAN §N` cross-refs in the source comments
+    can be resolved against a single anchor table (previously a reader had to
+    open the target file *and* scroll to the right numbered section).**
+    The PLAN table maps `§1`–`§13o` to their headings
    (with `§9` "proven vs. assumed" and `§10` workspace layout flagged as the
    load-bearing ones). No code, tests, or gate behaviour changed.
-- **`D10` — the README now enumerates every root-level document, with a
-  one-line "what is it for" summary.** Previously a newcomer had to open each
-  of `PLAN.md` / `CONTRIBUTING.md` / `HARDENED_BUILD.md` /
-  `SECURITY_REPORT.md` / `PENTEST_HARDENED.md` / `CODEBASE_REVIEW.md` /
-  `TODO-palette.md` to figure out whether it was "build", "verify", or "the bug
-  catalogue." A *Further reading* table at the bottom of the README answers that
-  question in one place.
+ - **`D10` — the README now enumerates every root-level document, with a
+   one-line "what is it for" summary.** Previously a newcomer had to open each
+   of `PLAN.md` / `CONTRIBUTING.md` / `HARDENED_BUILD.md` / the FEATURES docs
+   and the audit reports to figure out whether it was "build", "verify", or
+   "the bug catalogue." A *Further reading* table at the bottom of the README
+   answers that question in one place.
 - **`edit in place` (`-e`) / `v` failures now tell you *why*.** A failed
   *launch* (no editor found) and a non-zero *exit* are reported distinctly, and
   the launch case names the env var tried (`$VISUAL`/`$EDITOR`) and that the
@@ -704,8 +702,8 @@ the API is still moving; breaking changes are called out explicitly.
     real query failure as `0 out / 0 in` with exit 0. They now
     `map_err(…) → EXIT_ERR` (with the same `"<verb>: <e>"` shape as every other
     error), so a genuine failure surfaces instead of a silent zero.
-- **The hand-built SQLite `IN (…)` lowercase-escape has one owner (C4,
-    SECURITY_REPORT 3.4).** `cmd_search` and `cmd_tag` each inlined
+ - **The hand-built SQLite `IN (…)` lowercase-escape has one owner (C4,
+     audit 3.4).** `cmd_search` and `cmd_tag` each inlined
     `format!("'{}'", t.to_lowercase().replace('\'', "''"))` (two copies, two
     variable names), and the same `''` doubling appeared a third time in the
     shell-quoting helper. The tag-IN-list sites now call one
@@ -765,7 +763,7 @@ crates).
   labels, search grammar, semantics, fs-snapshot, section, resolve, meta)
   discharged against the ARIA Verus fork + z3 4.16.0. Zero std I/O, zero
   external dependencies.
-- **Audit + security model** (`SECURITY_REPORT.md`): 17 findings
+ - **Audit + security model**: 17 findings
   (3.1–3.17) — each reproduced, mitigated, and re-checked. Highlight: the
   HIGH RCE via `$VISUAL`/`$EDITOR` fork (`kb section edit`) is removed at
   compile time in the hardened build, and the editor verbs are feature-gated
