@@ -1,7 +1,7 @@
 [toolchain]
 # Pin to a concrete *version* so that a later `rustup update` doesn't silently
 # break either the Verus build (this ARIA fork is tied to a specific rustc
-# patch level) or the bundled SQLite compile (which tracks its own C
+# patch level) or the C build-dependencies (which track their own toolchain
 # requirements). See PLAN.md §12 M0.
 #
 # Deliberately host-agnostic: NO target triple, so it works on Linux, macOS,

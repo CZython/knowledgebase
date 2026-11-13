@@ -91,7 +91,7 @@ There is no `kb/` package; it is a plain directory that both binaries share.
   agent-contract section of `README.md` in the same PR.
 - Tests: integration suites live in `kb-user/tests/`; they exercise the real
   `kb` binary (`CARGO_BIN_EXE_kb`). Add a regression test for every bug fix,
-  the same way the `SECURITY_REPORT.md` findings were each pinned to a test.
+   the same way the audit findings were each pinned to a test.
 
 ## Pull requests
 

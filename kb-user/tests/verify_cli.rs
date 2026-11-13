@@ -264,7 +264,7 @@ fn verify_json_is_one_well_formed_object() {
     let (code, out, err) = run(&s, &["verify", "--json", p.to_str().unwrap()]);
     assert_eq!(code, 0, "exit 0; stderr: {err}");
     assert_json_object(&out, "verify --json");
-    // The key shape is documented in DESIGN-verify.md.
+    // The key shape is documented in FEATURES-verify.md.
     for key in ["file", "verdict", "exit", "checks"] {
         let needle = format!("\"{key}\"");
         assert!(

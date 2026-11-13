@@ -4,9 +4,9 @@
 #
 # Native branch (run on a Windows / GHA windows-latest host):
 #   Uses MSVC (the x86_64-pc-windows-msvc toolchain). No --target is needed
-#   — cargo defaults to the host target. The bundled SQLite gets compiled
-#   against MSVC's cl.exe / link.exe, which the GHA runner ships out of the
-#   box.
+#   — cargo defaults to the host target. The C build-dependencies (e.g.
+#   `zstd` via Turso's Tantivy) are compiled against MSVC's cl.exe / link.exe,
+#   which the GHA runner ships out of the box.
 #
 #   Output: target/x86_64-pc-windows-msvc/release/kb.exe
 #          target/x86_64-pc-windows-msvc/release/kb-hardened.exe
@@ -39,9 +39,9 @@ case "$(uname)" in
     ;;
   Linux)
     echo "==> cargo build --release --target x86_64-pc-windows-gnu -p {kb-user,kb-hardened} (Linux→Windows cross)"
-    # The bundled SQLite (the `-sys` crate) compiles a C translation unit
-    # against a *C* cross-compiler, which must already be installed. On
-    # Debian/Ubuntu that is a two-package job:
+    # The C build-dependencies (e.g. `zstd` via Turso's Tantivy) compile C
+    # translation units against a *C* cross-compiler, which must already be
+    # installed. On Debian/Ubuntu that is a two-package job:
     #   sudo apt-get install -y gcc-mingw-w64-x86-64 binutils-mingw-w64-x86-64
     #   (optionally: mingw-w64-tools   → provides `x86_64-w64-mingw32-wine`
     #    to smoke-run the .exe)

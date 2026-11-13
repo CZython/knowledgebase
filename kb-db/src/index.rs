@@ -123,7 +123,7 @@ fn extract_language(frontmatter_text: &str) -> Option<String> {
     for line in frontmatter_text.lines() {
         let t = line.trim();
         // Key at start of line, colon-terminated, value rest of line.
-        // SECURITY_REPORT 3.10: require the character *immediately after* an
+        // require the character *immediately after* an
         // optional run of whitespace to be `:`. A bare `language` prefix
         // would otherwise also accept `languages: en, fr` (leaving value `s`)
         // and `language_x: …` (leaving value `x: …`), polluting the
@@ -566,7 +566,7 @@ mod tests {
 
     #[test]
     fn extract_language_requires_key_boundary() {
-        // SECURITY_REPORT 3.10: the `language` prefix must be followed by the
+        // the `language` prefix must be followed by the
         // `:` boundary (after optional whitespace). Sibling keys that merely
         // *share* the prefix must not pollute the `language:` filter column.
         // Positive forms.

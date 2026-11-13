@@ -139,7 +139,7 @@ pub fn to_text(aliases: &[(String, String)]) -> String {
 ///
 /// Deterministic in the input text: the same text always yields the same set.
 pub fn from_text(text: &str) -> Vec<(String, String)> {
-    // SECURITY_REPORT 3.16: `rows.iter_mut().find(…)` per input line was
+    // `rows.iter_mut().find(…)` per input line was
     // O(R²) for large alias files. A `BTreeMap<alias, row-index>` gives
     // O(log R) last-wins lookups while still preserving first-occurrence
     // order of the surviving rows.

@@ -46,7 +46,7 @@ use std::collections::{BTreeMap, BTreeSet};
 ///
 /// Idempotent: `normalize(normalize(x)) == normalize(x)`.
 pub fn normalize(tags: &[String]) -> Vec<String> {
-    // SECURITY_REPORT 3.16: use a `BTreeSet<String>` for "seen" instead of a
+    // use a `BTreeSet<String>` for "seen" instead of a
     // `Vec<String>` with `seen.iter().any(…)` — the old per-element linear
     // scan is O(n²) for large `tags:` lists, and the `BTreeSet` gives O(n log n).
     // The emitted `Vec<String>` still preserves first-occurrence order: we
@@ -96,7 +96,7 @@ pub fn canonicalize<'a>(
     if want.is_empty() {
         return Vec::new();
     }
-    // SECURITY_REPORT 3.16: `canonical_of` used to re-scan the alias table
+    // `canonical_of` used to re-scan the alias table
     // (O(A)) for *every* stored tag (O(T·A) total). Pre-build a
     // `BTreeMap<key, canonical>` once (O(A log A)) so each lookup is
     // O(log A). The key/value are both the trimmed, lower-cased forms that
@@ -112,7 +112,7 @@ pub fn canonicalize<'a>(
     let target = canonical_of(&want);
 
     let mut out: Vec<&'a str> = Vec::new();
-    // SECURITY_REPORT 3.16: membership set for the output dedupe (was a
+    // membership set for the output dedupe (was a
     // `Vec<String>` + per-element `any(…)`).
     let mut seen: BTreeSet<String> = BTreeSet::new();
     for s in stored {

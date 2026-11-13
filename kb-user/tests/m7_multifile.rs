@@ -446,8 +446,8 @@ fn search_not_only_is_a_documented_limited_path() {
     add(&s);
     // A leading-`-` (NOT) term alone -> Turso's FTS planner can't take a
     // lone NOT (there is no positive FTS term to anchor it), so the CLI
-    // phrases it as a correlated `NOT EXISTS` per NOT term. SECURITY_REPORT
-    // 3.5: before that fix, `-beta` alone was a *silent no-op* (returned the
+    // phrases it as a correlated `NOT EXISTS` per NOT term. Before the fix,
+    // `-beta` alone was a *silent no-op* (returned the
     // whole corpus up to `LIMIT`). Now the exclusion must actually drop the
     // page that has "beta" content.
     // `--` stops clap from treating the negative as a flag.
@@ -536,7 +536,7 @@ fn tag_lists_tagged_pages_and_expands_labels() {
 
 #[test]
 fn tag_matches_mixed_case_tag_in_any_query_case() {
-    // SECURITY_REPORT 3.4: the `kb tag` IN-list used to keep the *stored*
+    // the `kb tag` IN-list used to keep the *stored*
     // casing, so a stored mixed-case tag like `Czech` failed
     // `lower('Czech') IN ('Czech',…)` → no match, in any query case.
     let s = Setup::new("tag_case");

@@ -1,6 +1,6 @@
 # Release — on tag push, build every platform's artifact and publish it as
-# GitHub Release assets. Each job builds *natively* on its own OS (the bundled
-# SQLite C ABI must be compiled against that platform's libc), so:
+# GitHub Release assets. Each job builds *natively* on its own OS (the C
+# build-dependencies must be compiled against that platform's libc), so:
 #   linux   → static musl single binary (distro-agnostic, no FUSE, no libs)
 #   windows → native -pc-windows-msvc .exe (MSVC toolchain on GHA runners)
 #   macos   → native aarch64/x86_64-apple-darwin Mach-O

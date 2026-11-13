@@ -17,7 +17,7 @@ pub(crate) fn cmd_create(dbpath: Option<&Path>, filename: &str, a: &CreateArgs) 
     let json = a.json;
     // The editor inherits our stdio, so it could pollute stdout — same
     // contract as `section edit --json` (§13p): an editor flow is not JSON.
-    // SECURITY_REPORT 3.1: only reachable with `--edit`, which is itself an
+    // only reachable with `--edit`, which is itself an
     // editor-feature surface (a hardened build would reject it in clap);
     // gate the `edit` bindings so a hardened compile has no dangling reads.
     #[cfg(feature = "editor")]
@@ -85,7 +85,7 @@ pub(crate) fn cmd_create(dbpath: Option<&Path>, filename: &str, a: &CreateArgs) 
     }
 
     // ---- optional in-place edit: the saved bytes are what we index --------
-    // SECURITY_REPORT 3.1: `-e` / `a.edit` are editor-feature surface —
+    // `-e` / `a.edit` are editor-feature surface
     // the `edit` field on `CreateArgs` only exists when the feature is on,
     // so in a hardened build clap rejects `-e` as an unexpected argument
     // before `cmd_create` sees it. The `edited` binding is a constant

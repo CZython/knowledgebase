@@ -33,7 +33,7 @@ pub(crate) fn cmd_tag(dbpath: Option<&Path>, tag: &str, json: bool) -> Kb {
         return Ok(EXIT_OK);
     }
 
-    // SECURITY_REPORT 3.4: the left side of the comparison is
+    // the left side of the comparison is
     // `lower(pt.tag)`, so the IN-list must be lowercased too. `canonicalize`
     // returns the *stored* strings in their original casing, so a stored
     // mixed-case tag like `Czech` would otherwise fail `lower('Czech')
@@ -167,7 +167,7 @@ pub(crate) fn cmd_tag_alias(dbpath: Option<&Path>, o: &TagAliasOpts, json: bool)
         let n = aliases.len();
         match file {
             Some(p) => {
-                // SECURITY_REPORT 3.20 / CODEBASE_REVIEW F2: the alias TSV is
+                // the alias TSV is
                 // the M8 recovery pathway — an operator may export it to a
                 // shared directory, so a pre-planted symlink at the target was
                 // the same `O_CREAT|O_TRUNC` race as 3.19. Route it through
@@ -272,7 +272,7 @@ pub(crate) fn cmd_tag_alias(dbpath: Option<&Path>, o: &TagAliasOpts, json: bool)
 /// pure core uses (so the codec stays the single source of truth for what
 /// counts as a data line), and upserts under a *checked* transaction — raw
 /// `BEGIN` / `COMMIT` via `execute_batch` left the transaction open if any
-/// step in between returned `Err` (SECURITY_REPORT 3.8); `checked_transaction`
+/// step in between returned `Err`; `checked_transaction`
 /// issues `ROLLBACK` on `Err` unwind.
 fn do_import(db: &Db, file: Option<&Path>, json: bool) -> Kb {
     let text = match file {

@@ -132,7 +132,7 @@ fn path_matches(query: &str, page: &Page, suffix: &str) -> bool {
     }
     // suffix form: `…/q` — accept a query that is the tail of the stored path
     // (e.g. `wiki/attention.md` → `/root/wiki/attention.md`). `suffix` is the
-    // precomputed `/q` (see stage 3 below) — SECURITY_REPORT 3.16: hoisting
+    // precomputed `/q` (see stage 3 below) — hoisting
     // the `format!("/{}", q)` out of the per-page closure removes 2
     // allocations per page.
     page.abs_path.ends_with(suffix) || page.rel_path.ends_with(suffix)
@@ -163,7 +163,7 @@ pub fn resolve(query: &str, pages: &[Page]) -> Resolution {
     }
 
     // ---- stage 1: `type:slug` (display-id) exact ---------------------------
-    // SECURITY_REPORT 3.6: only return early when stage 1 actually hit
+    // only return early when stage 1 actually hit
     // something. Previously the `return finish(hits)` was unconditional, so
     // `note2:gpt` (no page of type `note2` with slug `gpt`) was resolved as
     // `Empty` even though a `type:slug`-shaped query with a non-existent type
@@ -192,7 +192,7 @@ pub fn resolve(query: &str, pages: &[Page]) -> Resolution {
     }
 
     // ---- stage 3: explicit path ref ---------------------------------------
-    // SECURITY_REPORT 3.16: compute the `/q` suffix *once* (not per page) and
+    // compute the `/q` suffix *once* (not per page) and
     // pass it into `path_matches`.
     //
     // NOTE: uses `query.trim()` — the *original* (case-sensitive) query —
@@ -341,7 +341,7 @@ mod tests {
 
     #[test]
     fn colon_slug_falls_through_to_bare_slug_stage() {
-        // SECURITY_REPORT 3.6: a `type:slug`-shaped query whose *type* doesn't
+        // a `type:slug`-shaped query whose *type* doesn't
         // match must not short-circuit the resolver. `split_type_slug("foo:bar")`
         // is `Some(("foo","bar"))`, so before the fix stage 1 returned
         // `finish(empty) == Empty` unconditionally and stages 2/3/4 never ran.

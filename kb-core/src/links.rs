@@ -183,7 +183,7 @@ pub fn extract_links(body: &str) -> Vec<Link> {
 }
 
 // =============================================================================
-// Extended link detection (DESIGN-links.md Phase 1).
+// Extended link detection (FEATURES-links.md Phase 1).
 //
 // Three new reference *forms* are recognized on top of the v1 set:
 //
@@ -485,7 +485,7 @@ pub struct Ref {
     ///
     /// NOTE: `#section` is a *target-level* annotation, carried in `section`,
     /// and is *orthogonal* to the kind — a db target can have a section, a
-    /// path target can have a section, etc. (DESIGN-links.md §grammar:
+    /// path target can have a section, etc. (FEATURES-links.md §grammar:
     /// "`#section` layers on top of either").
     pub kind: LinkKind,
     /// The optional `#section` (if the target carried one).
@@ -493,7 +493,7 @@ pub struct Ref {
 }
 
 /// The four kinds a *classified* target resolves to (the "mode" column of
-/// DESIGN-links.md).
+/// FEATURES-links.md).
 ///
 /// `Wikilink` is the v1 form (`[[ … ]]`) — it is classified as a *db*
 /// reference *or* a *path* reference depending on the target's shape.
@@ -639,7 +639,7 @@ pub fn classify_target(raw: &RawLink) -> Ref {
 /// constant here; we dedupe on the (target, style) axis. First occurrence
 /// order is preserved.
 pub fn dedup(links: Vec<Link>) -> Vec<Link> {
-    // SECURITY_REPORT 3.16: `seen` was a `Vec` with `seen.iter().any(…)` —
+    // `seen` was a `Vec` with `seen.iter().any(…)`
     // O(L²) for hub/index pages with many outgoing links. A `BTreeSet` keyed
     // on (target, style) makes each lookup O(log L). First-occurrence order
     // is preserved by only pushing to `out` on a fresh key.
@@ -856,7 +856,7 @@ mod tests {
         assert_eq!(once, twice);
     }
 
-    // ---- is_uri_like (DESIGN-links.md: `<…>` = external URI) --------------
+    // ---- is_uri_like (FEATURES-links.md: `<…>` = external URI) --------------
 
     #[test]
     fn uri_like_accepts_scheme_colon_rest() {

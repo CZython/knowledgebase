@@ -2,7 +2,7 @@ use crate::*;
 
 use std::time::SystemTime;
 
-/// SECURITY_REPORT 3.19 / CODEBASE_REVIEW F2: the single owner of the
+/// the single owner of the
 /// "unique, unguessable temp file name inside `dir`" recipe.
 ///
 /// Pre-this the logic lived in **three** places with divergent hardening:

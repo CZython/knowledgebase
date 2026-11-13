@@ -13,8 +13,9 @@
 #   * the `x86_64-unknown-linux-musl` rust target
 #       rustup target add x86_64-unknown-linux-musl
 #   * musl-tools (Ubuntu/Debian: `sudo apt-get install musl-tools`)
-#     which provides `x86_64-linux-musl-gcc` (the musl C compiler the bundled
-#     SQLite is built against).
+#     which provides `x86_64-linux-musl-gcc` (a musl C compiler; the build
+#     needs one to compile its C dependencies, e.g. `zstd` via Turso's
+#     Tantivy — there is no system SQLite to link against).
 #
 # Usage:
 #   ./dist/build-linux.sh                 # build + tar + sha256

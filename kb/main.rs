@@ -161,7 +161,7 @@ pub(crate) struct CreateArgs {
     type_: String,
     /// Open the new page in $VISUAL/$EDITOR (fallback `vi`) after it is
     /// written; the saved bytes are what gets indexed.
-    /// SECURITY_REPORT 3.1: only exists when the `editor` feature is on;
+    /// only exists when the `editor` feature is on;
     /// in a hardened build (`--no-default-features`) `-e` is an
     /// *unexpected argument* — clap rejects it before any work happens.
     #[cfg(feature = "editor")]
@@ -289,7 +289,7 @@ pub(crate) enum Cmd {
         #[command(flatten)]
         args: CreateArgs,
     },
-    /// Page lint + link check: is this a well-formed kb page? (DESIGN-verify.md)
+    /// Page lint + link check: is this a well-formed kb page? (FEATURES-verify.md)
     /// Phase 1: checks (a) markdown ext, (b) frontmatter framing, (c) required
     /// fields. Phase 2 adds (d) links and (e) label files.
     Verify {
@@ -593,7 +593,7 @@ pub(crate) enum SectionOp {
         flags: WriteFlags,
     },
     /// Edit a section in $VISUAL/$EDITOR (fallback `vi`), then diff + confirm.
-    /// SECURITY_REPORT 3.1 mitigation: gated behind the `editor` feature
+    /// gated behind the `editor` feature
     /// (default on). A hardened build compiles without this verb:
     /// `cargo build --no-default-features`.
     #[cfg(feature = "editor")]
@@ -683,7 +683,7 @@ pub(crate) fn main() {
             v
         };
         let p = Path::new(s);
-        // PENTEST_HARDENED F4 (option b). The `.md`→`info` shortcut is an
+        // The `.md`→`info` shortcut is an
         // *interactive* convenience and — via the CWD-relative `p.exists()`
         // probe — the only state-dependent branch in this whole entry point.
         // For the hardened/agent build we drop it so a bare token *always*
@@ -1224,7 +1224,7 @@ pub struct AnnotatedLink {
 /// `pages` is the full corpus (every resolved page, e.g. from
 /// [`load_corpus`]); it is read-only. A bare path token (a `notes/todo.md`
 /// sitting in prose) is **not** a link under the new grammar — it is the
-/// v1 heuristic, retired as part of the rework (DESIGN-links.md).
+/// v1 heuristic, retired as part of the rework (FEATURES-links.md).
 pub fn annotated_links(body: &str, pages: &[resolver::Page]) -> Vec<AnnotatedLink> {
     let mut out: Vec<AnnotatedLink> = Vec::new();
     for (li, line) in body.lines().enumerate() {
@@ -1548,7 +1548,7 @@ pub(crate) fn parse_placement(s: &str) -> Result<SectionPlacement, (String, i32)
     })
 }
 
-// SECURITY_REPORT 3.1 mitigation: the two helpers below are the entire
+// the two helpers below are the entire
 // $VISUAL/$EDITOR forking attack surface (an env var names an executable
 // we then fork). They are compiled in only when the `editor` feature is on;
 // a hardened build strips them at compile time:
@@ -1593,7 +1593,7 @@ pub(crate) fn confirm(prompt: &str, assume_yes: bool) -> Result<(), (String, i32
 
 /// Write `bytes` to `path` atomically: same-directory temp file + rename.
 ///
-/// SECURITY_REPORT 3.19 / CODEBASE_REVIEW F2: the temp name now comes from
+/// the temp name now comes from
 /// `unique_tmp_in` (pid+seq+nanos) instead of a fixed, guessable
 /// `.{name}.kb~tmp` opened with `O_CREAT|O_TRUNC`. In a hostile multi-user
 /// directory a rival uid could pre-plant a symlink at the fixed name and
@@ -1629,7 +1629,7 @@ pub(crate) fn etag_of(b: &[u8]) -> String {
 /// Lowercase a value and render it as a single-quoted SQLite literal for a
 /// hand-built `IN (…)` list (SQLite's escape is doubling the quote). One
 /// owner so the "did we escape?" and "did we case-fold?" questions are the
-/// same answer at every call site — SECURITY_REPORT 3.4 (C4).
+/// same answer at every call site — (C4).
 pub(crate) fn sql_quote_lower(s: &str) -> String {
     format!("'{}'", s.to_lowercase().replace('\'', "''"))
 }
@@ -1809,7 +1809,7 @@ mod links_tests {
     fn annotated_links_bare_path_token_is_not_a_link() {
         // The v1 heuristic (`is_pathlike`: `/`-in-token or known ext) is
         // retired — a bare path in prose is not a reference under the
-        // DESIGN-links.md grammar. (DESIGN-links.md §non-goals: `` `…` `` /
+        // FEATURES-links.md grammar. (FEATURES-links.md §non-goals: `` `…` `` /
         // bare tokens are inline code / prose, not links.)
         let pages = vec![page("/data/notes/todo.md", "todo", "note")];
         let body = "See notes/todo.md for the next step.";

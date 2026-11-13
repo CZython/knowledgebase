@@ -97,9 +97,11 @@ cross build from Linux/macOS (`dist/build-windows.sh`).
 
 ### Prerequisites
 
-A working Rust toolchain (`stable`) is the only build-time requirement.
-The database is [Turso](https://turso.tech), a pure-Rust SQLite-compatible
-engine, so **no system SQLite and no C compiler are needed**.
+A working Rust toolchain (`stable`) and a C compiler are the build-time
+requirements. The database is [Turso](https://turso.tech), a pure-Rust
+SQLite-compatible engine, so **no system SQLite is needed** — but the build
+pulls in C dependencies (notably `zstd` via Turso's Tantivy), which are
+compiled with a C compiler (the platform toolchain ships one by default).
 
 ---
 
@@ -162,8 +164,7 @@ etag mismatch, for instance, still emits a `{"ok": false, …}` document, so
 
 ## Agent contract (locked)
 
-See `SECURITY_REPORT.md` and `PLAN.md` §13f for the full, audited
-contract. The one-paragraph version:
+The contract is locked below — one-paragraph version:
 
 * **Read** is scoped + minimal: `toc <file>` (outline only);
   `show <file> <ref> [--body|--full] [--json] [--etag]`.
@@ -181,7 +182,18 @@ contract. The one-paragraph version:
   "etag_actual": …}` document on stdout (the human message still goes to
   stderr); the file is left untouched.
 * **Exit codes**: `0` ok · `1` generic · `2` section/resolve ·
-  `3` etag · `2` (also) unrecognized subcommand in the hardened build.
+   `3` etag · `2` (also) unrecognized subcommand in the hardened build.
+* **JSON envelope**: every `--json` response is exactly one well-formed
+  document on stdout (an **array** for the list verbs — `roots`, `browse`,
+  `tag`, `search`, `tag-alias --list`; a **single object** for every
+  record-mutating verb — `add` / `drop-root` / `refresh` / `full-rebuild` /
+  `info` / `links` / `stats` / write-ops / `resolve` / `tag-alias
+  --add/--rm/--import`). The envelope is **hand-rolled** string
+  building (the `jstr` / `jbool` helpers in `kb/main.rs`) rather than a
+  serialization crate — so the agent path has no `serde` dependency and
+  a hardened build drops it cleanly. Errors go to stderr via the same
+  `(String, i32)` contract that plain output uses; the JSON envelope +
+  the (unchanged) exit code are the two halves of the result.
 
 ---
 
@@ -219,19 +231,19 @@ Prereq for the `verus` stage: a Verus install on `$PATH` and `z3` at
 │   ├── src/             #   one module per concern (frontmatter, section,
 │   │                    #   identity, tags, aliases, links, search_grammar, …)
 │   └── spec/            #   Verus specs, one per module
-├── kb-db/               # Turso/FTS shell (pure Rust, sync, no tokio)
-├── tests/               # shared integration fixtures / e2e tests
+ ├── kb-db/               # Turso/FTS shell (pure Rust, sync, no tokio)
 ├── dist/                # per-platform build scripts (linux musl / windows / macos)
 │                        #   artifacts are git-ignored; the .sh scripts are tracked
 ├── tools/               # origin artifacts (e.g. `mdtool.py` — the Python
 │                        #   prototype `kb-core::section` was ported from)
 ├── gate.sh              # full verification (build, clippy, tests, verus, behavior)
 ├── verify.sh            # Verus + z3 stage (called by gate.sh)
-├── HARDENED_BUILD.md    # why two packages + the lock on the hardened surface
-├── PLAN.md              # long-form design notes, module-by-module
-├── SECURITY_REPORT.md   # threat model + audit + resolved findings
-├── CHANGELOG.md         # per-release notes
-├── CONTRIBUTING.md      # build/test/contribute
+ ├── HARDENED_BUILD.md    # why two packages + the lock on the hardened surface
+ ├── PLAN.md              # long-form design notes, module-by-module
+ ├── FEATURES-links.md    # the one link/reference grammar + its UX surfaces
+ ├── FEATURES-verify.md   # the `kb verify` page lint (contract + reuse map)
+ ├── CHANGELOG.md         # per-release notes
+ ├── CONTRIBUTING.md      # build/test/contribute
 ├── .github/             # ISSUE_TEMPLATE/ (bug + feature forms)
 │   └── workflows/       #   ci.yml (build+clippy+test+musl) and release.yml
 │                        #   (4-runner matrix → GitHub Release assets)
@@ -251,13 +263,11 @@ one-line summaries of each:
 
 | File | What it is |
 |------|------------|
-| [`PLAN.md`](PLAN.md) | Original design and milestone plan (M0–M9) for the single-binary KB. |
+| [`PLAN.md`](PLAN.md) | Long-form design notes — principles, locked decisions, schema, CLI reference, and the §9 "proven vs. assumed" split. |
+| [`FEATURES-links.md`](FEATURES-links.md) | The one link/reference grammar (`[[slug]]` / `[path]` / `[label](…)` / `<uri>` / `#section`) and how it appears in `verify`, `links`, and the TUI. |
+| [`FEATURES-verify.md`](FEATURES-verify.md) | The `kb verify` page lint: checks a–e, exit codes, JSON shape, reuse map. |
 | [`CONTRIBUTING.md`](CONTRIBUTING.md) | The dev loop (`./gate.sh`), feature-flag matrix, and shared-body gotchas. |
 | [`HARDENED_BUILD.md`](HARDENED_BUILD.md) | What `kb-hardened` strips (no ratatui, no crossterm, no unicode-width) and why. |
-| [`SECURITY_REPORT.md`](SECURITY_REPORT.md) | Threat model and hardening decisions for the database + editor boundary. |
-| [`PENTEST_HARDENED.md`](PENTEST_HARDENED.md) | Hardened-build-specific pentest findings, with the closure notes. |
-| [`CODEBASE_REVIEW.md`](CODEBASE_REVIEW.md) | Catalogue of findings from a codebase-level review (the *source* for many of the fixes recorded in `CHANGELOG.md`). |
-| [`TODO-palette.md`](TODO-palette.md) | TUI palette follow-ups (the "palettes are automatically bottom-tier" rule lives here too). |
 | [`CHANGELOG.md`](CHANGELOG.md) | Semver history, including every fix batch in this session. |
 | [`gate.sh`](gate.sh) | Seven-stage gate: build, single-package build, clippy -D warnings, tests, Verus + z3, behavior, dep-tree. |
 | [`verify.sh`](verify.sh) | Verus + z3 spec pass over `kb-core/spec`. |

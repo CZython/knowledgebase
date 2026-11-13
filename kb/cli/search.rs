@@ -116,7 +116,7 @@ fn build_search_sql(
     }
 
     for match_set in tag_match_sets.iter() {
-        // SECURITY_REPORT 3.4: the left side of the comparison is
+        // the left side of the comparison is
         // `lower(pt.tag)`, so the IN-list must be lowercased too. `canonicalize`
         // returns the *stored* strings in their original casing (that is how
         // case/alias folding is decided), but a stored mixed-case tag like
@@ -244,7 +244,7 @@ pub(crate) fn search_rows(
         parts.join(" ")
     };
 
-    // SECURITY_REPORT 3.17: hoist alias + distinct-tag loads outside the
+    // hoist alias + distinct-tag loads outside the
     // per-filter loop so N tag filters don't trigger N full table scans.
     let has_tag_filter = parsed.filters.iter().any(|f| f.is_tag());
     let (aliases, all_tags) = if has_tag_filter {

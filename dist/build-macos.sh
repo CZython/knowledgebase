@@ -2,10 +2,10 @@
 # build-macos.sh — release build of `kb` (package `kb-user`) *and*
 # `kb-hardened` (package `kb-hardened`) for macOS.
 #
-# Run this *on a macOS machine* (or a macOS CI runner; cross-compiling SQLite
-# + Rust to Apple from Windows is not a supported path). On macOS the default
-# toolchain works out of the box — `cargo build` compiles the bundled SQLite
-# with Apple's clang.
+# Run this *on a macOS machine* (or a macOS CI runner; cross-compiling the C
+# dependencies to Apple from Windows is not a supported path). On macOS the
+# default toolchain works out of the box — `cargo build` compiles the C
+# build-dependencies (e.g. `zstd` via Turso's Tantivy) with Apple's clang.
 #
 # Output (both binaries, for the host arch):
 #   target/<arch>-apple-darwin/release/kb

@@ -375,7 +375,7 @@ fn canonical_fts_render_means_what_the_grammar_intends() {
         "a filter-only query renders no FTS content (empty MATCH)"
     );
 
-    // (7) SECURITY_REPORT 3.18 / CODEBASE_REVIEW F3: a user-typed `*` in a
+    // (7) a user-typed `*` in a
     //     bare content token renders as a valid FTS prefix query (`abc*`),
     //     and the engine accepts *and* matches it — a page whose body
     //     contains a token beginning with `abc` (e.g. `abc`, `abcs`) hits.

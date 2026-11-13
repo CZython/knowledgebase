@@ -231,7 +231,7 @@ impl Db {
     /// the DB has not been migrated yet.
     pub fn schema_version(&self) -> Result<Option<String>> {
         use crate::sql::OptionalExtension;
-        // SECURITY_REPORT 3.15: an *unmigrated* DB has no `meta` table, so the
+        // an *unmigrated* DB has no `meta` table, so the
         // `SELECT … FROM meta` below would `SqliteFailure("no such
         // table:meta")` — and `.optional()?` only swallows `NoRows` (an empty
         // `Ok(None)`), not a table-missing error. Probe the catalog first and
@@ -293,7 +293,7 @@ fn chrono_now_iso8601() -> String {
 mod tests {
     use super::*;
 
-    /// SECURITY_REPORT 3.14: `Db::open(":memory:")` used to succeed at
+    /// `Db::open(":memory:")` used to succeed at
     /// `Connection::open` but then fail at `pragma_update(None,
     /// "journal_mode", "WAL")` because an in-memory DB rejects the `WAL`
     /// value (SQLite reports `journal_mode = memory`). Skip the pragma on
@@ -306,7 +306,7 @@ mod tests {
         assert!(db.schema_version().is_ok());
     }
 
-    /// SECURITY_REPORT 3.15: `schema_version()` on an *unmigrated* DB (no
+    /// `schema_version()` on an *unmigrated* DB (no
     /// `meta` table) used to `Err` with `SqliteFailure("no such table:
     /// meta")`; the doc promises `Ok(None)` for "not-yet-migrated".
     #[test]

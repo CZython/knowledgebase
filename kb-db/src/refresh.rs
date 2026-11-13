@@ -49,7 +49,7 @@ pub struct RefreshSummary {
     pub roots_walked: usize,
     /// GC was skipped because at least one root failed to walk (its pages
     /// were left in place rather than GC'd against an incomplete candidate
-    /// set — see SECURITY_REPORT 3.3).
+    /// set.
     pub gc_skipped: bool,
     /// A human-readable one-line summary (the CLI shows this verbatim).
     pub note: String,
@@ -109,7 +109,7 @@ fn load_roots(db: &Db) -> Result<Vec<RootRow>> {
 /// file, a flapping network mount) is reported in the second element and its
 /// files are *absent* from the candidate set. Callers must not GC against that
 /// set (a page under a failed root would look orphaned even though the file is
-/// still on disk) — that is the SECURITY_REPORT 3.3 data-loss window.
+/// still on disk) — that is the data-loss window.
 fn candidate_files(roots: &[RootRow]) -> (std::collections::BTreeSet<String>, Vec<String>) {
     let mut out: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
     let mut failed: Vec<String> = Vec::new();
@@ -215,7 +215,7 @@ pub fn refresh(db: &Db) -> Result<RefreshSummary> {
     // GC: any `pages.abs_path` not in `candidates` is no longer under any
     // root (or the file was deleted but a stale row lingers). Clear it.
     //
-    // SECURITY_REPORT 3.3: if ANY root failed to walk, its files are absent
+    // if ANY root failed to walk, its files are absent
     // from `candidates` even though they are still on disk — GC'ing against
     // that set would delete those pages (silent, partial-index loss). Skip
     // the GC this run so a transient `EACCES` / mid-rename / flapping mount
@@ -289,7 +289,7 @@ pub fn full_rebuild(db: &Db) -> Result<RefreshSummary> {
     // Only re-index if there are roots to walk; an empty-root DB stays empty
     // (the wipe above is the "full rebuild" of an empty corpus).
     if !roots.is_empty() {
-        // SECURITY_REPORT 3.9: a partial wipe + partial re-index must not exit
+        // a partial wipe + partial re-index must not exit
         // 0 — a thinner corpus than we started with is a *failure*, so any
         // per-page upsert error is propagated (non-zero CLI exit).
         candidates_to_records(db, &roots, &mut summ)?;
@@ -301,7 +301,7 @@ pub fn full_rebuild(db: &Db) -> Result<RefreshSummary> {
 /// Used by `full_rebuild` (which wipes `pages` first, so this is a clean
 /// "wipe + rewrite").
 ///
-/// SECURITY_REPORT 3.9: returns `Err` if any page failed to upsert (so the
+/// returns `Err` if any page failed to upsert (so the
 /// partial-wipe + partial-re-index is surfaced as a non-zero exit rather than
 /// a silent thinner corpus). All per-page errors are collected and reported
 /// together.
@@ -453,7 +453,7 @@ mod tests {
 
     #[test]
     fn gc_skipped_when_a_root_fails_to_walk() {
-        // SECURITY_REPORT 3.3: with two registered roots, if one becomes
+        // with two registered roots, if one becomes
         // unreadable (its path disappears) mid-session, the GC must be
         // SKIPPED — not run against a candidate set that is missing that
         // root's files. Otherwise the surviving root's pages are fine but the
@@ -536,7 +536,7 @@ mod tests {
 
     #[test]
     fn full_rebuild_propagates_per_page_errors() {
-        // SECURITY_REPORT 3.9: a partial wipe + partial re-index (e.g. one
+        // a partial wipe + partial re-index (e.g. one
         // file unreadable mid-run) must return `Err` so the CLI exits
         // non-zero — not silently succeed with a thinner corpus.
         let dir = std::env::temp_dir().join("kbdb_rr_e");
@@ -581,7 +581,7 @@ mod tests {
 
     #[test]
     fn full_rebuild_surviving_root_reindexed_failed_root_surfaced() {
-        // SECURITY_REPORT 3.3 (full_rebuild half): `full_rebuild` wipes *all*
+        // (full_rebuild half): `full_rebuild` wipes *all*
         // pages up-front and then re-indexes, so a root that fails to walk
         // has its pages wiped and simply not re-indexed — the rebuild is
         // partial. The contract: (a) full_rebuild still returns Ok (a walk

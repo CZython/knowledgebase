@@ -82,7 +82,7 @@ pub(crate) fn cmd_links(dbpath: Option<&Path>, target: &str, dedup: bool, json: 
         // the page's abs_path. A raw target text that fails to resolve is a
         // *dead* link and does NOT contribute a backlink (§4 collision is
         // legal; §8 says the indexer leaves to_path as a pending ref).
-        // SECURITY_REPORT 3.17: load ALL forward edges once (one `prepare` +
+        // load ALL forward edges once (one `prepare` +
         // one full-scan) into a `BTreeMap<from_path, Vec<to_path>>` instead
         // of re-preparing the statement per corpus page (N prepares for N
         // pages).

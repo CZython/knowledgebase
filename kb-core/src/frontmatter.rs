@@ -488,7 +488,7 @@ fn lines_of(data: &[u8]) -> Vec<String> {
     // `split_inclusive('\n')` on a `&str` already preserves newlines. We
     // `to_string()` per line so callers can push/replace freely; the join
     // identity holds on valid UTF-8 (asserted by `fm_tests::roundtrip`).
-    // SECURITY_REPORT 3.7: `from_utf8` (strict) + `unwrap_or("")` would drop
+    // `from_utf8` (strict) + `unwrap_or("")` would drop
     // the *entire* file's lines on any invalid UTF-8 byte — a CP1252 char
     // pasted into the body made an otherwise-valid frontmatter frame appear
     // absent. `from_utf8_lossy` (the documented behaviour above) maps the bad
@@ -786,7 +786,7 @@ pub fn remove_list_item(data: &[u8], key: &str, value: &str) -> Result<Vec<u8>, 
 /// `end` exclusive) and re-join. Everything outside is preserved exactly.
 fn remove_lines(data: &[u8], start: usize, end: usize) -> Result<Vec<u8>, FmError> {
     debug_assert!(start <= end, "remove_lines range");
-    // SECURITY_REPORT 3.7: `from_utf8_lossy` so an invalid byte in the body
+    // `from_utf8_lossy` so an invalid byte in the body
     // does not swallow the whole buffer (which `map_err(NoFrontmatter)` would
     // do today).
     let s = String::from_utf8_lossy(data);
@@ -807,7 +807,7 @@ fn remove_lines(data: &[u8], start: usize, end: usize) -> Result<Vec<u8>, FmErro
 /// Build a fresh `key: a, b, c` (or `key: v`) line for a *new* field and
 /// splice it in just above the closing `---`.
 fn list_rewrite_new(data: &[u8], key: &str, value: &str) -> Vec<u8> {
-    // SECURITY_REPORT 3.7 — same `from_utf8_lossy` fix.
+    // same `from_utf8_lossy` fix.
     let s = String::from_utf8_lossy(data);
     let lines: Vec<String> = s.split_inclusive('\n').map(|l| l.to_string()).collect();
     match find_fm(data) {
@@ -829,7 +829,7 @@ fn list_rewrite_upgrade(
     scalar: &str,
     added: &str,
 ) -> Result<Vec<u8>, FmError> {
-    // SECURITY_REPORT 3.7 — same `from_utf8_lossy` fix.
+    // same `from_utf8_lossy` fix.
     let s = String::from_utf8_lossy(data);
     let mut lines: Vec<String> = s.split_inclusive('\n').map(|l| l.to_string()).collect();
     let idx = match locate_key_line(data, key) {
@@ -852,7 +852,7 @@ fn list_rewrite_upgrade(
 
 /// Extend an existing list (block or inline) by appending `added`.
 fn list_rewrite_add(data: &[u8], key: &str, added: &str) -> Result<Vec<u8>, FmError> {
-    // SECURITY_REPORT 3.7 — same `from_utf8_lossy` fix.
+    // same `from_utf8_lossy` fix.
     let s = String::from_utf8_lossy(data);
     let mut lines: Vec<String> = s.split_inclusive('\n').map(|l| l.to_string()).collect();
     // B2: the caller has confirmed the key is a list (via `list_values`), so
@@ -976,7 +976,7 @@ fn last_block_item_line(lines: &[String], idx: usize, close: usize) -> Option<(u
 /// The real scalar rewrite: replace the value of an existing `key:` line, or
 /// insert a fresh one just before the closing `---`.
 fn scalar_rewrite(data: &[u8], key: &str, value: &str) -> Result<Vec<u8>, FmError> {
-    // SECURITY_REPORT 3.7: `from_utf8_lossy` so a single invalid byte in the
+    // `from_utf8_lossy` so a single invalid byte in the
     // body cannot collapse the whole buffer and hide the frontmatter frame
     // (which `map_err(NoFrontmatter)` did for the entire `set_scalar` op).
     let s = String::from_utf8_lossy(data);
@@ -1278,7 +1278,7 @@ mod fm_tests {
 
     #[test]
     fn set_scalar_tolerates_non_utf8_body() {
-        // SECURITY_REPORT 3.7: a single invalid byte (0x92, CP1252 ') in the
+        // a single invalid byte (0x92, CP1252 ') in the
         // *body* used to make `set_scalar` fail with `NoFrontmatter` because
         // the rewrite helpers called strict `from_utf8(...).unwrap_or("")`,
         // which collapsed the whole buffer to "" and hid the frontmatter frame.
@@ -1299,7 +1299,7 @@ mod fm_tests {
 
     #[test]
     fn set_scalar_preserves_crlf_terminator() {
-        // SECURITY_REPORT 3.11: on a CRLF file, the edited line used to be
+        // on a CRLF file, the edited line used to be
         // rebuilt with a bare `\n` (the `ends_with('\n') == "\n"` family),
         // silently dropping the `\r` and leaving one LF-terminated line among
         // CRLF neighbours. The rewritten `title` line must keep its `\r\n`.

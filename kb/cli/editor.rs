@@ -32,7 +32,7 @@ pub(crate) fn run_editor(initial: &[u8]) -> Result<Vec<u8>, (String, i32)> {
 /// that was used and leaves the file untouched; a **non-zero exit** means
 /// the editor *ran* and aborted, leaving the file on disk as you found it.
 ///
-/// SECURITY_REPORT 3.1: gates with `run_editor`/`pick_editor` — in a
+/// gates with `run_editor`/`pick_editor` — in a
 /// hardened build the whole editor surface (incl. `-e`, which calls here
 /// via `cmd_create`) is compiled out; clap rejects `-e` as unexpected.
 ///
@@ -71,7 +71,7 @@ fn run_editor_in(
     let tmp: Option<PathBuf> = match in_place {
         Some(_) => None,
         None => {
-            // SECURITY_REPORT 3.2 / CODEBASE_REVIEW F2: the buffer name now
+            // the buffer name now
             // comes from the shared `unique_tmp_in` (pid+seq+nanos) — this
             // was the F8 hardening (previously inline). All three temp-file
             // writers (editor, atomic_write, alias export) now share one

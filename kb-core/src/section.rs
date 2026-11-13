@@ -61,7 +61,7 @@ pub enum SectionError {
         literal: String,
         scope: String,
     },
-    /// SECURITY_REPORT 3.13: a `Child` insert under a level-6 target would
+    /// a `Child` insert under a level-6 target would
     /// need level 7, which isn't a valid heading level — the old `base.min(6)`
     /// silently clamped it to a *sibling* of the parent instead of erroring.
     ChildOfLeaf {
@@ -426,7 +426,7 @@ impl Doc {
             None => {
                 let base = match (placement, target) {
                     (SectionPlacement::Child, Some(i)) => {
-                        // SECURITY_REPORT 3.13: a Child under a level-6 target
+                        // a Child under a level-6 target
                         // would need level 7. The old `base.min(6)` clamped it
                         // back to 6 — silently inserting a *sibling* of the
                         // parent. Error instead.
@@ -660,7 +660,7 @@ pub fn section_lookup_line(body: &str, ref_: &str) -> Option<usize> {
 /// Invariant: `lo <= hi <= data.len()`.
 pub fn splice(data: &[u8], lo: usize, hi: usize, new: &[u8]) -> Vec<u8> {
     debug_assert!(lo <= hi && hi <= data.len(), "splice range out of bounds");
-    // SECURITY_REPORT 3.12: `saturating_sub` so a violated invariant (e.g.
+    // `saturating_sub` so a violated invariant (e.g.
     // `hi - lo > data.len() + new.len()`) can never underflow the capacity
     // to a usize near 0 in release, where `debug_assert!` is gone.
     let cap = data
@@ -1058,7 +1058,7 @@ mod tests {
     #[test]
     #[cfg(not(debug_assertions))]
     fn splice_capacity_does_not_underflow_when_lo_gt_hi() {
-        // SECURITY_REPORT 3.12: in a release build (where `debug_assert!` is
+        // in a release build (where `debug_assert!` is
         // compiled out) a caller passing `lo > hi` used to compute
         // `data.len() + new.len() - (hi - lo)` where `(hi - lo)` underflowed
         // to a huge usize → `Vec::with_capacity` OOM-panicked. With the
@@ -1080,7 +1080,7 @@ mod tests {
 
     #[test]
     fn insert_child_of_level_6_is_an_error() {
-        // SECURITY_REPORT 3.13: a `Child` insert under a level-6 target would
+        // a `Child` insert under a level-6 target would
         // need level 7. The old `base.min(6)` clamped it back to 6 and silently
         // produced a *sibling* of the parent. Now it is a proper error.
         let d = Doc::new(b"# A\n\n## B\n\n### C\n\n#### D\n\n##### E\n\n###### F\nbody\n".to_vec());

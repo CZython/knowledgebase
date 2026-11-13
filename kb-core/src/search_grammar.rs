@@ -200,7 +200,7 @@ impl ParsedQuery {
 /// one that bites us: the bare-term path appends a prefix `*` to every
 /// non-phrase token, so a user-typed `*` would otherwise double up
 /// (`abc*` → `abc**`) and the FTS engine rejects the double prefix at
-/// parse time (SECURITY_REPORT 3.18). Route a `*`-bearing token through
+/// parse time. Route a `*`-bearing token through
 /// the `user_prefix_stem` branch (a plain `stem*`) instead, so the
 /// *rendered string stays a valid FTS query* for every input.
 pub fn needs_quoting(s: &str) -> bool {
