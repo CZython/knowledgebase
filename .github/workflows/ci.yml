@@ -83,19 +83,24 @@ jobs:
   # release bundles a z3 of that same version so no extra download is needed.
   verus-verify:
     runs-on: ubuntu-latest
+    # The pinned Verus release binary *hard-requires* the exact rustc it was
+    # built against (1.99.1) — a rustup-managed toolchain it resolves via
+    # `rustup`. The workflow-level `RUSTUP_TOOLCHAIN: stable` env would point
+    # it at a *different* compiler, so this job scopes it to the exact pin
+    # (job-level env overrides workflow-level). If the verus release pin
+    # changes, change these two `1.99.1`s together.
+    env:
+      RUSTUP_TOOLCHAIN: "1.99.1"
     steps:
       - uses: actions/checkout@v4
 
-      # the `verus` launcher shells out to `rustup` to locate its companion
-      # `rust_verify`, so a rustup-managed toolchain must be present. We pin
-      # `stable` (the same channel the rest of CI + the workflow-level
-      # `RUSTUP_TOOLCHAIN` env use). The pinned Verus release below was built
-      # against 1.99.1; if `stable` ever floats past that and verification
-      # breaks, bump the verus release pin AND this together.
-      - name: Install Rust (for the verus binary)
+      # rustup just needs to *have* 1.99.1 installed for the verus launcher
+      # to resolve it. `components` stay minimal — the binary ships its own
+      # compiler companion (rust_verify); we do not compile with this rustc.
+      - name: Install Rust 1.99.1 (exact toolchain the Verus release requires)
         uses: actions-rust-lang/setup-rust-toolchain@v1
         with:
-          toolchain: stable
+          toolchain: 1.99.1
 
       - name: Install Verus (pinned release)
         run: |
@@ -111,8 +116,9 @@ jobs:
           chmod +x /opt/verus/verus-x86-linux/verus
           # sanity: the binary must report the exact pinned version
           /opt/verus/verus-x86-linux/verus --version
+          # PATH update applies to subsequent steps only.
           echo "/opt/verus/verus-x86-linux" >> "$GITHUB_PATH"
-          echo "VERUS is on PATH at: $(command -v verus)"
+          echo "verus installed at: /opt/verus/verus-x86-linux/verus (on PATH from next step)"
 
       # Let verify.sh discover this z3 (a z3 4.16.0 the Verus release ships)
       # rather than falling back to a distro z3.
