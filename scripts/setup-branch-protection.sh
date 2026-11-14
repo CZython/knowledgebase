@@ -3,7 +3,10 @@
 # scripts/setup-branch-protection.sh
 #
 # One-shot, idempotent: enforce the two-branch policy on CZython/knowledgebase.
-#   dev  — PR merges need: CI checks green            (no human review)
+#   dev  — PR merges need: CI checks green + a CLEAN REBASE (no human review)
+#            The rebase gate is the `rebase-check` job in
+#            .github/workflows/auto-merge-dev.yml, which is REQUIRED on dev.
+#            A dirty/conflicting rebase therefore blocks the PR for everyone.
 #   main — PR merges need: CI green + code-owner sign-off (@CZython)
 #
 # Order matters and is chosen so the rules never block their own setup:
@@ -27,9 +30,12 @@
 # NOTE on "required checks": GitHub matches required status checks by *job*
 # name, not workflow name (and the PUT field is `contexts`, not the
 # `required_status_check_names` the docs sometimes mention). `ci.yml` defines
-# three jobs — `build-and-test`, `linux-musl`, `verus-verify` — and all three
-# are required (so a red Verus proof or a bad musl artifact can't slip into
-# either branch).
+# three jobs — `build-and-test`, `linux-musl`, `verus-verify` — required on
+# BOTH branches (so a red Verus proof or a bad musl artifact can't slip in).
+# `dev` additionally requires `rebase-check` (from auto-merge-dev.yml): the
+# auto-merge's verdict job, which goes RED when the rebase is dirty — that is
+# what hard-blocks a conflicting PR (GitHub refuses to merge while a required
+# check is red, even for admins with enforce_admins on).
 # ---------------------------------------------------------------------------
 set -euo pipefail
 
@@ -38,6 +44,7 @@ REPO="knowledgebase"
 API="https://api.github.com"
 CODEOWNER="@CZython"
 CI_JOB_NAMES_JSON='["build-and-test", "linux-musl", "verus-verify"]'
+DEV_CONTEXTS_JSON='["build-and-test", "linux-musl", "verus-verify", "rebase-check"]'
 
 # ---------- 0. preflight ----------
 if [[ -z "${GITHUB_TOKEN:-}" ]]; then
@@ -74,9 +81,21 @@ else
     exit 1
 fi
 
+# 1c. auto-merge-dev.yml — the `rebase-check` job is a REQUIRED check on dev,
+# so the workflow that produces it must exist (on dev) for the gate to work.
+am_file=".github/workflows/auto-merge-dev.yml"
+if [[ -f "$am_file" ]]; then
+    grep -q '^  rebase-check:' "$am_file" \
+      && echo "auto-merge-dev.yml defines rebase-check — OK" \
+      || { echo "error: $am_file must define a `rebase-check` job (it is required on dev)." >&2; exit 1; }
+else
+    echo "error: $am_file missing — the `rebase-check` required check has no producer." >&2
+    exit 1
+fi
+
 # ---------- 2. commit any drift ----------
 staged=0
-for f in CODEOWNERS "$ci_file" scripts/setup-branch-protection.sh; do
+for f in CODEOWNERS "$ci_file" "$am_file" scripts/setup-branch-protection.sh; do
     if [[ -f "$f" ]]; then
         git add -A "$f"
         if ! git diff --cached --quiet -- "$f" 2>/dev/null; then
@@ -156,7 +175,7 @@ dev_rule='
   },
   "required_status_checks": {
     "strict": false,
-    "contexts": '"$CI_JOB_NAMES_JSON"'
+    "contexts": '"$DEV_CONTEXTS_JSON"'
   },
   "restrictions": null,
   "enforce_admins": true,
@@ -180,13 +199,15 @@ echo
 echo "OK. Two-branch policy is now enforced on $OWNER/$REPO:"
 echo
 echo "  main  –  required before merge:"
-echo "          (a) both CI jobs green: build-and-test, linux-musl"
+echo "          (a) all 3 CI jobs green: build-and-test, linux-musl, verus-verify"
 echo "          (b) 1 approving review from a code owner ($CODEOWNER)"
 echo "          –  force-push / deletes: disallowed, admins bound"
 echo
 echo "  dev   –  required before merge:"
-echo "          (a) both CI jobs green: build-and-test, linux-musl"
+echo "          (a) all 3 CI jobs green: build-and-test, linux-musl, verus-verify"
+echo "          (b) rebase-check green (a CLEAN rebase) — auto-merge-dev.yml"
 echo "          –  no human review, no code-owner requirement"
+echo "          –  auto-merges by REBASE once all the above pass"
 echo
 echo "  CI trigger – .github/workflows/ci.yml runs on push [ main, dev ] + PR"
 echo "  CODEOWNERS – ** @CZython  (root pattern covers the whole tree)"

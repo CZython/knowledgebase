@@ -1,18 +1,29 @@
 # ---------------------------------------------------------------------------
 # auto-merge (dev)
 #
-# Policy: any PR targeting `dev` is rebase-merged as soon as every required
-# CI job (build-and-test, linux-musl, verus-verify) has completed green.
+# A PR targeting `dev` is rebase-merged automatically once:
+#   1. every required CI job is green   (build-and-test, linux-musl, verus-verify), AND
+#   2. the rebase itself is clean       (GitHub reports the PR rebaseable & not dirty).
 #
-#   - `main` is deliberately NOT covered: it still requires your approval +
-#     code-owner sign-off before the merge button works.
-#   - Merge method is `rebase` (merge_method: "rebase"), so `dev` stays a
-#     clean line with no merge commits.
-#   - Runs on `pull_request_target`: the runner executes on the base branch,
-#     and only uses the PR's head SHA for read-only checks + one merge call,
-#     so it's safe with untrusted PR head code and needs no secrets.
-#   - `workflow_dispatch` lets you re-evaluate any open PR manually
-#     (e.g. after re-running failed checks).
+# If the rebase would fail (merge conflict / dirty head), the `rebase-check`
+# job reports RED. `rebase-check` is a *required* status check on `dev`
+# (see scripts/setup-branch-protection.sh), so the PR is blocked for everyone
+# — admin included — until the conflict is fixed and a green re-evaluation
+# lands. An auto-merge failure that is NOT a conflict still shows as a red
+# `merge` check for visibility, but only a blocked rebase is a hard block.
+#
+# Why two jobs? GitHub refuses to merge while a REQUIRED check is still
+# "in progress". If the job that performs the merge were itself required, it
+# could never merge (its own status is still running at merge time). So:
+#   - rebase-check : verdict only; finishes BEFORE the merge → safe to require
+#   - merge        : performs the rebase-merge
+#
+# Runs on `pull_request_target` (workflow file is read from the base branch,
+# so untrusted PR head code never executes here) with only the default
+# runner token (checks: read, pull-requests: write).
+#
+# Bootstrap: this workflow must already exist on `dev` to auto-merge a PR —
+# the first PR that adds it is merged manually like any other.
 # ---------------------------------------------------------------------------
 name: auto-merge (dev)
 
@@ -32,61 +43,94 @@ permissions:
   pull-requests: write
   contents: read
 
+env:
+  # CI jobs that must be green before the rebase-merge is allowed.
+  REQUIRED_CI_JOBS: '["build-and-test", "linux-musl", "verus-verify"]'
+
 jobs:
-  merge-if-green:
+  rebase-check:
     runs-on: ubuntu-latest
+    timeout-minutes: 45
     steps:
-      - name: Wait for all checks green, then rebase-merge
+      - name: Wait for CI green + clean rebase
         env:
           REPO: ${{ github.repository }}
           TOKEN: ${{ github.token }}
           PR_NUM: ${{ github.event.inputs.pr_number || github.event.pull_request.number }}
-        # Poll for up to 45 minutes. Exits 0 on merge (or already merged),
-        # non-zero on red checks, unmergeable PR, or timeout.
-        timeout-minutes: 45
         run: |
           set -euo pipefail
+          [[ -n "$PR_NUM" ]] || { echo "::error::no PR number to evaluate"; exit 1; }
           API="https://api.github.com/repos/$REPO"
           auth=(-H "Authorization: Bearer $TOKEN" -H "Accept: application/vnd.github+json")
-
-          echo "evaluating PR #$PR_NUM on $REPO"
-          head_sha=$(curl -fsS "${auth[@]}" "$API/pulls/$PR_NUM" | python3 -c "import json,sys;print(json.load(sys.stdin)['head']['sha'])")
-          echo "head sha: $head_sha"
-
-          # Require >=3 check runs so we never merge on "zero checks known yet"
-          # (ci.yml defines exactly build-and-test, linux-musl, verus-verify).
-          required_min_checks=3
+          required=3
 
           deadline=$(( $(date +%s) + 45 * 60 ))
           while :; do
             if (( $(date +%s) > deadline )); then
-              echo "::error::timeout waiting for checks on PR #$PR_NUM; not merging."
+              echo "::error::45 min elapsed without a verdict on PR #$PR_NUM."
               exit 1
             fi
 
-            already_merged=$(curl -fsS "${auth[@]}" "$API/pulls/$PR_NUM" | python3 -c "import json,sys;print(json.load(sys.stdin)['merged'])")
-            if [[ "$already_merged" == "True" ]]; then
-              echo "PR #$PR_NUM already merged — nothing to do."
+            pr=$(curl -fsS "${auth[@]}" "$API/pulls/$PR_NUM")
+            merged=$(printf '%s' "$pr" | python3 -c 'import json,sys;print(json.load(sys.stdin)["merged"])')
+            if [[ "$merged" == "True" ]]; then
+              echo "PR #$PR_NUM already merged — passing."
               exit 0
             fi
 
-            read -r total pending bad <<<"$(curl -fsS "${auth[@]}" "$API/commits/$head_sha/check-runs" | python3 -c 'import json,sys; runs=json.load(sys.stdin)["check_runs"]; pending=sum(1 for r in runs if r["status"]!="completed"); bad=sum(1 for r in runs if r["status"]=="completed" and r["conclusion"] not in ("success","skipped","neutral")); print(len(runs), pending, bad)')"
-
-            if (( total >= required_min_checks && pending == 0 && bad == 0 )); then
-              echo "all $total checks green (required >= $required_min_checks) — rebase-merging PR #$PR_NUM"
-              code=$(curl -sS -o /tmp/merge_out.json -w '%{http_code}' "${auth[@]}" \
-                -X PUT -H "Content-Type: application/json" \
-                --data '{"merge_method": "rebase"}' \
-                "$API/pulls/$PR_NUM/merge")
-              if [[ "$code" == "201" ]]; then
-                echo "merged ✓"
-                exit 0
-              fi
-              echo "::error::merge API returned $code:"
-              cat /tmp/merge_out.json
+            state=$(printf '%s' "$pr" | python3 -c 'import json,sys;print(json.load(sys.stdin)["state"])')
+            if [[ "$state" != "open" ]]; then
+              echo "::error::PR #$PR_NUM is $state — not auto-merging."
               exit 1
             fi
 
-            echo "$total checks known: $pending pending, $bad failed — sleeping 30s"
+            rebaseable=$(printf '%s' "$pr" | python3 -c 'import json,sys;print(json.load(sys.stdin)["rebaseable"])')
+            mstate=$(printf '%s' "$pr" | python3 -c 'import json,sys;print(json.load(sys.stdin)["mergeable_state"])')
+            if [[ "$rebaseable" != "True" || "$mstate" == "dirty" ]]; then
+              echo "::error::rebase is not clean (rebaseable=$rebaseable mergeable_state=$mstate). PR is blocked until the head is updated and the conflict is resolved."
+              exit 1
+            fi
+
+            head_sha=$(printf '%s' "$pr" | python3 -c 'import json,sys;print(json.load(sys.stdin)["head"]["sha"])')
+            read -r known ok bad <<<"$(REQUIRED_CI_JOBS="$REQUIRED_CI_JOBS" curl -fsS "${auth[@]}" "$API/commits/$head_sha/check-runs" | REQUIRED_CI_JOBS="$REQUIRED_CI_JOBS" python3 -c 'import json,os,sys; req=set(json.loads(os.environ["REQUIRED_CI_JOBS"])); runs=[r for r in json.load(sys.stdin)["check_runs"] if r["name"] in req]; ok=sum(1 for r in runs if r["status"]=="completed" and r["conclusion"] in ("success","skipped","neutral")); bad=sum(1 for r in runs if r["status"]=="completed" and r["conclusion"] not in ("success","skipped","neutral")); print(len(runs), ok, bad)')"
+
+            if (( bad > 0 )); then
+              echo "::error::$bad of $required required CI job(s) failed on this head — PR blocked."
+              exit 1
+            fi
+            if (( known >= required && known == ok )); then
+              echo "CI green ($ok/$required) and rebase clean — rebase-check passes."
+              exit 0
+            fi
+
+            echo "$known/$required required CI jobs completed (ok=$ok bad=$bad mergeable_state=$mstate) — sleeping 30s"
             sleep 30
           done
+
+  merge:
+    needs: [ rebase-check ]
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Rebase-merge the PR
+        env:
+          REPO: ${{ github.repository }}
+          TOKEN: ${{ github.token }}
+          PR_NUM: ${{ github.event.inputs.pr_number || github.event.pull_request.number }}
+        run: |
+          set -euo pipefail
+          [[ -n "$PR_NUM" ]] || { echo "::error::no PR number to merge"; exit 1; }
+          API="https://api.github.com/repos/$REPO"
+          auth=(-H "Authorization: Bearer $TOKEN" -H "Accept: application/vnd.github+json")
+
+          code=$(curl -sS -o /tmp/merge_out.json -w '%{http_code}' "${auth[@]}" \
+            -X PUT -H "Content-Type: application/json" \
+            --data '{"merge_method": "rebase"}' \
+            "$API/pulls/$PR_NUM/merge")
+          if [[ "$code" == "201" || "$code" == "200" ]]; then
+            echo "PR #$PR_NUM rebase-merged ✓"
+          else
+            echo "::error::rebase-merge failed (http $code):"
+            cat /tmp/merge_out.json
+            exit 1
+          fi
