@@ -10,7 +10,7 @@
 #   0. preflight (token + repo reach)
 #   1. re-affirm CODEOWNERS + the ci trigger files (already in tree)
 #   2. commit any drift
-#   3. push the committed state over HTTPS   (SSH push is not set up here)
+#   3. push the committed state over HTTPS  (SSH push needs a separate setup)
 #   4. branch-protection for `main`
 #   5. branch-protection for `dev`
 #   6. summary
@@ -24,9 +24,12 @@
 #     --push-dev    (default) push HEAD -> origin/dev  (then PR dev -> main)
 #     --push-main   push HEAD -> dev AND origin/main
 #
-# NOTE on "required checks": GitHub matches required status checks by JOB
-# name, not workflow name. `ci.yml` defines jobs `build-and-test` and
-# `linux-musl`, so both are required (not the literal string "ci").
+# NOTE on "required checks": GitHub matches required status checks by *job*
+# name, not workflow name (and the PUT field is `contexts`, not the
+# `required_status_check_names` the docs sometimes mention). `ci.yml` defines
+# three jobs — `build-and-test`, `linux-musl`, `verus-verify` — and all three
+# are required (so a red Verus proof or a bad musl artifact can't slip into
+# either branch).
 # ---------------------------------------------------------------------------
 set -euo pipefail
 
@@ -34,7 +37,7 @@ OWNER="CZython"
 REPO="knowledgebase"
 API="https://api.github.com"
 CODEOWNER="@CZython"
-CI_JOB_NAMES_JSON='["build-and-test", "linux-musl"]'
+CI_JOB_NAMES_JSON='["build-and-test", "linux-musl", "verus-verify"]'
 
 # ---------- 0. preflight ----------
 if [[ -z "${GITHUB_TOKEN:-}" ]]; then
@@ -119,7 +122,7 @@ main_rule='
   },
   "required_status_checks": {
     "strict": true,
-    "required_status_check_names": '"$CI_JOB_NAMES_JSON"'
+    "contexts": '"$CI_JOB_NAMES_JSON"'
   },
   "restrictions": null,
   "required_pull_request_reviews_owners": null,
@@ -153,7 +156,7 @@ dev_rule='
   },
   "required_status_checks": {
     "strict": false,
-    "required_status_check_names": '"$CI_JOB_NAMES_JSON"'
+    "contexts": '"$CI_JOB_NAMES_JSON"'
   },
   "restrictions": null,
   "enforce_admins": true,
