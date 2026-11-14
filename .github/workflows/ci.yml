@@ -4,8 +4,11 @@
 name: ci
 
 on:
+  # Both branches are PR-gated (see setup-branch-protection.sh / CODEOWNERS).
+  # `ci` must also run on direct pushes to `dev` so its required-check status
+  # is always available to the branch-protection rule.
   push:
-    branches: [ main ]
+    branches: [ main, dev ]
   pull_request:
 
 env:

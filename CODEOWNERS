@@ -1,0 +1,14 @@
+# Code-owner sign-off rule for `main`.
+#
+# This file makes every PR into `main` require **your** approval
+# (CZython) once the `code owner review is required` box is ticked in
+# branch protection (scripts/setup-branch-protection.sh does that for
+# you). This is the "maintainer signoff" gate — it is *separate* from
+# CI checks, and `dev` does not enforce it.
+#
+# Every path not explicitly claimed below falls back to the root
+# pattern, which covers the whole tree. To narrow later, add
+# `dist/** @someone-else` lines.
+
+# Repo-wide — every path defaults to you.
+**          @CZython
