@@ -41,7 +41,7 @@ on:
 permissions:
   checks: read
   pull-requests: write
-  contents: read
+  contents: write
 
 env:
   # CI jobs that must be green before the rebase-merge is allowed.
