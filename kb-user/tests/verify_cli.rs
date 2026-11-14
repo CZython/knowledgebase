@@ -365,7 +365,9 @@ fn verify_accepts_a_db_flag() {
 fn with_corpus(s: &Setup) -> PathBuf {
     let db = s.root.join("test.db");
     let root = s.root.to_str().unwrap();
-    let (code, _out, err) = run(s, &["--db", db.to_str().unwrap(), "add", root]);
+    // `add` subcommand first, then `--db` after it (clap 4.5 global-flag
+    // quirk: `--db X sub …` with the space form doesn't apply the value).
+    let (code, _out, err) = run(s, &["add", root, "--db", db.to_str().unwrap()]);
     assert_eq!(code, 0, "kb add must succeed on the test tree: {err}");
     db
 }
@@ -373,10 +375,16 @@ fn with_corpus(s: &Setup) -> PathBuf {
 /// The DB path is a local file, so `run`'s positional layout is `--db <p> <verb> …`.
 fn with_db(s: &Setup, args: &[&str]) -> (i32, String, String) {
     let db = s.root.join("test.db");
+    // Reorder: put `--db` after the subcommand (clap 4.5 global-flag
+    // quirk with space-style `--db X sub …` doesn't work;
+    // `sub --db X …` does).
+    let subcmd = args[0];
+    let rest = &args[1..];
     let mut full: Vec<&str> = Vec::new();
+    full.push(subcmd);
     full.push("--db");
     full.push(db.to_str().unwrap());
-    full.extend_from_slice(args);
+    full.extend_from_slice(rest);
     let mut cmd = kb();
     for x in &full {
         cmd.arg(x);

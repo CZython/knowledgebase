@@ -6920,6 +6920,8 @@ mod tests {
                 rel_path: "x.md".into(),
                 search_required_phrase: Some("secret sauce".into()),
                 score: Some(1.5),
+                uuid: "aaaaaa0000000001".into(),
+                uuid_short: Some("aaaaa".into()),
             },
             SearchRow {
                 abs_path: "/y.md".into(),
@@ -6931,6 +6933,8 @@ mod tests {
                 rel_path: "y.md".into(),
                 search_required_phrase: None,
                 score: None,
+                uuid: "aaaaaa0000000002".into(),
+                uuid_short: Some("aaaaab".into()),
             },
         ];
 

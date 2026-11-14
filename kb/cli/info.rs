@@ -1,10 +1,11 @@
 use crate::*;
 
-/// The ten display columns of a `kb info` row, in SELECT order. (Named so the
-/// optional row binding stays readable without inlining the tuple type.)
+/// The eleven display columns of a `kb info` row, in SELECT order. (Named so
+/// the optional row binding stays readable without inlining the tuple type.)
 pub(crate) type InfoRow = (
     String, String, String, Option<String>, String, String,
     Option<String>, i64, Option<String>, Option<String>,
+    Option<String>,
 );
 
 
@@ -16,7 +17,7 @@ pub(crate) fn cmd_info(dbpath: Option<&Path>, path: &Path, json: bool) -> Kb {
     let db = open_db(dbpath)?;
     let info_sql = format!(
         "SELECT abs_path, id, type, title, root, rel_path,\n\
-         description, mtime_ns, created_at, {gate}\n\
+         description, mtime_ns, created_at, {gate}, uuid\n\
          FROM pages WHERE abs_path = ?1",
         gate = GATE_COL
     );
@@ -24,11 +25,13 @@ pub(crate) fn cmd_info(dbpath: Option<&Path>, path: &Path, json: bool) -> Kb {
         .query_row(
             &info_sql,
             // mtime_ns is INTEGER NOT NULL; created_at is TEXT (ISO-8601).
+            // uuid is TEXT, possibly NULL for a not-yet-backfilled row.
             params![abs],
             |r| Ok((
                 r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?,
                 r.get(4)?, r.get(5)?, r.get(6)?,
                 r.get(7)?, r.get(8)?, r.get(9)?,
+                r.get(10)?,
             )),
         )
         .optional()
@@ -36,7 +39,13 @@ pub(crate) fn cmd_info(dbpath: Option<&Path>, path: &Path, json: bool) -> Kb {
     let Some(rec) = row else {
         return Err((format!("no indexed page for {abs}"), EXIT_ERR));
     };
-    let (abs_path, id, pt, title, _root, _rel_path, description, mtime_ns, created_at, search_required_phrase) = rec;
+    let (abs_path, id, pt, title, _root, _rel_path, description, mtime_ns, created_at, search_required_phrase, uuid_opt) = rec;
+    let uuid = uuid_opt.clone().unwrap_or_default();
+    let uuid_short = if uuid.is_empty() {
+        None
+    } else {
+        Some(uuid_short_for(&db, &uuid, &abs_path).unwrap_or_default())
+    };
     let tags = page_tags_str(&db, &abs_path);
     let fwd_count = db.conn
         .query_row(
@@ -75,6 +84,15 @@ pub(crate) fn cmd_info(dbpath: Option<&Path>, path: &Path, json: bool) -> Kb {
             .filter(|s| !s.trim().is_empty()).map(|s| s.trim().to_string()).collect();
         let mut o = JObject::new();
         o.s("id", &id);
+        // The stored 16-hex uuid (the exact token to paste back into a
+        // path-arg verb) and its shortest-unique prefix. Emitted here so
+        // `info` surfaces both — search/browse/tag do the same.
+        if !uuid.is_empty() {
+            o.s("uuid", &uuid);
+        }
+        if let Some(short) = &uuid_short {
+            o.s("uuid_short", short);
+        }
         o.s("type", &pt);
         o.opt("title", &title);
         o.s("abs_path", &abs_path);
@@ -98,6 +116,14 @@ pub(crate) fn cmd_info(dbpath: Option<&Path>, path: &Path, json: bool) -> Kb {
     }
     println!("path:    {abs_path}");
     println!("id:      {id}");
+    if !uuid.is_empty() {
+        println!("uuid:    {uuid}");
+        if let Some(short) = &uuid_short {
+            if short != &uuid {
+                println!("short:   {short}");
+            }
+        }
+    }
     println!("type:    {pt}");
     if !title.as_deref().unwrap_or("").is_empty() {
         println!("title:   {}", title.as_deref().unwrap_or(""));

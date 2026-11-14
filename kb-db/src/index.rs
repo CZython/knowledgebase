@@ -53,6 +53,11 @@ pub struct PageRecord {
     pub body: String,
     pub mtime_ns: i64,
     pub content_hash: String,
+    /// Stable page-identity token: `etag_of(id \0 abs_path)` (16 hex, salted
+    /// with the PK). Computed next to `content_hash` and stored in
+    /// `pages.uuid`; the resolver prefix-matches it (the "uuid") so an agent
+    /// can paste a short token back instead of a path.
+    pub uuid: String,
     /// Per-row: the *unquoted* gate terms (PLAN §8 page_gates: "exact
     /// entry as written, minus surrounding double quotes").
     pub gate_terms: Vec<String>,
@@ -252,8 +257,11 @@ pub fn build_page(
         None
     };
 
+    let abs_str = abs_path.to_string_lossy().to_string();
+    let uuid = kb_core::uuid::uuid_of(&id, &abs_str);
+
     Ok(PageRecord {
-        abs_path: abs_path.to_string_lossy().to_string(),
+        abs_path: abs_str,
         id,
         page_type,
         root: root.to_string(),
@@ -270,6 +278,7 @@ pub fn build_page(
         body: fm.body.clone(),
         mtime_ns,
         content_hash,
+        uuid,
         gate_terms,
         tag_rows: tags,
         link_rows,
@@ -381,9 +390,9 @@ pub fn upsert_page(db: &Db, rec: &PageRecord) -> Result<usize> {
             r#"
          INSERT INTO pages (
            abs_path, id, type, root, rel_path, title, language,
-           description, {gate}, frontmatter_text, body,
-           mtime_ns, content_hash, created_at, updated_at
-         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?14)
+            description, {gate}, frontmatter_text, body,
+            mtime_ns, content_hash, uuid, created_at, updated_at
+          ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?15)
           ON CONFLICT (abs_path) DO UPDATE SET
             id = excluded.id,
             type = excluded.type,
@@ -403,9 +412,10 @@ pub fn upsert_page(db: &Db, rec: &PageRecord) -> Result<usize> {
            {gate} = excluded.{gate},
            frontmatter_text = excluded.frontmatter_text,
            body = excluded.body,
-           mtime_ns = excluded.mtime_ns,
-           content_hash = excluded.content_hash,
-           updated_at = excluded.updated_at
+            mtime_ns = excluded.mtime_ns,
+            content_hash = excluded.content_hash,
+            uuid = excluded.uuid,
+            updated_at = excluded.updated_at
          "#
         ),
         params![
@@ -422,6 +432,7 @@ pub fn upsert_page(db: &Db, rec: &PageRecord) -> Result<usize> {
             rec.body,
             { rec.mtime_ns },
             rec.content_hash,
+            rec.uuid,
             now,
         ],
     )?;
@@ -453,6 +464,51 @@ pub fn upsert_page(db: &Db, rec: &PageRecord) -> Result<usize> {
 
     tx.commit()?;
     Ok(res)
+}
+
+/// One-time, idempotent backfill of `pages.uuid` for a DB that *preceded* the
+/// column's introduction. Rows written by `upsert_page` (on any `refresh` /
+/// `create` / TUI commit) already carry their uuid; only rows from an older
+/// build (or a DB that was open across the upgrade) are still `NULL`/empty.
+///
+/// **Bounded memory** (the memory rule that killed the old O(N)
+/// `uuid_prefix_match`): we never materialise the whole table. The loop runs
+/// `SELECT … WHERE uuid IS NULL OR uuid = '' LIMIT {batch}` and, per batch,
+/// streams the ≤`batch` rows into a `Vec` (the façade buffers anyway), then
+/// `UPDATE`s each by PK and re-queries. The largest live allocation is one
+/// batch of `(abs_path, id)` pairs — O(batch), not O(N). Each iteration both
+/// rewrites its rows (clearing the sentinel) and re-selects the remainder, so
+/// the loop is a fixed-point that terminates when no sentinel row remains.
+/// Re-running after a full backfill is a single empty `SELECT` (O(1)).
+///
+/// Returns the number of rows filled (0 when nothing to do).
+pub fn backfill_uuid(conn: &crate::sql::Connection) -> Result<usize> {
+    const BATCH: i64 = 50_000;
+    let mut filled = 0usize;
+    loop {
+        // The façade buffers the (bounded) batch into a Vec; `LIMIT 50000`
+        // caps both memory and the number of UPDATEs this iteration performs.
+        let stmt = conn.prepare(
+            "SELECT abs_path, id FROM pages
+             WHERE uuid IS NULL OR uuid = ''
+             LIMIT ?1",
+        )?;
+        let batch: Vec<(String, String)> = stmt
+            .query_map(params![BATCH], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))?
+            .collect::<Result<Vec<_>>>()?;
+        if batch.is_empty() {
+            break;
+        }
+        let up = conn
+            .prepare_cached("UPDATE pages SET uuid = ?1 WHERE abs_path = ?2")?;
+        for (abs, id) in batch {
+            let u = kb_core::uuid::uuid_of(&id, &abs);
+            up.execute(params![u, abs])?;
+            filled += 1;
+        }
+        drop(up);
+    }
+    Ok(filled)
 }
 
 /// Delete a page (and its row-table entries) from the DB. Called by the
@@ -657,5 +713,62 @@ mod tests {
             other => panic!("expected NoType, got {other:?}"),
         }
         let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// Backfill fills `uuid` for pre-existing rows (the "old DB" case) using
+    /// the same `kb_core::uuid::uuid_of(id \0 abs_path)` expression that
+    /// `build_page` uses, and is idempotent (a re-run reports 0 new rows).
+    /// The salt distinguishes two pages that share an `id` but live under
+    /// different folders.
+    #[test]
+    fn backfill_uuid_fills_null_rows_and_is_idempotent() {
+        let conn = crate::sql::Connection::open_in_memory().unwrap();
+        crate::migrate::migrate(&conn).unwrap(); // schema + uuid column + empty backfill
+
+        // Simulate two page rows from an *older* build (no uuid) — distinct
+        // paths. We write them directly, bypassing `upsert_page`.
+        let ins = "INSERT INTO pages (abs_path, id, type, root, rel_path, mtime_ns, content_hash)
+                   VALUES (?1,?2,'note','/r',?3,1,'h')";
+        for (abs, id, rel) in [
+            ("/r/a.md", "note:alpha", "a.md"),
+            ("/other/a.md", "note:alpha", "a.md"),
+        ] {
+            conn.execute(ins, params![abs, id, rel]).unwrap();
+        }
+
+        // Before: both rows have a NULL uuid.
+        let before: Vec<Option<String>> = {
+            let s = conn
+                .prepare("SELECT uuid FROM pages ORDER BY abs_path")
+                .unwrap();
+            s.query_map((), |r| r.get::<_, Option<String>>(0))
+                .unwrap()
+                .collect::<Result<Vec<_>>>()
+                .unwrap()
+        };
+        assert!(before.iter().all(Option::is_none), "start: {before:?}");
+
+        let filled = backfill_uuid(&conn).unwrap();
+        assert_eq!(filled, 2, "must fill both sentinel rows; got {filled}");
+
+        // Select each row by its own path (avoids depending on ORDER BY
+        // across two directories with a shared rel_path).
+        let uuid_for = |path: &str| -> String {
+            conn.query_row(
+                "SELECT uuid FROM pages WHERE abs_path = ?1",
+                params![path],
+                |r| r.get::<_, String>(0),
+            )
+            .unwrap()
+        };
+        let expected_a = kb_core::uuid::uuid_of("note:alpha", "/r/a.md");
+        let expected_o = kb_core::uuid::uuid_of("note:alpha", "/other/a.md");
+        assert_ne!(&expected_a, &expected_o, "salt (abs_path) must distinguish them");
+        assert_eq!(uuid_for("/r/a.md"), expected_a, "row /r/a.md must carry its own salted uuid");
+        assert_eq!(uuid_for("/other/a.md"), expected_o, "row /other/a.md must carry its own salted uuid");
+
+        // Idempotent: a re-run finds no sentinel rows at all (both already set).
+        let again = backfill_uuid(&conn).unwrap();
+        assert_eq!(again, 0, "second backfill must be a no-op; got {again}");
     }
 }

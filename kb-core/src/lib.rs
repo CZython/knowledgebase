@@ -51,6 +51,11 @@
 //! - `labels` — deterministic 3-way (files-heading / leading-run /
 //!   folder) classification of a `type: label` page's references;
 //!   well-formedness predicate for a single file ref (M2).
+//! - `uuid` — the page identity token: `uuid_of(id, abs_path) =
+//!   etag_of(id \0 abs_path)` (FNV-1a 64, 16 hex, salted by the PK),
+//!   `is_uuid_token` (5–16 hex), and `shortest_qualifying` (the abstract
+//!   "shortest unique prefix" walk — the concrete indexed DB lookup lives in
+//!   `kb/cli/mod.rs`, memory bounded to ≤2 rows per probe).
 //!
 //! ## Fuzz corpus
 //!
@@ -94,3 +99,4 @@ pub mod search_grammar;
 pub mod section;
 pub mod semantics;
 pub mod tags;
+pub mod uuid;

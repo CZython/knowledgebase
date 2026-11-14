@@ -1,8 +1,9 @@
 use crate::*;
 
-/// A `kb browse` row: the seven display columns of a `pages` row. (Named so
-/// the local binding below stays readable without inlining the tuple type.)
-pub(crate) type BrowseRow = (String, String, String, Option<String>, String, String, Option<String>);
+/// A `kb browse` row: the eight display columns of a `pages` row (the 8th is
+/// the stored `uuid`, optional for a not-yet-backfilled row). (Named so the
+/// local binding below stays readable without inlining the tuple type.)
+pub(crate) type BrowseRow = (String, String, String, Option<String>, String, String, Option<String>, Option<String>);
 
 /// Fetch the pages a `kb browse` will display (A2 extraction from
 /// `cmd_browse`): optional `--path`-prefix filter (`LIKE 'prefix/%'` or exact
@@ -22,13 +23,14 @@ fn fetch_browse_pages(
             r.get::<_, String>(4)?,
             r.get::<_, String>(5)?,
             r.get::<_, Option<String>>(6)?,
+            r.get::<_, Option<String>>(7)?,
         ))
     };
     Ok(match filter_prefix {
         Some(prefix) => {
             let like = format!("{prefix}/%");
             let browslike = format!(
-                "SELECT abs_path, id, type, title, root, rel_path, {gate}\n\
+                "SELECT abs_path, id, type, title, root, rel_path, {gate}, uuid\n\
                 FROM pages\n\
                 WHERE abs_path LIKE ?1 OR abs_path = ?2\n\
                 ORDER BY abs_path",
@@ -46,7 +48,7 @@ fn fetch_browse_pages(
         }
         None => {
             let browseall = format!(
-                "SELECT abs_path, id, type, title, root, rel_path, {gate}\n\
+                "SELECT abs_path, id, type, title, root, rel_path, {gate}, uuid\n\
                 FROM pages\n\
                 ORDER BY root, rel_path",
                 gate = GATE_COL
@@ -72,16 +74,23 @@ fn fetch_browse_pages(
 fn render_browse(db: &Db, pages: &[BrowseRow], json: bool) -> i32 {
     if json {
         let mut items = Vec::new();
-        for (abs_path, id, pt, title, _root, rel_path, search_required_phrase) in pages.iter() {
+        for (abs_path, id, pt, title, _root, rel_path, search_required_phrase, uuid) in pages.iter() {
             let tags: Vec<String> = page_tags_str(db, abs_path).split(',')
                 .filter(|s| !s.trim().is_empty()).map(|s| s.trim().to_string()).collect();
             let refs = if pt == "label" { Some(label_expand(db, abs_path)) } else { None };
+            let uuid = uuid.clone().unwrap_or_default();
+            let uuid_short = if uuid.is_empty() {
+                None
+            } else {
+                Some(uuid_short_for(db, &uuid, abs_path).unwrap_or_default())
+            };
             let gj = PageJson {
                 id: id.clone(), pt: pt.clone(),
                 title: title.clone(), abs: abs_path.clone(), rel: rel_path.clone(),
                 tags, gates: search_required_phrase.clone().unwrap_or_default(),
                 links: Some(page_link_count(db, abs_path)),
                 refs, description: None,
+                uuid, uuid_short,
             };
             items.push(gj.render());
         }
@@ -94,25 +103,44 @@ fn render_browse(db: &Db, pages: &[BrowseRow], json: bool) -> i32 {
         return EXIT_OK;
     }
 
-    for (i, (abs_path, id, pt, title, _root, rel_path, search_required_phrase)) in pages.iter().enumerate() {
+    for (i, (abs_path, id, pt, title, _root, rel_path, search_required_phrase, uuid)) in pages.iter().enumerate() {
         let tags = page_tags_str(db, abs_path);
         let link_count = page_link_count(db, abs_path);
         let gate_str = search_required_phrase.as_deref().unwrap_or("");
 
-        let mut line = format!("{:>3}  {:<20} {}", i + 1, id, title.as_deref().unwrap_or(""));
-        if !rel_path.is_empty() {
-            line.push_str(&format!("  {rel_path}"));
-        }
+        // Same *shortest-unique* prefix the agent pastes back — one indexed
+        // `LIMIT 2` probe per row via `uuid_short_for`. (Memory-bounded to
+        // ≤2 rows each probe; browse is already O(rows) so this adds a
+        // bounded constant, not a blow-up.) Fall back to the full 16-hex
+        // token (still a valid copy-back) if the probe errors out; print
+        // blanks when the row has no uuid yet (fresh DB, no backfill).
+        let full = uuid.clone().unwrap_or_default();
+        let short = if full.is_empty() {
+            String::new()
+        } else {
+            uuid_short_for(db, &full, abs_path).unwrap_or(full)
+        };
+
+        let mut extra: Vec<(String, String)> = Vec::new();
         if !tags.is_empty() {
-            line.push_str(&format!("  tags: {tags}"));
+            extra.push(("tags".to_string(), tags));
         }
         if !gate_str.is_empty() {
-            line.push_str(&format!("  gates: {gate_str}"));
+            extra.push(("gates".to_string(), gate_str.to_string()));
         }
         if link_count > 0 {
-            line.push_str(&format!("  links: {link_count}"));
+            extra.push(("links".to_string(), link_count.to_string()));
         }
-        println!("{line}");
+
+        print_page(
+            i + 1,
+            &short,
+            id,
+            title.as_deref(),
+            rel_path,
+            &extra,
+            None,
+        );
 
         if pt == "label" {
             let refs = label_expand(db, abs_path);

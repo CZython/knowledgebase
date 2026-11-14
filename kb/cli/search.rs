@@ -25,6 +25,13 @@ pub(crate) struct SearchRow {
     /// `kb/tui/mod.rs`).
     pub(crate) search_required_phrase:Option<String>,
     pub(crate) score:Option<f64>,
+    /// The page's stored full uuid (16 hex, `pages.uuid`; `uuid_of(id, abs_path)`).
+    /// Agents paste this back verbatim into any path-arg verb.
+    pub(crate) uuid:String,
+    /// The shortest-unique prefix of `uuid` (≥5, ≤16 hex), computed at load
+    /// time with `uuid_short_for`. The *displayed* token in the human search
+    /// output table; `uuid` itself stays the exact stored token in JSON.
+    pub(crate) uuid_short:Option<String>,
 }
 
 
@@ -154,7 +161,7 @@ fn build_search_sql(
     let select_sql = format!(
         "SELECT pages.abs_path, pages.id, pages.type,\n\
           pages.title, pages.description, pages.root, pages.rel_path,\n\
-          pages.{gate}, {score_expr}\n",
+          pages.{gate}, {score_expr}, pages.uuid\n",
         gate = GATE_COL
     );
     let mut sql = String::new();
@@ -187,6 +194,13 @@ fn render_search(rows: &[SearchRow], json: bool, query: &str) {
             };
             let mut o = JObject::new();
             o.s("id", &r.id);
+            // The stored 16-hex uuid (the *exact* token to paste back into a
+            // path-arg verb). `uuid_short` is its shortest-unique prefix —
+            // a shorter, still-unambiguous token for humans.
+            o.s("uuid", &r.uuid);
+            if let Some(short) = &r.uuid_short {
+                o.s("uuid_short", short);
+            }
             o.s("type", &r.pt);
             o.opt("title", &r.title);
             o.opt("description", &r.description);
@@ -201,14 +215,24 @@ fn render_search(rows: &[SearchRow], json: bool, query: &str) {
             println!("0 results for {query:?} (the query was too strict, or the page is gated)");
         } else {
             for (i, r) in rows.iter().enumerate() {
-                let title = r.title.as_deref().unwrap_or("");
-                let desc = r.description.as_deref().unwrap_or("");
-                let tail = if desc.is_empty() {
-                    r.rel_path.clone()
-                } else {
-                    format!("{desc}  ({})", r.rel_path)
-                };
-                println!("{:>3}  {:<24} {}  {}", i + 1, r.id, title, tail);
+                // The human table shows the *short* token — the same one the
+                // agent pastes back. `uuid` (full 16-hex) is still in `--json`.
+                let short = r.uuid_short.as_deref().unwrap_or(&r.uuid);
+                let mut extra: Vec<(String, String)> = Vec::new();
+                if let Some(gate) = r.search_required_phrase.as_deref() {
+                    if !gate.is_empty() {
+                        extra.push(("gates".to_string(), gate.to_string()));
+                    }
+                }
+                print_page(
+                    i + 1,
+                    short,
+                    &r.id,
+                    r.title.as_deref(),
+                    &r.rel_path,
+                    &extra,
+                    r.description.as_deref(),
+                );
             }
             println!("── {} result(s)", rows.len());
         }
@@ -299,16 +323,33 @@ pub(crate) fn search_rows(
     })?;
     let rows: Vec<SearchRow> = stmt
         .query_map(rusqlite::params_from_iter(params_vec.iter()), |r| {
+            let abs_path = r.get::<_, String>(0)?;
+            let id      = r.get::<_, String>(1)?;
+            let pt      = r.get::<_, String>(2)?;
+            let title   = r.get::<_, Option<String>>(3)?;
+            let desc    = r.get::<_, Option<String>>(4)?;
+            let root    = r.get::<_, String>(5)?;
+            let rel     = r.get::<_, String>(6)?;
+            let phrase  = r.get::<_, Option<String>>(7)?;
+            let score   = r.get::<_, Option<f64>>(8)?;
+            let uuid    = r.get::<_, Option<String>>(9)?.unwrap_or_default();
+            let uuid_short = if uuid.is_empty() {
+                None
+            } else {
+                // The closure hands us the row; we still need a `Db` to drive
+                // the indexed `LIMIT 2` probe. `search_rows` is `db`-scoped,
+                // and the probe only reads (no txn state change) — the
+                // `db` reference is captured here across `query_map`.
+                match uuid_short_for(db, &uuid, &abs_path) {
+                    Ok(s) => Some(s),
+                    Err(_) => Some(uuid.clone()),
+                }
+            };
             Ok(SearchRow {
-                abs_path: r.get::<_, String>(0)?,
-                id: r.get::<_, String>(1)?,
-                pt: r.get::<_, String>(2)?,
-                title: r.get::<_, Option<String>>(3)?,
-                description: r.get::<_, Option<String>>(4)?,
-                root: r.get::<_, String>(5)?,
-                rel_path: r.get::<_, String>(6)?,
-                search_required_phrase: r.get::<_, Option<String>>(7)?,
-                score: r.get::<_, Option<f64>>(8)?,
+                abs_path, id, pt, title, description: desc,
+                root, rel_path: rel,
+                search_required_phrase: phrase, score,
+                uuid, uuid_short,
             })
         })
         .map_err(|e| (format!("search query: {e}"), EXIT_ERR))?

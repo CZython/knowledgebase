@@ -355,8 +355,15 @@ pub(crate) enum Cmd {
     /// plus the `search_required_phrase` gate rule (gated pages hidden unless the
     /// query contains the full gate entry).
     Search {
-        /// The raw query (one argument; quote it if it contains spaces).
-        query: String,
+        /// One or more search terms, **all flags first** (`--db`, `--json`,
+        /// `--limit`) then the terms: `kb search --db x --json type:note hello`.
+        /// Each positional is a raw query piece — a bare word, a `~` OR-term, a
+        /// `-` NOT-term, a `key:value` filter, or a quoted phrase (`"exact
+        /// phrase"`). They are joined with a single space before parsing, so
+        /// `kb search type:note hello` ≡ `kb search "type:note hello"`; a
+        /// multi-word argument is still shell-quoted like `kb search "exact phrase"`.
+        #[arg(value_name = "TERM", num_args = 1..)]
+        terms: Vec<String>,
         /// Emit a JSON envelope instead of the text listing.
         #[arg(long)]
         json: bool,
@@ -665,11 +672,11 @@ pub(crate) fn main() {
         "edit",
         "rm",
     ];
-    if non_flag.len() == 1 {
-        let s = non_flag
+    if !non_flag.is_empty() {
+        let head = non_flag
             .first()
-            .expect("len()==1 guarantees non-empty");
-        if !SUBCMDS.contains(&s.as_str()) {
+            .expect("non-empty guarantees first()");
+        if !SUBCMDS.contains(&head.as_str()) {
         // Preserve any flags the caller passed (e.g. `--db PATH`), so the
         // reconstructed command runs against the same DB as an explicit one.
         let flags: Vec<String> = args
@@ -682,26 +689,39 @@ pub(crate) fn main() {
             v.extend(flags.iter().cloned());
             v
         };
-        let p = Path::new(s);
-        // The `.md`→`info` shortcut is an
-        // *interactive* convenience and — via the CWD-relative `p.exists()`
-        // probe — the only state-dependent branch in this whole entry point.
-        // For the hardened/agent build we drop it so a bare token *always*
-        // routes to `search`: the agent surface is deterministic (agents that
-        // want file details can say `kb info <file>` explicitly). The user
-        // build keeps the shortcut: `kb notes/foo.md` opens that file. We
-        // branch on `VARIANT`, the same "am I the agent build?" switch the
-        // `name`/`version`/`long_about` above already use.
-        let info_like = VARIANT == "user"
-            && p.extension().map(|e| e == "md").unwrap_or(false)
-            && p.exists();
-        let cli = if info_like {
-            Cli::parse_from(make("info", s))
-        } else {
-            Cli::parse_from(make("search", s))
+        let joined = |toks: &[&String]| -> String {
+            toks.iter().map(|t| t.as_str()).collect::<Vec<_>>().join(" ")
         };
-        let code = run(&cli);
-        std::process::exit(code);
+        if non_flag.len() == 1 {
+            let s = non_flag[0].clone();
+            let p = Path::new(&s);
+            // The `.md`→`info` shortcut is an
+            // *interactive* convenience and — via the CWD-relative `p.exists()`
+            // probe — the only state-dependent branch in this whole entry point.
+            // For the hardened/agent build we drop it so a bare token *always*
+            // routes to `search`: the agent surface is deterministic (agents that
+            // want file details can say `kb info <file>` explicitly). The user
+            // build keeps the shortcut: `kb notes/foo.md` opens that file. We
+            // branch on `VARIANT`, the same "am I the agent build?" switch the
+            // `name`/`version`/`long_about` above already use.
+            let info_like = VARIANT == "user"
+                && p.extension().map(|e| e == "md").unwrap_or(false)
+                && p.exists();
+            let cli = if info_like {
+                Cli::parse_from(make("info", &s))
+            } else {
+                Cli::parse_from(make("search", &s))
+            };
+            let code = run(&cli);
+            std::process::exit(code);
+        } else {
+            // Multiple bare tokens, first not a subcommand → all search terms
+            // (joined with a single space before parsing).
+            let q = joined(&non_flag);
+            let cli = Cli::parse_from(make("search", &q));
+            let code = run(&cli);
+            std::process::exit(code);
+        }
         }
     }
     let cli = Cli::parse();
@@ -711,7 +731,18 @@ pub(crate) fn main() {
 
 pub(crate) fn run(cli: &Cli) -> i32 {
     let res: Kb = match &cli.cmd {
-        Cmd::Toc { file, json } => cmd_toc(file, *json),
+        // Each file-arg verb goes through `resolve_file` so the user (or
+        // agent) can say `kb <verb> <uuid-prefix>` and have it mapped to the
+        // page's abs_path. Path-shaped tokens don't touch the DB. On error
+        // the `Kb` is propagated to the outer `match res` (which prints
+        // `kb: {msg}` with the matching exit code). The `Err(e)` arm here
+        // is already in the right `(String, i32)` shape.
+        Cmd::Toc { file, json } => {
+            match resolve_file(cli.db.as_deref(), file) {
+                Ok(f) => cmd_toc(&f, *json),
+                Err(e) => Err(e),
+            }
+        }
         Cmd::Show {
             file,
             ref_,
@@ -719,8 +750,18 @@ pub(crate) fn run(cli: &Cli) -> i32 {
             full,
             json,
             etag,
-        } => cmd_show(file, ref_.as_deref(), *body, *full, *json, *etag),
-        Cmd::Section { file, op } => cmd_section(cli.db.as_deref(), file, op),
+        } => {
+            match resolve_file(cli.db.as_deref(), file) {
+                Ok(f) => cmd_show(&f, ref_.as_deref(), *body, *full, *json, *etag),
+                Err(e) => Err(e),
+            }
+        }
+        Cmd::Section { file, op } => {
+            match resolve_file(cli.db.as_deref(), file) {
+                Ok(f) => cmd_section(cli.db.as_deref(), &f, op),
+                Err(e) => Err(e),
+            }
+        }
         Cmd::Replace {
             file,
             find,
@@ -728,17 +769,30 @@ pub(crate) fn run(cli: &Cli) -> i32 {
             scope,
             count,
             flags,
-        } => cmd_replace(cli.db.as_deref(), file, find, new, scope.as_deref(), *count, flags),
+        } => {
+            match resolve_file(cli.db.as_deref(), file) {
+                Ok(f) => cmd_replace(cli.db.as_deref(), &f, find, new, scope.as_deref(), *count, flags),
+                Err(e) => Err(e),
+            }
+        }
         Cmd::Patch {
             file,
             patch_file,
             patch_stdin,
             patch_text,
             flags,
-        } => cmd_patch(cli.db.as_deref(), file, patch_file.as_deref(), *patch_stdin, patch_text.as_deref(), flags),
+        } => {
+            match resolve_file(cli.db.as_deref(), file) {
+                Ok(f) => cmd_patch(cli.db.as_deref(), &f, patch_file.as_deref(), *patch_stdin, patch_text.as_deref(), flags),
+                Err(e) => Err(e),
+            }
+        }
         Cmd::Create { filename, args } => cmd_create(cli.db.as_deref(), filename, args),
         Cmd::Verify { file, strict, json } => {
-            cmd_verify(file, *strict, *json, cli.db.as_deref())
+            match resolve_file(cli.db.as_deref(), file) {
+                Ok(f) => cmd_verify(&f, *strict, *json, cli.db.as_deref()),
+                Err(e) => Err(e),
+            }
         }
         // ---- multi-file namespace (M7) ----
         Cmd::Add { path, ext, include_hidden, json } =>
@@ -747,8 +801,13 @@ pub(crate) fn run(cli: &Cli) -> i32 {
         Cmd::DropRoot { path, json } => cmd_drop_root(cli.db.as_deref(), path, *json),
         Cmd::Refresh { full, json } => cmd_refresh(cli.db.as_deref(), *full, *json),
         Cmd::FullRebuild { json } => cmd_refresh(cli.db.as_deref(), true, *json),
-        Cmd::Search { query, json, limit } =>
-            cmd_search(cli.db.as_deref(), query, *json, limit.unwrap_or(20)),
+        Cmd::Search { terms, json, limit } =>
+            cmd_search(
+                cli.db.as_deref(),
+                &terms.join(" "),
+                *json,
+                limit.unwrap_or(20),
+            ),
         Cmd::Browse { path, json } => cmd_browse(cli.db.as_deref(), path.as_deref(), *json),
         Cmd::Tag { tag, json } => cmd_tag(cli.db.as_deref(), tag, *json),
         Cmd::TagAlias { add, canonical, rm, list, export, import, file, json } => cmd_tag_alias(
@@ -766,7 +825,12 @@ pub(crate) fn run(cli: &Cli) -> i32 {
         ),
         Cmd::Links { target, dedup, json } => cmd_links(cli.db.as_deref(), target, *dedup, *json),
         Cmd::Resolve { query, json } => cmd_resolve(cli.db.as_deref(), query, *json),
-        Cmd::Info { path, json } => cmd_info(cli.db.as_deref(), path, *json),
+        Cmd::Info { path, json } => {
+            match resolve_file(cli.db.as_deref(), path) {
+                Ok(f) => cmd_info(cli.db.as_deref(), &f, *json),
+                Err(e) => Err(e),
+            }
+        }
         Cmd::Stats { json } => cmd_stats(cli.db.as_deref(), *json),
         // `tui` only exists when the `tui` feature is on (a hardened build
         // rejects the subcommand at parse time, so this arm is unreachable).
@@ -869,12 +933,13 @@ pub(crate) fn cli_command() -> clap::Command {
         "type:label",
     ];
     // `mut_arg` is consuming (`mut self`), so we hand it an owned clone of
-    // the `search` subcommand, graft the possible-values parser on `query`,
-    // and write the result back. The runtime parse path keeps its free-text
-    // parser (the derive-built `Cli::parse()` instance is untouched).
+    // the `search` subcommand, graft the possible-values parser on `terms`
+    // (the `value_name = "TERM"` positional), and write the result back. The
+    // runtime parse path keeps its free-text parser (the derive-built
+    // `Cli::parse()` instance is untouched).
     *search = search
         .clone()
-        .mut_arg("query", |a| {
+        .mut_arg("terms", |a| {
             a.value_parser(clap::builder::PossibleValuesParser::new(candidates))
         });
     cmd
@@ -944,6 +1009,16 @@ pub(crate) fn open_db(path: Option<&Path>) -> Result<Db, (String, i32)> {
     };
     db.migrate().map_err(|e| (format!("migrate: {e}"), EXIT_ERR))?;
     Ok(db)
+}
+
+/// Resolve a user-supplied file-token (a path, a display id, a short uuid
+/// prefix, or a bare name) to an `abs_path`. Failure is propagated (e.g. an
+/// *ambiguous* uuid prefix — the caller's `?` then exits with EXIT_ERR with
+/// the "extend the prefix" message). Path-shaped tokens (any `/`, `~`, `./`,
+/// bare name) never touch the DB, so single-file verbs against a file that
+/// isn't indexed keep their pure byte-op behaviour.
+fn resolve_file(dbpath: Option<&Path>, tok: &Path) -> Result<PathBuf, (String, i32)> {
+    resolve_file_or_uuid(dbpath, &tok.to_string_lossy())
 }
 
 pub(crate) fn refresh_all(db: &Db, full: bool, json: bool) -> Kb {
@@ -1717,6 +1792,8 @@ mod json_tests {
             links: Some(3),
             refs: Some(vec!["x\ny".into()]),
             description: Some("a \"q\" and a \\ and \u{01}".into()),
+            uuid: String::new(),
+            uuid_short: None,
         };
         let rendered = p.render();
         // -- exact-escape pinning (the byte-for-byte JSON output is the

@@ -68,8 +68,8 @@ have_verus || {
 # outside a `verus!` block — see `kb-core/src/lib.rs`).
 for f in meta_spec.rs fm_spec.rs fm_ops_spec.rs identity_spec.rs \
          tags_spec.rs links_spec.rs graph_spec.rs labels_spec.rs \
-          search_grammar_spec.rs semantics_spec.rs fs_snapshot_spec.rs \
-          section_spec.rs resolve_spec.rs alias_spec.rs; do
+         search_grammar_spec.rs semantics_spec.rs fs_snapshot_spec.rs \
+         section_spec.rs resolve_spec.rs alias_spec.rs uuid_spec.rs; do
   echo "verify.sh: verifying kb-core/spec/$f with z3"
   verus "$HERE/kb-core/spec/$f"
 done

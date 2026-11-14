@@ -224,7 +224,12 @@ impl Db {
     /// `open_in_memory_test` do NOT call it automatically, so the M0
     /// smoke tests (which create their own minimal schema) stay green.
     pub fn migrate(&self) -> Result<()> {
-        migrate::migrate(&self.conn)
+        migrate::migrate(&self.conn)?;
+        // One-time, idempotent: fill `pages.uuid` for rows that predate the
+        // column. No-op (single empty SELECT) once every row carries a uuid,
+        // and again after the first `refresh`/`create` (which populate it).
+        index::backfill_uuid(&self.conn)?;
+        Ok(())
     }
 
     /// The current schema version tag (from `meta.version`), or `None` if

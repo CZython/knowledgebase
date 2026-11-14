@@ -464,6 +464,249 @@ fn search_not_only_is_a_documented_limited_path() {
 }
 
 // ---------------------------------------------------------------------------
+// search — multiple positional terms (M4c)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn search_multiple_positional_terms_are_ands() {
+    let s = Setup::new("search_multi_and");
+    write_page(
+        &s,
+        "wiki/a.md",
+        "type: wiki\ntitle: A\n",
+        "alpha\n",
+    );
+    write_page(
+        &s,
+        "wiki/b.md",
+        "type: wiki\ntitle: B\n",
+        "alpha and beta\n",
+    );
+    write_page(
+        &s,
+        "wiki/c.md",
+        "type: wiki\ntitle: C\n",
+        "beta on its own\n",
+    );
+    add(&s);
+
+    // `kb search alpha beta` — two bare positional terms. The CLI joins with
+    // a single space; the grammar parses `alpha beta` as two AND terms (FTS: `alpha* AND beta*`).
+    // Only B has BOTH (A has alpha only, C has beta only).
+    let (code, out, err) = run(&s, &["search", "alpha", "beta"]);
+    assert_eq!(code, 0, "stderr: {err}");
+    // The rendered row for a hit always contains `rel_path`. B is at
+    // `wiki/b.md`; A is at `wiki/a.md`; C is at `wiki/c.md`.
+    assert!(
+        out.contains("wiki/b.md"),
+        "AND match: B (has both terms) must appear in rows: {out}"
+    );
+    assert!(!out.contains("wiki/a.md"), "A (alpha only) must be excluded: {out}");
+    assert!(!out.contains("wiki/c.md"), "C (beta only) must be excluded: {out}");
+}
+
+#[test]
+fn search_multiple_positional_terms_compose_with_filter() {
+    let s = Setup::new("search_multi_filter");
+    write_page(
+        &s,
+        "wiki/a.md",
+        "type: wiki\ntitle: A\n",
+        "attention mechanism\n",
+    );
+    write_page(
+        &s,
+        "note/b.md",
+        "type: note\ntitle: B\n",
+        "attention span\n",
+    );
+    add(&s);
+
+    // `kb search type:wiki attention` — one filter term + one content term.
+    // Only A is a wiki page. Both match "attention" but only A matches the
+    // filter, so A is the hit.
+    let (code, out, err) = run(&s, &["search", "type:wiki", "attention"]);
+    assert_eq!(code, 0, "stderr: {err}");
+    assert!(
+        out.contains("wiki/a.md"),
+        "filter + content match: A's row (carrying its rel_path) must appear: {out}"
+    );
+    assert!(
+        !out.contains("note/b.md"),
+        "B is a note and must be excluded by the type:wiki filter: {out}"
+    );
+}
+
+#[test]
+fn search_quoted_phrase_stays_a_phrase() {
+    // `kb search "quick brown fox"` — the positional's raw text (as passed to
+    // clap, *not* through a shell) is `"quick brown fox"` with the quotes as
+    // literal bytes. The grammar's tokenizer interprets that as a phrase
+    // whose body is `quick brown fox` — **not** an AND of three separate
+    // words. Phrases require the words to appear consecutively in the doc.
+    let s = Setup::new("search_quoted_phrase");
+    write_page(
+        &s,
+        "wiki/a.md",
+        "type: wiki\ntitle: A\n",
+        "the quick brown fox\n",
+    );
+    // B contains all three words (scattered) but **not** consecutively. If
+    // the grammar parsed the positional as three AND-terms, B would match.
+    // With the phrase clause it must be excluded.
+    write_page(
+        &s,
+        "wiki/b.md",
+        "type: wiki\ntitle: B\n",
+        "quick then brown then fox, separated by other words\n",
+    );
+    add(&s);
+
+    let (code, out, err) = run(&s, &["search", "\"quick brown fox\""]);
+    assert_eq!(code, 0, "stderr: {err}");
+    assert!(
+        out.contains("wiki/a.md"),
+        "A (has the 3-gram) should appear: {out}"
+    );
+    assert!(
+        !out.contains("wiki/b.md"),
+        "B has the words scattered — must be excluded (phrase clause, not AND): {out}"
+    );
+}
+
+#[test]
+fn search_not_term_as_a_positional() {
+    // `kb search alpha -beta` — the second positional is a **NOT term**
+    // (a `-`-prefixed bare word). A has alpha (not beta) → hit; B has beta
+    // → excluded. The `--` separator stops clap from treating the leading
+    // dash as a flag, so `-beta` reaches the query string verbatim.
+    let s = Setup::new("search_pos_not");
+    write_page(&s, "a.md", "type: note\ntitle: Alpha\n", "alpha\n");
+    write_page(&s, "b.md", "type: note\ntitle: Beta\n", "beta\n");
+    add(&s);
+
+    let (code, out, err) = run(&s, &["search", "alpha", "--", "-beta"]);
+    assert_eq!(code, 0, "stderr: {err}");
+    assert!(
+        out.contains("a.md"),
+        "Alpha (alpha, not beta) must be returned: {out}"
+    );
+    assert!(
+        !out.contains("b.md"),
+        "Beta (contains beta) must be excluded: {out}"
+    );
+}
+
+#[test]
+fn search_two_or_group_terms() {
+    // `kb search ~alpha ~beta` — both positionals start with `~`, so they land
+    // in the SAME OR-group: `(alpha* OR beta*)`. A has alpha, B has beta →
+    // both hit; C has neither → excluded.
+    let s = Setup::new("search_multi_or");
+    write_page(&s, "a.md", "type: note\ntitle: Alpha\n", "alpha\n");
+    write_page(&s, "b.md", "type: note\ntitle: Beta\n", "beta\n");
+    write_page(&s, "c.md", "type: note\ntitle: Gamma\n", "neither\n");
+    add(&s);
+
+    let (code, out, err) = run(&s, &["search", "~alpha", "~beta"]);
+    assert_eq!(code, 0, "stderr: {err}");
+    assert!(
+        out.contains("Alpha") && out.contains("Beta"),
+        "OR-group hit: A (alpha) and B (beta) should both appear: {out}"
+    );
+    assert!(
+        !out.contains("Gamma"),
+        "C (neither alpha nor beta) must be excluded: {out}"
+    );
+}
+
+#[test]
+fn search_multiple_term_limit_respected() {
+    let s = Setup::new("search_multi_limit");
+    write_page(&s, "a.md", "type: note\ntitle: A\n", "alpha\n");
+    write_page(&s, "b.md", "type: note\ntitle: B\n", "alpha\n");
+    write_page(&s, "c.md", "type: note\ntitle: C\n", "alpha\n");
+    add(&s);
+
+    // `kb search alpha --limit 2` — at most 2 results, but all 3 match.
+    let (code, out, err) = run(&s, &["search", "alpha", "--limit", "2"]);
+    assert_eq!(code, 0, "stderr: {err}");
+    assert!(
+        out.contains("2 result(s)"),
+        "limit 2 should cap the footer to 2: {out}"
+    );
+    // Two of the three rel_paths must appear; the third must NOT.
+    let matches = ["a.md", "b.md", "c.md"]
+        .into_iter()
+        .filter(|t| out.contains(t))
+        .count();
+    assert_eq!(
+        matches, 2,
+        "limit 2 should render exactly 2 page rows:\n{out}"
+    );
+}
+
+#[test]
+fn search_single_bare_term_unchanged() {
+    // Regression pin: a **single**-position search (`kb search <term>`)
+    // must still work — the multi-term surface **strictly extends** (not
+    // replaces) the legacy one-positional invocation.
+    let s = Setup::new("search_single_pin");
+    write_page(&s, "a.md", "type: note\ntitle: Alpha\n", "alpha\n");
+    add(&s);
+
+    let (code, out, err) = run(&s, &["search", "alpha"]);
+    assert_eq!(code, 0, "stderr: {err}");
+    assert!(
+        out.contains("a.md") || out.contains("Alpha"),
+        "single-term search hit: {out}"
+    );
+}
+
+#[test]
+fn browse_row_contains_valid_uuid_short_prefix() {
+    // `kb browse` human output must include a 5–16 hex token (uuid_short)
+    // that is a **prefix** of the full uuid emitted in the JSON view. This
+    // pins the "shortest-qualifying-prefix display" contract to the browse
+    // surface as well.
+    let s = Setup::new("browse_uuid_short");
+    write_page(&s, "wiki/a.md", "type: wiki\ntitle: A\n", "alpha\n");
+    add(&s);
+
+    // Get the full uuid from the JSON view.
+    let (code, out_json, err) = run(&s, &["browse", "--json"]);
+    assert_eq!(code, 0, "stderr: {err}");
+    // The JSON rows carry the full 16-char hex uuid.
+    let full_uuid: String = out_json
+        .split('"')
+        .find(|tok| tok.len() == 16 && tok.chars().all(|c| c.is_ascii_hexdigit()))
+        .map(str::to_string)
+        .expect("expected a 16-hex uuid token in browse --json output: {out_json}");
+
+    // Get the human view and extract the uuid_short column.
+    let (code, out_human, err) = run_bare(&s, &["browse"]);
+    assert_eq!(code, 0, "stderr: {err}");
+    // The human row format is:
+    //   {n:>3}  {uuid_short:<10} {id}  {title}  ...
+    // uuid_short is the 2nd whitespace-delimited field (index 1).
+    let uuid_short: String = out_human
+        .lines()
+        .flat_map(|l| l.split_whitespace())
+        .find(|t| {
+            t.len() >= 5
+                && t.len() <= 16
+                && t.chars().all(|c| c.is_ascii_hexdigit())
+        })
+        .expect("expected a 5-16 hex token in browse human output: {out_human}")
+        .to_string();
+
+    assert!(
+        full_uuid.starts_with(uuid_short.as_str()),
+        "uuid_short `{uuid_short}` must be a prefix of the full uuid `{full_uuid}`"
+    );
+}
+
+// ---------------------------------------------------------------------------
 // browse
 // ---------------------------------------------------------------------------
 

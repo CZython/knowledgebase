@@ -7,6 +7,36 @@ the API is still moving; breaking changes are called out explicitly.
 ## [Unreleased]
 
 ### Added
+- **UUID-based page resolution (M1–M7).** Every indexed page now has a stable
+  64-bit identity: FNV-1a 64 over `id \0 abs_path`. The full 16-hex uuid is
+  emitted on every page-arg surface (`search` / `browse` / `tag` / `verify` /
+  `info` / `links` / `resolve`) and accepted as a page reference by every
+  page-arg verb. A **shortest-qualifying prefix** (`uuid_short`, 5–16 hex) is
+  computed against the live corpus (`kb-core/src/uuid.rs`, `shortest_qualifying`)
+  so `1d58e` is a valid stand-in for the full token wherever it is unique. The
+  human `search` / `browse` render now leads with the uuid column, and the
+  `browse` row gained uuid_short; both renderers share one `print_page` helper
+  (`kb/cli/mod.rs`) so the layout can no longer drift. Resolving a uuid (short
+  or full) is exact and unambiguous, distinct from the slug/substring path
+  that still emits the ambiguity list. Backfill: `kb-db` adds the `uuid` column
+  and a partial index, backfilled on first open. Verified: 23 new `kb-core`
+  lemmas (FNV determinism, prefix-qualifying monotonicity, FLOOR/CEILING
+  bounds), `kb-user::m3_uuid_resolver` (short + full round-trips, ambiguity),
+  `m7_multifile::browse_row_contains_valid_uuid_short_prefix` (short is a
+  corpus-unique prefix of the full token).
+- **`kb search` accepts multiple positional terms (M4c).** The single `QUERY`
+  positional is now `TERM…` (`num_args = 1..`), all flags first
+  (`--db` / `--json` / `--limit`) then the terms. Each positional keeps its raw
+  form (bare word, `~` OR-term, `-` NOT-term, `key:value` filter, or `"quoted
+  phrase"`), joined with a single space, then parsed by the existing grammar —
+  so `kb search type:note hello` ≡ `kb search "type:note hello"`, and a
+  multi-word clause is still shell-quoted. A bare search with two or more
+  non-flag tokens (the "search …" bare-string dispatch) also joins them. Pins:
+  `m7_multifile::search_multiple_positional_terms_are_ands`,
+  `…_compose_with_filter`, `search_two_or_group_terms`,
+  `search_not_term_as_a_positional`, `search_quoted_phrase_stays_a_phrase`,
+  `search_multiple_terms_respect_limit_flag`, and the single-term regression
+  `search_single_bare_term_unchanged`.
 - **`kb info` now reports a `wc` object (word-count) of the page.** A single
   shared `text_wc` helper (`kb/cli/mod.rs`) — so `info` / `show` / `toc` can
   never drift — computes `(lines, chars, words)` over the page's whole file

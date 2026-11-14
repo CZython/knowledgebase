@@ -50,11 +50,12 @@ CREATE TABLE IF NOT EXISTS pages (
   search_required_phrase TEXT,
   frontmatter_text TEXT,
   body             TEXT,
-  mtime_ns         INTEGER NOT NULL,
-  content_hash     TEXT NOT NULL,
-  created_at       TEXT,
-  updated_at       TEXT,
-  PRIMARY KEY (abs_path)
+   mtime_ns         INTEGER NOT NULL,
+   content_hash     TEXT NOT NULL,
+   uuid             TEXT,    -- stable page-identity token (16-hex, etag_of(id\0abs_path)); indexed, prefix-matchable
+   created_at       TEXT,
+   updated_at       TEXT,
+   PRIMARY KEY (abs_path)
 );
 CREATE INDEX IF NOT EXISTS idx_pages_id  ON pages(id);
 CREATE INDEX IF NOT EXISTS idx_pages_type     ON pages(type);
@@ -123,6 +124,16 @@ const FTS_INDEX_SQL: &str = "\
 CREATE INDEX IF NOT EXISTS idx_pages_fts ON pages
   USING fts (title, description, body, frontmatter_text);";
 
+/// The `pages`-column-backed *B-tree* indexes that must be created only
+/// **after** [`reconcile_pages_columns`] has guaranteed their columns exist.
+/// `idx_pages_fts` (FTS) and `idx_pages_id` are safe pre-reconcile (their
+/// columns ship with the DDL); but `idx_pages_uuid` indexes a column that
+/// only *pre-existing* (pre-uuid) `pages` tables gain via the reconcile —
+/// so it must run later, or Turso fails with
+/// `invalid expression in CREATE INDEX: uuid`.
+const POST_RECONCILE_INDEXES_SQL: &str = "\
+CREATE INDEX IF NOT EXISTS idx_pages_uuid ON pages(uuid);";
+
 /// The `pages` columns the schema guarantees to exist. `migrate` reconciles
 /// a *pre-existing* `pages` table to this column set. `CREATE TABLE
 /// IF NOT EXISTS` only creates the table when it's absent — it never touches
@@ -146,6 +157,7 @@ const PAGES_COLUMNS: &[&str] = &[
     "body",
     "mtime_ns",
     "content_hash",
+    "uuid",
     "created_at",
     "updated_at",
 ];
@@ -222,6 +234,7 @@ fn reconcile_pages_columns(conn: &Connection) -> Result<()> {
 pub fn migrate(conn: &Connection) -> Result<()> {
     conn.execute_batch(SCHEMA_SQL)?;
     reconcile_pages_columns(conn)?;
+    conn.execute_batch(POST_RECONCILE_INDEXES_SQL)?;
     conn.execute_batch(FTS_INDEX_SQL)?;
     conn.execute(
         "INSERT INTO meta(key, value) VALUES ('version', ?1)

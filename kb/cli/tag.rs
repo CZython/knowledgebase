@@ -1,5 +1,9 @@
 use crate::*;
 
+/// One row of the `tag` query: (abs_path, id, type, title?, root, rel_path,
+/// uuid?). Named so the 7-tuple doesn't trip `clippy::type_complexity`.
+type TagPage = (String, String, String, Option<String>, String, String, Option<String>);
+
 pub(crate) fn cmd_tag(dbpath: Option<&Path>, tag: &str, json: bool) -> Kb {
     let db = open_db(dbpath)?;
 
@@ -44,7 +48,7 @@ pub(crate) fn cmd_tag(dbpath: Option<&Path>, tag: &str, json: bool) -> Kb {
         .collect();
 
     let sql = format!(
-        "SELECT pages.abs_path, pages.id, pages.type, pages.title, pages.root, pages.rel_path\n\
+        "SELECT pages.abs_path, pages.id, pages.type, pages.title, pages.root, pages.rel_path, pages.uuid\n\
          FROM pages\n\
          JOIN page_tags pt ON pt.abs_path = pages.abs_path\n\
          WHERE lower(pt.tag) IN ({})\n\
@@ -54,7 +58,7 @@ pub(crate) fn cmd_tag(dbpath: Option<&Path>, tag: &str, json: bool) -> Kb {
 
     let stmt = db.conn.prepare(&sql)
         .map_err(|e| (format!("prepare tag query: {e}"), EXIT_ERR))?;
-    let pages: Vec<(String, String, String, Option<String>, String, String)> = stmt
+    let pages: Vec<TagPage> = stmt
         .query_map((), |r| {
             Ok((
                 r.get::<_, String>(0)?,
@@ -63,6 +67,7 @@ pub(crate) fn cmd_tag(dbpath: Option<&Path>, tag: &str, json: bool) -> Kb {
                 r.get::<_, Option<String>>(3)?,
                 r.get::<_, String>(4)?,
                 r.get::<_, String>(5)?,
+                r.get::<_, Option<String>>(6)?,
             ))
         })
         .map_err(|e| (format!("tag query: {e}"), EXIT_ERR))?
@@ -79,15 +84,22 @@ pub(crate) fn cmd_tag(dbpath: Option<&Path>, tag: &str, json: bool) -> Kb {
             return Ok(EXIT_OK);
         }
         let mut items = Vec::new();
-        for (abs_path, id, pt, title, _root, rel_path) in pages.iter() {
+        for (abs_path, id, pt, title, _root, rel_path, uuid_opt) in pages.iter() {
             let tags: Vec<String> = page_tags_str(&db, abs_path).split(',')
                 .filter(|s| !s.trim().is_empty()).map(|s| s.trim().to_string()).collect();
             let refs = if pt == "label" { Some(label_expand(&db, abs_path)) } else { None };
+            let uuid = uuid_opt.clone().unwrap_or_default();
+            let uuid_short = if uuid.is_empty() {
+                None
+            } else {
+                Some(uuid_short_for(&db, &uuid, abs_path).unwrap_or_default())
+            };
             let gj = PageJson {
                 id: id.clone(), pt: pt.clone(),
                 title: title.clone(), abs: abs_path.clone(), rel: rel_path.clone(),
                 tags, gates: String::new(),
                 links: None, refs, description: None,
+                uuid, uuid_short,
             };
             items.push(gj.render());
         }
@@ -100,7 +112,7 @@ pub(crate) fn cmd_tag(dbpath: Option<&Path>, tag: &str, json: bool) -> Kb {
         return Ok(EXIT_OK);
     }
 
-    for (i, (abs_path, id, pt, title, _root, rel_path)) in pages.iter().enumerate() {
+    for (i, (abs_path, id, pt, title, _root, rel_path, _uuid)) in pages.iter().enumerate() {
         let tags = page_tags_str(&db, abs_path);
         let mut line = format!("{:>3}  {:<24} {}", i + 1, id, title.as_deref().unwrap_or(""));
         if !rel_path.is_empty() {

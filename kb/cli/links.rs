@@ -1,11 +1,15 @@
 use crate::*;
 
 /// Look up the page we are about to inspect from `kb links <TARGET>`.
-/// Three input shapes are accepted (A2 extraction from `cmd_links`):
+/// Four input shapes are accepted (A2 extraction from `cmd_links`):
 ///
 ///   * an absolute path — used verbatim
 ///   * a display id (`wiki:slug`, `label:slug`, `note:slug`) — looked up
 ///     through `pages.id`
+///   * a **uuid token** (5–16 hex) — looked up through the `pages.uuid`
+///     index (`WHERE uuid LIKE ? '%' LIMIT 2`). A full 16-hex token is always
+///     unique; a short token may be 0/1/≥2 — 0 and ≥2 are surfaced as
+///     "no page found" and "ambiguous (extend the prefix)", respectively.
 ///   * a relative / partial path — matched by exact or by `LIKE '%target'`
 ///     (trailing-fragment lookup, mirroring the old `OR abs_path LIKE` clause)
 fn resolve_target_path(
@@ -23,6 +27,26 @@ fn resolve_target_path(
             .query_row(rusqlite::params![target], |r| r.get::<_, String>(0))
             .optional()
             .map_err(|e| (format!("id lookup: {e}"), EXIT_ERR));
+    }
+    if kb_core::uuid::is_uuid_token(target) {
+        let like = format!("{target}%");
+        let rows: Vec<String> = {
+            let stmt = db.conn
+                .prepare("SELECT abs_path FROM pages WHERE uuid LIKE ?1 LIMIT 2")
+                .map_err(|e| (format!("prepare uuid lookup: {e}"), EXIT_ERR))?;
+            stmt.query_map(rusqlite::params![like], |r| r.get::<_, String>(0))
+                .map_err(|e| (format!("uuid lookup rows: {e}"), EXIT_ERR))?
+                .collect::<Result<Vec<_>, _>>()
+                .map_err(|e| (format!("uuid lookup rows: {e}"), EXIT_ERR))?
+        };
+        return match rows.len() {
+            1 => Ok(Some(rows.into_iter().next().unwrap())),
+            0 => Ok(None),
+            n => Err((
+                format!("uuid prefix {target} is ambiguous ({n} pages) — extend the prefix"),
+                EXIT_ERR,
+            )),
+        };
     }
     let stmt = db.conn
         .prepare("SELECT abs_path FROM pages WHERE abs_path = ?1 OR abs_path LIKE '%' || ?1")
@@ -327,6 +351,67 @@ fn render_links(
 
 pub(crate) fn cmd_resolve(dbpath: Option<&Path>, query: &str, json: bool) -> Kb {
     let db = open_db(dbpath)?;
+    // A hex uuid token (5–16) is unambiguous by definition: it resolves
+    // through the `uuid` index, not the slug/slug-substring resolver. Short-
+    // circuit here so `kb resolve <uuid>` behaves the same as
+    // `kb resolve <type:slug>` — one row, one page. 0 rows / ≥2 rows are
+    // surfaced exactly like the resolver's Empty / Candidates arms (the
+    // ≥2 arm is the "ambiguous — extend the prefix" error).
+    if kb_core::uuid::is_uuid_token(query) {
+        let like = format!("{query}%");
+        let rows: Vec<String> = {
+            let stmt = db
+                .conn
+                .prepare("SELECT abs_path FROM pages WHERE uuid LIKE ?1 LIMIT 2")
+                .map_err(|e| (format!("prepare uuid probe: {e}"), EXIT_ERR))?;
+            stmt.query_map(rusqlite::params![like], |r| r.get::<_, String>(0))
+                .map_err(|e| (format!("uuid probe rows: {e}"), EXIT_ERR))?
+                .collect::<Result<Vec<_>, _>>()
+                .map_err(|e| (format!("uuid probe rows: {e}"), EXIT_ERR))?
+        };
+        return match rows.len() {
+            1 => {
+                let abs = rows.into_iter().next().unwrap();
+                let id = db
+                    .conn
+                    .query_row(
+                        "SELECT id FROM pages WHERE abs_path = ?1",
+                        rusqlite::params![abs.clone()],
+                        |r| r.get::<_, String>(0),
+                    )
+                    .unwrap_or_else(|_| abs.clone());
+                if json {
+                    let mut o = JObject::new();
+                    o.s("query", query);
+                    o.s("outcome", "unique");
+                    let mut c = JObject::new();
+                    c.s("id", &id);
+                    c.s("abs_path", &abs);
+                    o.raw("candidates", block_array(&[c.render_compact()]));
+                    println!("{}", o.render_compact());
+                } else {
+                    println!("1  {id}  {}   [resolved via uuid]", abs);
+                }
+                return Ok(EXIT_OK);
+            }
+            0 => {
+                if json {
+                    let mut o = JObject::new();
+                    o.s("query", query);
+                    o.s("outcome", "empty");
+                    o.raw("candidates", block_array(&[]));
+                    println!("{}", o.render_compact());
+                } else {
+                    println!("no page matches {query:?}");
+                }
+                return Ok(EXIT_OK);
+            }
+            n => Err((
+                format!("uuid prefix {query} is ambiguous ({n} pages) — extend the prefix"),
+                EXIT_ERR,
+            )),
+        };
+    }
     let pages = load_corpus(&db)?;
     let outcome = resolver::resolve(query, &pages);
     // Map each resolved `abs_path` back to its page so we can render the

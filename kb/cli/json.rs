@@ -154,12 +154,30 @@ pub(crate) struct PageJson {
     pub(crate) refs: Option<Vec<String>>,
     /// `None` = omit (`browse`/`tag` do not show the description; `info` does).
     pub(crate) description: Option<String>,
+    /// The page's stored full uuid (16 hex, `pages.uuid`; `uuid_of(id, abs_path)`).
+    /// Emitted as `uuid` so an agent can paste the exact token back.
+    pub(crate) uuid: String,
+    /// The shortest unique prefix of `uuid` (≥5, ≤16 hex), computed by the
+    /// caller with `uuid_short_for(db, uuid, abs)`. Emitted as `uuid_short`.
+    /// `None` = omit (e.g. the row had no stored uuid yet, pre-backfill).
+    pub(crate) uuid_short: Option<String>,
 }
 
 impl PageJson {
     pub(crate) fn render(&self) -> String {
         let mut o = JObject::new();
         o.s("id", &self.id);
+        // The stable page-uuid — stored (see `kb-db::index::upsert_page`), not
+        // derived — emitted as the full 16-hex token. The `uuid_short` field
+        // is its shortest-unique prefix (computed by the caller, which has a
+        // live DB). Emitted here once so browse / tag / info / search all
+        // carry the token uniformly.
+        if !self.uuid.is_empty() {
+            o.s("uuid", &self.uuid);
+        }
+        if let Some(short) = &self.uuid_short {
+            o.s("uuid_short", short);
+        }
         o.s("type", &self.pt);
         if !self.title.as_deref().unwrap_or("").is_empty() {
             o.s("title", self.title.as_deref().unwrap_or(""));
