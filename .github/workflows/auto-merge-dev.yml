@@ -134,3 +134,16 @@ jobs:
             cat /tmp/merge_out.json
             exit 1
           fi
+
+          # Post-merge: delete the head branch (it has served its purpose).
+          # `git push :branch` over the token-HTTPS URL is the reproducible
+          # form (the REST /git/ref delete 404'd in earlier probing).
+          # Non-fatal — cleanup should not mask a successful merge.
+          head_ref=$(curl -fsS "${auth[@]}" "$API/pulls/$PR_NUM" | \
+            python3 -c 'import json,sys;print(json.load(sys.stdin)["head"]["ref"])')
+          if git push "https://x-access-token:${TOKEN}@github.com/${REPO}.git" \
+                ":refs/heads/$head_ref" 2>&1; then
+            echo "deleted head branch $head_ref ✓"
+          else
+            echo "note: head branch $head_ref left in place (already gone or no delete perm)"
+          fi
