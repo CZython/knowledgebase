@@ -1,0 +1,92 @@
+# ---------------------------------------------------------------------------
+# auto-merge (dev)
+#
+# Policy: any PR targeting `dev` is rebase-merged as soon as every required
+# CI job (build-and-test, linux-musl, verus-verify) has completed green.
+#
+#   - `main` is deliberately NOT covered: it still requires your approval +
+#     code-owner sign-off before the merge button works.
+#   - Merge method is `rebase` (merge_method: "rebase"), so `dev` stays a
+#     clean line with no merge commits.
+#   - Runs on `pull_request_target`: the runner executes on the base branch,
+#     and only uses the PR's head SHA for read-only checks + one merge call,
+#     so it's safe with untrusted PR head code and needs no secrets.
+#   - `workflow_dispatch` lets you re-evaluate any open PR manually
+#     (e.g. after re-running failed checks).
+# ---------------------------------------------------------------------------
+name: auto-merge (dev)
+
+on:
+  pull_request_target:
+    branches: [ dev ]
+    types: [ opened, synchronize, reopened ]
+  workflow_dispatch:
+    inputs:
+      pr_number:
+        description: "PR number to evaluate for auto-merge"
+        type: string
+        required: true
+
+permissions:
+  checks: read
+  pull-requests: write
+  contents: read
+
+jobs:
+  merge-if-green:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Wait for all checks green, then rebase-merge
+        env:
+          REPO: ${{ github.repository }}
+          TOKEN: ${{ github.token }}
+          PR_NUM: ${{ github.event.inputs.pr_number || github.event.pull_request.number }}
+        # Poll for up to 45 minutes. Exits 0 on merge (or already merged),
+        # non-zero on red checks, unmergeable PR, or timeout.
+        timeout-minutes: 45
+        run: |
+          set -euo pipefail
+          API="https://api.github.com/repos/$REPO"
+          auth=(-H "Authorization: Bearer $TOKEN" -H "Accept: application/vnd.github+json")
+
+          echo "evaluating PR #$PR_NUM on $REPO"
+          head_sha=$(curl -fsS "${auth[@]}" "$API/pulls/$PR_NUM" | python3 -c "import json,sys;print(json.load(sys.stdin)['head']['sha'])")
+          echo "head sha: $head_sha"
+
+          # Require >=3 check runs so we never merge on "zero checks known yet"
+          # (ci.yml defines exactly build-and-test, linux-musl, verus-verify).
+          required_min_checks=3
+
+          deadline=$(( $(date +%s) + 45 * 60 ))
+          while :; do
+            if (( $(date +%s) > deadline )); then
+              echo "::error::timeout waiting for checks on PR #$PR_NUM; not merging."
+              exit 1
+            fi
+
+            already_merged=$(curl -fsS "${auth[@]}" "$API/pulls/$PR_NUM" | python3 -c "import json,sys;print(json.load(sys.stdin)['merged'])")
+            if [[ "$already_merged" == "True" ]]; then
+              echo "PR #$PR_NUM already merged — nothing to do."
+              exit 0
+            fi
+
+            read -r total pending bad <<<"$(curl -fsS "${auth[@]}" "$API/commits/$head_sha/check-runs" | python3 -c 'import json,sys; runs=json.load(sys.stdin)["check_runs"]; pending=sum(1 for r in runs if r["status"]!="completed"); bad=sum(1 for r in runs if r["status"]=="completed" and r["conclusion"] not in ("success","skipped","neutral")); print(len(runs), pending, bad)')"
+
+            if (( total >= required_min_checks && pending == 0 && bad == 0 )); then
+              echo "all $total checks green (required >= $required_min_checks) — rebase-merging PR #$PR_NUM"
+              code=$(curl -sS -o /tmp/merge_out.json -w '%{http_code}' "${auth[@]}" \
+                -X PUT -H "Content-Type: application/json" \
+                --data '{"merge_method": "rebase"}' \
+                "$API/pulls/$PR_NUM/merge")
+              if [[ "$code" == "201" ]]; then
+                echo "merged ✓"
+                exit 0
+              fi
+              echo "::error::merge API returned $code:"
+              cat /tmp/merge_out.json
+              exit 1
+            fi
+
+            echo "$total checks known: $pending pending, $bad failed — sleeping 30s"
+            sleep 30
+          done
