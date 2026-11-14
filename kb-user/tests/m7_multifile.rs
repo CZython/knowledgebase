@@ -470,12 +470,7 @@ fn search_not_only_is_a_documented_limited_path() {
 #[test]
 fn search_multiple_positional_terms_are_ands() {
     let s = Setup::new("search_multi_and");
-    write_page(
-        &s,
-        "wiki/a.md",
-        "type: wiki\ntitle: A\n",
-        "alpha\n",
-    );
+    write_page(&s, "wiki/a.md", "type: wiki\ntitle: A\n", "alpha\n");
     write_page(
         &s,
         "wiki/b.md",
@@ -501,8 +496,14 @@ fn search_multiple_positional_terms_are_ands() {
         out.contains("wiki/b.md"),
         "AND match: B (has both terms) must appear in rows: {out}"
     );
-    assert!(!out.contains("wiki/a.md"), "A (alpha only) must be excluded: {out}");
-    assert!(!out.contains("wiki/c.md"), "C (beta only) must be excluded: {out}");
+    assert!(
+        !out.contains("wiki/a.md"),
+        "A (alpha only) must be excluded: {out}"
+    );
+    assert!(
+        !out.contains("wiki/c.md"),
+        "C (beta only) must be excluded: {out}"
+    );
 }
 
 #[test]
@@ -692,11 +693,7 @@ fn browse_row_contains_valid_uuid_short_prefix() {
     let uuid_short: String = out_human
         .lines()
         .flat_map(|l| l.split_whitespace())
-        .find(|t| {
-            t.len() >= 5
-                && t.len() <= 16
-                && t.chars().all(|c| c.is_ascii_hexdigit())
-        })
+        .find(|t| t.len() >= 5 && t.len() <= 16 && t.chars().all(|c| c.is_ascii_hexdigit()))
         .expect("expected a 5-16 hex token in browse human output: {out_human}")
         .to_string();
 

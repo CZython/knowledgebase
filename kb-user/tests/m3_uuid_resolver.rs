@@ -31,11 +31,7 @@ struct Setup {
 
 impl Setup {
     fn new(tag: &str) -> Self {
-        let base = std::env::temp_dir().join(format!(
-            "kb_uuid_{}_{}",
-            std::process::id(),
-            tag
-        ));
+        let base = std::env::temp_dir().join(format!("kb_uuid_{}_{}", std::process::id(), tag));
         let root = base.join("root");
         let _ = fs::remove_dir_all(&root);
         fs::create_dir_all(&root).unwrap();
@@ -110,11 +106,20 @@ fn same_type_slug_in_two_folders_distinct_uuids_both_resolvable() {
     let ua = full_uuid(&s, &a_abs);
     let ub = full_uuid(&s, &b_abs);
 
-    assert_ne!(ua, ub, "salt (abs_path) must distinguish same-type:slug pages");
+    assert_ne!(
+        ua, ub,
+        "salt (abs_path) must distinguish same-type:slug pages"
+    );
     assert_eq!(ua.len(), 16, "FNV-1a 64 is 16 hex, got {ua}");
     assert_eq!(ub.len(), 16);
-    assert!(ua.chars().all(|c| c.is_ascii_hexdigit()), "uuid must be hex");
-    assert!(ub.chars().all(|c| c.is_ascii_hexdigit()), "uuid must be hex");
+    assert!(
+        ua.chars().all(|c| c.is_ascii_hexdigit()),
+        "uuid must be hex"
+    );
+    assert!(
+        ub.chars().all(|c| c.is_ascii_hexdigit()),
+        "uuid must be hex"
+    );
 
     // Each full uuid must resolve to *its own* page.
     let (code, out, err) = run(&s, &["info", &ua, "--json"]);
@@ -218,7 +223,10 @@ fn resolve_by_full_uuid_is_unique() {
 
     let (code, out, err) = run(&s, &["resolve", &uuid_a, "--json"]);
     assert_eq!(code, 0, "resolve {uuid_a} failed: {err}");
-    assert!(out.contains("\"unique\""), "resolve by full uuid must be unique: {out}");
+    assert!(
+        out.contains("\"unique\""),
+        "resolve by full uuid must be unique: {out}"
+    );
     assert!(
         out.contains(&a_abs),
         "resolve by full uuid must contain {a_abs}\ngot: {out}"
@@ -279,16 +287,31 @@ fn path_with_slash_is_never_a_hex_token() {
     let s = Setup::new("slash_path");
     // A file whose *filename* is all-hex — easy to confuse with a uuid token
     // if we (wrongly) dropped the path-signal test.
-    write_page(&s, "sub/abcdef012345.md", "type: wiki\ntitle: Hexish\n", "Hexish name\n");
+    write_page(
+        &s,
+        "sub/abcdef012345.md",
+        "type: wiki\ntitle: Hexish\n",
+        "Hexish name\n",
+    );
     let (code, _out, err) = add(&s);
     assert_eq!(code, 0, "add failed: {err}");
-    let abs = s.root.join("sub/abcdef012345.md").to_string_lossy().to_string();
+    let abs = s
+        .root
+        .join("sub/abcdef012345.md")
+        .to_string_lossy()
+        .to_string();
 
     // `kb info <abs>` should work (the path branch takes it verbatim).
     let (code, out, err) = run(&s, &["info", &abs, "--json"]);
     assert_eq!(code, 0, "info by path failed: {err}");
-    assert!(out.contains(&abs), "info by path should echo the path: {out}");
-    assert!(out.contains("\"Hexish\""), "info by path should show title: {out}");
+    assert!(
+        out.contains(&abs),
+        "info by path should echo the path: {out}"
+    );
+    assert!(
+        out.contains("\"Hexish\""),
+        "info by path should show title: {out}"
+    );
 }
 
 // ---- 8 — both search and info emit uuid + uuid_short -----------------
@@ -309,17 +332,18 @@ fn search_and_info_emit_uuid_and_uuid_short() {
     // `info <path> --json` must carry `uuid` (16 hex) and `uuid_short` (5..=16).
     let (code, out, err) = run(&s, &["info", &abs, "--json"]);
     assert_eq!(code, 0, "info failed: {err}");
-    assert!(out.contains("\"uuid\": "), "info JSON must carry uuid: {out}");
+    assert!(
+        out.contains("\"uuid\": "),
+        "info JSON must carry uuid: {out}"
+    );
     assert!(
         out.contains("\"uuid_short\": "),
         "info JSON must carry uuid_short: {out}"
     );
     // Extract the uuid_short and confirm it's a valid hex prefix of the full.
     let full = full_uuid(&s, &abs);
-    let start = out
-        .find("\"uuid_short\": \"")
-        .expect("no uuid_short field")
-        + "\"uuid_short\": \"".len();
+    let start =
+        out.find("\"uuid_short\": \"").expect("no uuid_short field") + "\"uuid_short\": \"".len();
     let end = out[start..].find('"').unwrap();
     let short = out[start..start + end].to_string();
     assert!(
@@ -331,7 +355,10 @@ fn search_and_info_emit_uuid_and_uuid_short() {
         full.starts_with(&short),
         "uuid_short ({short}) must be a prefix of uuid ({full})"
     );
-    assert!(short.chars().all(|c| c.is_ascii_hexdigit()), "uuid_short must be hex: {short}");
+    assert!(
+        short.chars().all(|c| c.is_ascii_hexdigit()),
+        "uuid_short must be hex: {short}"
+    );
 
     // `search` over the same phrase must also carry both fields. `search`
     // emits compact JSON (`"uuid":"…"`, no space), unlike the pretty form

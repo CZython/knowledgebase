@@ -494,13 +494,14 @@ pub fn backfill_uuid(conn: &crate::sql::Connection) -> Result<usize> {
              LIMIT ?1",
         )?;
         let batch: Vec<(String, String)> = stmt
-            .query_map(params![BATCH], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))?
+            .query_map(params![BATCH], |r| {
+                Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
+            })?
             .collect::<Result<Vec<_>>>()?;
         if batch.is_empty() {
             break;
         }
-        let up = conn
-            .prepare_cached("UPDATE pages SET uuid = ?1 WHERE abs_path = ?2")?;
+        let up = conn.prepare_cached("UPDATE pages SET uuid = ?1 WHERE abs_path = ?2")?;
         for (abs, id) in batch {
             let u = kb_core::uuid::uuid_of(&id, &abs);
             up.execute(params![u, abs])?;
@@ -763,9 +764,20 @@ mod tests {
         };
         let expected_a = kb_core::uuid::uuid_of("note:alpha", "/r/a.md");
         let expected_o = kb_core::uuid::uuid_of("note:alpha", "/other/a.md");
-        assert_ne!(&expected_a, &expected_o, "salt (abs_path) must distinguish them");
-        assert_eq!(uuid_for("/r/a.md"), expected_a, "row /r/a.md must carry its own salted uuid");
-        assert_eq!(uuid_for("/other/a.md"), expected_o, "row /other/a.md must carry its own salted uuid");
+        assert_ne!(
+            &expected_a, &expected_o,
+            "salt (abs_path) must distinguish them"
+        );
+        assert_eq!(
+            uuid_for("/r/a.md"),
+            expected_a,
+            "row /r/a.md must carry its own salted uuid"
+        );
+        assert_eq!(
+            uuid_for("/other/a.md"),
+            expected_o,
+            "row /other/a.md must carry its own salted uuid"
+        );
 
         // Idempotent: a re-run finds no sentinel rows at all (both already set).
         let again = backfill_uuid(&conn).unwrap();

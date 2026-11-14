@@ -383,7 +383,9 @@ fn resolve_info_links_json() {
             );
         }
         assert!(
-            out.contains("\"lines\":5") && out.contains("\"chars\":46") && out.contains("\"words\":7"),
+            out.contains("\"lines\":5")
+                && out.contains("\"chars\":46")
+                && out.contains("\"words\":7"),
             "info wc values must match the whole file; got: {out}"
         );
     }

@@ -170,7 +170,10 @@ mod tests {
         // distinct uuids (the NUL breaks the ambiguity).
         let a = uuid_of("ab", "c");
         let b = uuid_of("a", "bc");
-        assert_ne!(a, b, "the NUL separator must break the id||abs concat ambiguity");
+        assert_ne!(
+            a, b,
+            "the NUL separator must break the id||abs concat ambiguity"
+        );
     }
 
     #[test]
