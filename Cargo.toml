@@ -37,8 +37,6 @@ repository = "https://github.com/CZython/knowledgebase"
 # Minimum cargo/rustc; matches `rust-toolchain.toml`. Kept honest so
 # `cargo publish` / docs.rs state the true floor.
 rust-version = "1.98.1"
-# Fallback description (each binary package overrides this below).
-description = "kb — a single-binary Markdown knowledge base over Turso + FTS, with a Verus-verified zero-dependency core"
 
 [profile.release]
 # For a CLI we ship as a single binary (`cargo install` + the prebuilt
@@ -60,13 +58,6 @@ panic = "abort"
 # member's [dependencies]. ---
 kb-core = { path = "kb-core", version = "0.1.0" }
 kb-db   = { path = "kb-db",   version = "0.1.0" }
-
-# --- Verus core ---
-# Exact pin: this machine's Verus (v0.2026.09.06 ARIA fork at
-# ~/.local/bin/verus) was built against vstd 0.0.0-2026-09-06-0133.
-# A `=` pin prevents cargo from drifting to a newer vstd whose
-# metadata won't match what Verus expects.
-vstd = "=0.0.0-2026-09-06-0133"
 
 # --- Turso (pure-Rust SQLite-compatible engine) ---
 # There is deliberately NO C toolchain in the build. `default-features =

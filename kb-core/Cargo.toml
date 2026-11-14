@@ -3,6 +3,7 @@ name = "kb-core"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+repository.workspace = true
 rust-version.workspace = true
 description = "kb-core — the pure, Verus-verified half of `kb`: frontmatter parsing, section splice, identity, tags/aliases, links, and the search grammar. Zero std I/O, zero external deps."
 #
@@ -11,7 +12,14 @@ description = "kb-core — the pure, Verus-verified half of `kb`: frontmatter pa
 # addition to this crate must stay in the "pure, no side-effects" zone
 # that Verus can discharge.
 [dependencies]
-vstd = { workspace = true }
+# NOTE: `vstd` is NOT a rustc compile-time dependency of the exec `src/` code
+# (nothing in `src/` imports it; `cargo tree -p kb-core` shows it only because
+# it is declared). The *verified* spec files under `spec/` use vstd, but they
+# are checked by the standalone `verus` binary, which ships its own vstd — they
+# never go through `cargo`. Declaring it here as a `[dependencies]` entry was
+# a leftover that cargo 1.99's `unused_dependencies` lint flags, so it is no
+# longer declared. Verus + z3 are provisioned in CI by `verify.sh` / the
+# `verus` job, not by the cargo graph.
 
 # Tell `cargo verus` this crate is a verification target
 [package.metadata.verus]

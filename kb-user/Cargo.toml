@@ -20,6 +20,7 @@ publish = false
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+repository.workspace = true
 rust-version.workspace = true
 description = "kb — the full knowledge-base CLI (interactive TUI + $EDITOR flow + every verb): search, browse, and section/patch edits over a Markdown corpus in Turso/FTS. Package `kb-user`, binary `kb`."
 

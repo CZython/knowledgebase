@@ -3,6 +3,7 @@ name = "kb-db"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+repository.workspace = true
 rust-version.workspace = true
 description = "kb-db — the Turso shell of `kb`: page upsert, root registration + walk, refresh reconcile, and the tag-alias map. Pure-Rust embedded Turso, sync (no tokio, no C)."
 

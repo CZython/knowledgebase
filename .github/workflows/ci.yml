@@ -1,6 +1,7 @@
-# CI — runs on every push/PR. Gate 7/7 minus the Verus stage (which needs a
-# machine-local Verus + z3 4.16.0), plus a static-musl Linux build so the
-# release artifact is exercised on every PR, not just at release time.
+# CI — runs on every push/PR. Mirrors `gate.sh` 7/7: build, one-pkg, clippy,
+# tests, the Verus "proven-core" verification (now in the `verus-verify` job),
+# and a static-musl Linux build so the release artifact is exercised on every
+# PR, not just at release time.
 name: ci
 
 on:
@@ -27,11 +28,10 @@ jobs:
           toolchain: stable
           components: rustfmt, clippy
 
-      # `gate.sh`'s stages 1-4 (build, one-pkg, clippy -D warnings, tests).
-      # Stage 5 (Verus) is NOT run here: it needs a machine-local Verus +
-      # z3 4.16.0 install, which CI runners don't carry by default. The
-      # Verus stage is the "proven core" guarantee — see gate.sh for how to
-      # run it on a dev box.
+      # `gate.sh`'s stages 1-4 (build, one-pkg, clippy -D warnings, tests),
+      # plus stage 7 (dep tree). Stage 5 (the Verus "proven-core" guarantee)
+      # lives in the separate `verus-verify` job below, which provisions its
+      # own Verus + z3 4.16.0 (the CI runner doesn't ship either by default).
       - name: Stage 1 — build both binaries
         run: cargo build
 
@@ -73,3 +73,60 @@ jobs:
         run: sudo apt-get update && sudo apt-get install -y musl-tools
       - name: build (static musl)
         run: ./dist/build-linux.sh
+
+  # gate.sh stage 5 — the "proven core" guarantee: run the Verus proofs over
+  # kb-core/spec/*.rs via z3. This repo's spec corpus is verified by the
+  # *standalone* `verus` binary (NOT `cargo verus`), which ships its own vstd
+  # (and a z3 4.16.0 in the release bundle), so we just pin a release tarball,
+  # put it on PATH, and let the repo's own `./verify.sh` do the rest — the
+  # exact command a dev box runs. z3 is pinned to 4.16.0 verbatim; the Verus
+  # release bundles a z3 of that same version so no extra download is needed.
+  verus-verify:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # the `verus` launcher shells out to `rustup` to locate its companion
+      # `rust_verify`, so a rustup-managed toolchain must be present. We pin
+      # `stable` (the same channel the rest of CI + the workflow-level
+      # `RUSTUP_TOOLCHAIN` env use). The pinned Verus release below was built
+      # against 1.99.1; if `stable` ever floats past that and verification
+      # breaks, bump the verus release pin AND this together.
+      - name: Install Rust (for the verus binary)
+        uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          toolchain: stable
+
+      - name: Install Verus (pinned release)
+        run: |
+          set -eu
+          # Pin to the release that `kb-core/spec` is proven against. Bump
+          # only after re-running the whole spec corpus locally + on CI, and
+          # re-verifying that the proof obligations still discharge.
+          VERUS_VER="0.2026.11.02.8bf68ee"
+          URL="https://github.com/verus-lang/verus/releases/download/release/$VERUS_VER/verus-$VERUS_VER-x86-linux.zip"
+          curl -fsSL -o /tmp/verus.zip "$URL"
+          mkdir -p /opt/verus
+          (cd /opt/verus && unzip -q /tmp/verus.zip)
+          chmod +x /opt/verus/verus-x86-linux/verus
+          # sanity: the binary must report the exact pinned version
+          /opt/verus/verus-x86-linux/verus --version
+          echo "/opt/verus/verus-x86-linux" >> "$GITHUB_PATH"
+          echo "VERUS is on PATH at: $(command -v verus)"
+
+      # Let verify.sh discover this z3 (a z3 4.16.0 the Verus release ships)
+      # rather than falling back to a distro z3.
+      - name: Verify z3 4.16.0
+        run: |
+          set -eu
+          Z3=/opt/verus/verus-x86-linux/z3
+          [ -x "$Z3" ] || { echo "expected $Z3 from the Verus release bundle"; exit 1; }
+          Z3V="$("$Z3" --version)"
+          echo "z3: $Z3V"
+          case "$Z3V" in *4.16.0*) : ;; *) echo "expected z3 4.16.0, got: $Z3V"; exit 1 ;; esac
+          echo "VERUS_Z3_PATH=$Z3" >> "$GITHUB_ENV"
+
+      # The repo's own entrypoint: verifies all 15 spec files with z3, then
+      # runs the `cargo test` drift-check suite. Mirrors gate.sh stage 5.
+      - name: Run verify.sh (15 proofs + drift-check tests)
+        run: ./verify.sh
