@@ -8,15 +8,56 @@ name: release
 
 on:
   push:
+    # Only tags pushed on `main` fire a release. GitHub can't express
+    # "tag lives on branch X" in the trigger itself, so the `build` job is
+    # gated below: it short-circuits with a clear error if HEAD isn't on
+    # main. (A tag created on `dev` still triggers the workflow, but the
+    # first job bails out in <5 s so no builds happen.)
     tags: [ 'v*' ]
-  # Allow a manual run from the Actions tab:
+  # Manual runs from the Actions tab: main-only.
   workflow_dispatch:
+    branches: [ main ]
 
 permissions:
   contents: write
 
 jobs:
+  # Guard: a release is only ever cut from `main`. If the tag fired this
+  # workflow from a non-main branch (e.g. someone tagged a throwaway branch
+  # on `dev`), the build job doesn't run at all — no wasted runners, no half-
+  # uploaded release. The check is a simple `git` lookup, ~zero seconds.
+  gate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Require tag to point to main
+        shell: bash
+        run: |
+          set -euo pipefail
+          # If we're running from a push of a tag, `GITHUB_REF` looks like
+          # `refs/tags/vX.Y.Z`. `GITHUB_REF_NAME` is the tag name. Resolve it
+          # to a commit and confirm that commit is reachable from main.
+          if [[ "${GITHUB_REF}" == refs/tags/* ]]; then
+            TAG="${GITHUB_REF#refs/tags/}"
+            COMMIT="$(git rev-list -n 1 "$TAG")"
+            if git merge-base --is-ancestor "$COMMIT" origin/main; then
+              echo "tag $TAG commits are on main — proceeding"
+            else
+              echo "::error::tag $TAG is not on main (commit $COMMIT is unreachable); skip build."
+              exit 1
+            fi
+          else
+            # workflow_dispatch: the trigger already filters to main-only,
+            # but `branches: [ main ]` is evaluated against the *source* of
+            # the dispatched ref; assert it explicitly here too.
+            [[ "${GITHUB_REF_NAME}" == "main" ]] || { echo "::error::workflow_dispatch from ${GITHUB_REF_NAME} (must be main)"; exit 1; }
+            echo "workflow_dispatch from main — proceeding"
+          fi
+
   build:
+    needs: [gate]
     strategy:
       # Each build is independent — don't fail the whole run if one platform
       # has a toolchain hiccup (e.g. an Apple SDK bump). Per-platform we'll
