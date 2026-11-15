@@ -535,15 +535,23 @@ impl Connection {
     }
 
     fn open_str(path: &str) -> Result<Self> {
-        let mut builder = turso::Builder::new_local(path)
-            // Turso's native FTS lives behind "index methods".
-            .experimental_index_method(true);
+        // Turso's native FTS lives behind "index methods".
+        let builder = turso::Builder::new_local(path).experimental_index_method(true);
         // Several call sites open a second connection to the same file
         // in-process (WAL / concurrency probes). The flag is rejected for
         // in-memory databases, so only enable it for on-disk files.
-        if path != ":memory:" {
-            builder = builder.experimental_multiprocess_wal(true);
-        }
+        //
+        // On Windows the default IO backend (generic mmap) does not support
+        // host-shared WAL coordination, so `connect()` errors with
+        // "experimental multiprocess WAL is not supported by the active IO
+        // backend". Enable it only where that backend supports it (Unix here;
+        // on-disk, non-:memory: paths only).
+        #[cfg(unix)]
+        let builder = if path != ":memory:" {
+            builder.experimental_multiprocess_wal(true)
+        } else {
+            builder
+        };
         let db = futures::executor::block_on(builder.build())?;
         let inner = db.connect()?;
         Ok(Self { _db: db, inner })
