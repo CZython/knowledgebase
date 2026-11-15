@@ -296,3 +296,5 @@ MIT — see [LICENSE](LICENSE).
 * **Platforms:** Linux (static musl) · Windows (native) · macOS (ARM + Intel) — all via prebuilt Release binaries or CI
 
 <!-- auto-merge e2e test -->
+
+<!-- auto-merge e2e v2 1794731981 -->
