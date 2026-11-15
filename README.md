@@ -222,7 +222,7 @@ Prereq for the `verus` stage: a Verus install on `$PATH` and `z3` at
 ```
 .
 ├── kb/                  # the shared CLI *body* (main.rs, diff.rs, tui/)
-│                        #   included by both packages via include!()
+│   |                    #   included by both packages via include!()
 │   └── tui/             #   the TUI module: input/, render/, palette.rs,
 │                        #   + palettes/{default,colorblind}.toml
 ├── kb-user/             # the full build: default = ["editor","tui"]
@@ -231,19 +231,19 @@ Prereq for the `verus` stage: a Verus install on `$PATH` and `z3` at
 │   ├── src/             #   one module per concern (frontmatter, section,
 │   │                    #   identity, tags, aliases, links, search_grammar, …)
 │   └── spec/            #   Verus specs, one per module
- ├── kb-db/               # Turso/FTS shell (pure Rust, sync, no tokio)
+├── kb-db/               # Turso/FTS shell (pure Rust, sync, no tokio)
 ├── dist/                # per-platform build scripts (linux musl / windows / macos)
 │                        #   artifacts are git-ignored; the .sh scripts are tracked
 ├── tools/               # origin artifacts (e.g. `mdtool.py` — the Python
 │                        #   prototype `kb-core::section` was ported from)
 ├── gate.sh              # full verification (build, clippy, tests, verus, behavior)
 ├── verify.sh            # Verus + z3 stage (called by gate.sh)
- ├── HARDENED_BUILD.md    # why two packages + the lock on the hardened surface
- ├── PLAN.md              # long-form design notes, module-by-module
- ├── FEATURES-links.md    # the one link/reference grammar + its UX surfaces
- ├── FEATURES-verify.md   # the `kb verify` page lint (contract + reuse map)
- ├── CHANGELOG.md         # per-release notes
- ├── CONTRIBUTING.md      # build/test/contribute
+├── HARDENED_BUILD.md    # why two packages + the lock on the hardened surface
+├── PLAN.md              # long-form design notes, module-by-module
+├── FEATURES-links.md    # the one link/reference grammar + its UX surfaces
+├── FEATURES-verify.md   # the `kb verify` page lint (contract + reuse map)
+├── CHANGELOG.md         # per-release notes
+├── CONTRIBUTING.md      # build/test/contribute
 ├── .github/             # ISSUE_TEMPLATE/ (bug + feature forms)
 │   └── workflows/       #   ci.yml (build+clippy+test+musl) and release.yml
 │                        #   (4-runner matrix → GitHub Release assets)
