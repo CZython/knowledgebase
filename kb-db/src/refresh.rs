@@ -243,19 +243,26 @@ fn gc_orphaned_pages(db: &Db, keep: &[String]) -> Result<usize> {
     // Collect the page rows *before* entering the transaction, in a scoping
     // block so the `Statement`'s borrow of `conn` is fully ended when we
     // mutate the connection via `tx`.
-    let rows: Vec<String> = {
-        let stmt = conn.prepare("SELECT abs_path FROM pages")?;
-        let it = stmt.query_map((), |r| r.get::<_, String>(0))?;
-        let collected: Result<Vec<String>> = it.collect();
-
-        collected?
+    // Collect the page rows *and* their section-row keys (uuids) up front.
+    // `sections` is keyed on `page_uuid`, but the GC walks `abs_path` — so
+    // each orphan's uuid is resolved *before* the page row is deleted (a
+    // `SELECT` and a `DELETE` must not hold a `conn` borrow across each other).
+    let rows: Vec<(String, Option<String>)> = {
+        let stmt = conn.prepare("SELECT abs_path, uuid FROM pages")?;
+        let it = stmt.query_map((), |r| {
+            Ok((r.get::<_, String>(0)?, r.get::<_, Option<String>>(1)?))
+        })?;
+        it.collect::<Result<Vec<_>>>()?
     };
 
     let tx = conn.unchecked_transaction()?;
     let mut n: usize = 0;
-    for abs in &rows {
+    for (abs, uuid) in &rows {
         if keep.contains(abs) {
             continue;
+        }
+        if let Some(uuid) = uuid {
+            tx.execute("DELETE FROM sections   WHERE page_uuid = ?1", params![uuid])?;
         }
         tx.execute("DELETE FROM page_gates WHERE abs_path = ?1", params![abs])?;
         tx.execute("DELETE FROM page_tags  WHERE abs_path = ?1", params![abs])?;
@@ -279,6 +286,9 @@ pub fn full_rebuild(db: &Db) -> Result<RefreshSummary> {
     // Wipe everything first (the row-tables, then pages). Turso's FTS index
     // follows the `pages` DELETEs, so the index rebuilds clean.
     let tx = db.conn.unchecked_transaction()?;
+    // §v3: the `sections` rows (keyed on `page_uuid`, not `abs_path`) before
+    // the `pages` they reference; same "explicit delete, no CASCADE" contract.
+    tx.execute("DELETE FROM sections", ())?;
     tx.execute("DELETE FROM page_gates", ())?;
     tx.execute("DELETE FROM page_tags", ())?;
     tx.execute("DELETE FROM links", ())?;

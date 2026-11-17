@@ -32,6 +32,36 @@ pub struct Section {
     pub ref_: String,
 }
 
+/// A row of the `sections` index (section-search) — a page's
+/// *section* (incl. the `'*'` page-level preamble row) with its text
+/// resolved, as exported by `Doc::export_rows`.
+///
+/// The `ref` field is the **canonical** form only: the dotted number
+/// (`1`, `1.2`) or the `'*'` sentinel. A title path is a *resolution
+/// input* (`Doc::resolve`) that maps to the canonical ref — it is
+/// never stored. The position of a row in the export `Vec` (`'*'`
+/// first, headings in document order) is its `ordinal` column value —
+/// the sort key for candidate lists within a page (so `1.2` precedes
+/// `1.10`), not the dotted numeric value.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SectionSpan {
+    /// Heading level: `0` = the `'*'` page-level (preamble) row;
+    /// `1..=6` = an ATX heading.
+    pub level: u8,
+    /// Canonical ref: dotted number or `'*'`.
+    pub ref_: String,
+    /// Heading text (trimmed); page level: the page's display title.
+    pub title: String,
+    /// Section's *own body* (heading through first subsection) — the
+    /// hover return. `'*'` row: the preamble.
+    pub own_body: String,
+    /// Full span incl. subsections, `None` when it equals `own_body`
+    /// (no children).
+    pub full_body: Option<String>,
+    /// 0-based line index of the own-body's end, exclusive.
+    pub own_end_line: usize,
+}
+
 /// Where a new section is inserted relative to a target (or a file edge).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SectionPlacement {
@@ -216,6 +246,9 @@ impl Doc {
     /// The byte range `[start, end)` of the named section's **own body**.
     pub fn own_body(&self, ref_: &str) -> Result<std::ops::Range<usize>, SectionError> {
         let i = self.resolve(ref_)?;
+        if i == usize::MAX {
+            return Ok(self.page_span());
+        }
         let s = &self.sections[i];
         Ok(s.start..s.own_end)
     }
@@ -224,8 +257,24 @@ impl Doc {
     /// (including subsections).
     pub fn full_span(&self, ref_: &str) -> Result<std::ops::Range<usize>, SectionError> {
         let i = self.resolve(ref_)?;
+        if i == usize::MAX {
+            return Ok(self.page_span());
+        }
         let s = &self.sections[i];
         Ok(s.start..s.end)
+    }
+
+    /// The page-level (`'*'`) byte range: the *preamble* — `data[0..
+    /// preamble_end]`, or the whole body when the page has no headings
+    /// (the `preamble_end == 0 && sections.is_empty()` disambiguator).
+    pub fn page_span(&self) -> std::ops::Range<usize> {
+        let n = self.data.len();
+        let hi = if self.preamble_end == 0 && self.sections.is_empty() {
+            n
+        } else {
+            self.preamble_end
+        };
+        0..hi
     }
 
     /// The raw byte slice of the named section's own body (the convenience
@@ -239,6 +288,71 @@ impl Doc {
     pub fn full_bytes(&self, ref_: &str) -> Result<&[u8], SectionError> {
         let r = self.full_span(ref_)?;
         Ok(&self.data[r])
+    }
+
+    /// The **page-level row** the section table indexes: the reserved
+    /// `ref` sentinel for "the page itself (its preamble)". Pinned to the
+    /// one character `'*'` so it can never collide with a dotted number.
+    pub const PAGE_ROW_REF: &'static str = "*";
+
+    /// Export the page's rows for the `sections` index (the
+    /// section-search build): one **page-level row** (the `'*'` sentinel,
+    /// `level 0`, the page's display title, `own_body` = the *preamble*)
+    /// followed by one row per heading section in document order.
+    ///
+    /// The *preamble* is `data[0..preamble_end]` — the text before the
+    /// first heading. `preamble_end == 0` is ambiguous between "no
+    /// headings" (⇒ the *whole* body is the preamble) and "the page opens
+    /// with a heading" (⇒ empty preamble); the disambiguator is
+    /// `sections.is_empty()`. A page that opens with a heading therefore
+    /// gets an *empty* `'*'` own-body — its H1 is already indexed as its
+    /// own row, so nothing is lost (the `'*'` row covers the intro span
+    /// that belongs to no section).
+    ///
+    /// `full_body` is the section's full span (incl. subsections), equal
+    /// to `own_body` when the section has no children — stored as `None`
+    /// in that case to save the duplicate bytes (a reader treats
+    /// `None` as "same as `own_body`"). `own_end_line` is 0-based
+    /// (`total_lines` is the exclusive count); the `'*'` row points at the
+    /// last preamble line, or the last body line for a heading-less page.
+    /// The caller's index over the returned `Vec` is the `ordinal` column
+    /// value (`'*'` = 0, first heading = 1, …) — document order, not the
+    /// dotted number.
+    pub fn export_rows(&self, page_title: &str) -> Vec<SectionSpan> {
+        let n = self.data.len();
+        let pre_end = if self.preamble_end == 0 && self.sections.is_empty() {
+            n
+        } else {
+            self.preamble_end
+        };
+        let mut rows = Vec::with_capacity(self.sections.len() + 1);
+        rows.push(SectionSpan {
+            level: 0,
+            ref_: Self::PAGE_ROW_REF.to_string(),
+            title: page_title.to_string(),
+            own_body: String::from_utf8_lossy(&self.data[..pre_end]).into_owned(),
+            full_body: None,
+            own_end_line: if self.sections.is_empty() {
+                self.total_lines
+            } else {
+                self.sections[0].start_line.saturating_sub(1)
+            },
+        });
+        for s in &self.sections {
+            rows.push(SectionSpan {
+                level: s.level,
+                ref_: s.ref_.clone(),
+                title: s.title.clone(),
+                own_body: String::from_utf8_lossy(&self.data[s.start..s.own_end]).into_owned(),
+                full_body: if s.end > s.own_end {
+                    Some(String::from_utf8_lossy(&self.data[s.start..s.end]).into_owned())
+                } else {
+                    None
+                },
+                own_end_line: s.own_end_line,
+            });
+        }
+        rows
     }
 
     // ---- editing (pure: each returns the *new* full buffer; the CLI
@@ -524,6 +638,17 @@ impl Doc {
         let ref_ = ref_.trim();
         if ref_.is_empty() {
             return Err(SectionError::EmptyRef);
+        }
+
+        // ---- stage 0: the `'*'` page-level row ----------------------
+        // The `'*'` sentinel names the page-level (preamble) span, which is
+        // *not* in `self.sections` (a heading list). It resolves to a
+        // sentinel that `own_bytes` / `full_bytes` special-case to the
+        // preamble byte range. The disambiguator for an empty preamble is
+        // the same as `export_rows`: `preamble_end == 0 && sections` empty
+        // ⇒ the whole body.
+        if ref_ == Self::PAGE_ROW_REF {
+            return Ok(usize::MAX);
         }
 
         // ---- stage 1: dotted number --------------------------------
@@ -1454,6 +1579,88 @@ mod tests {
             section_lookup("# Only Heading\nbody\n", "Only Heading"),
             Ok(Some(0))
         );
+    }
+
+    // ---- export_rows (the `sections` index rows) -------------------------
+
+    #[test]
+    fn export_rows_headingless_page_single_star_row_whole_body() {
+        let t = "plain body line one\nplain body line two\n";
+        let d = Doc::new(t.as_bytes().to_vec());
+        let rows = d.export_rows("Plain");
+        assert_eq!(rows.len(), 1, "a heading-less page exports exactly the '*' row");
+        let r = &rows[0];
+        assert_eq!(r.ref_, "*");
+        assert_eq!(r.level, 0);
+        assert_eq!(r.title, "Plain");
+        assert_eq!(r.own_body, t, "'*' own_body is the whole body when there are no headings");
+        assert_eq!(r.full_body, None, "no subsections ⇒ full_body is the (empty-encoding) None");
+    }
+
+    #[test]
+    fn export_rows_preamble_only_not_whole_page() {
+        // LOCKED: the `*` row is PRESENT-ONLY — `body[0..preamble_end]` — NOT
+        // the whole-page superset. The H1 is already its own row.
+        let t = "intro text before the heading\n\n# Top\n\nTop body\n\n## Sub\n\nSub body\n";
+        let d = Doc::new(t.as_bytes().to_vec());
+        let rows = d.export_rows("Top");
+        assert_eq!(rows.len(), 3);
+        let star = &rows[0];
+        assert_eq!(star.ref_, "*");
+        assert_eq!(star.own_body, "intro text before the heading\n\n");
+        let top = &rows[1];
+        assert_eq!(top.ref_, "1");
+        assert_eq!(top.own_body, "# Top\n\nTop body\n\n");
+        assert!(top.full_body.is_some(), "a parent row has subsections ⇒ Some full_body");
+        // full_body for `1` = from `# Top` through the end of `## Sub`.
+        let want_top_full = "# Top\n\nTop body\n\n## Sub\n\nSub body\n";
+        assert_eq!(top.full_body.as_deref().unwrap(), want_top_full);
+        let sub = &rows[2];
+        assert_eq!(sub.ref_, "1.1");
+        assert!(sub.full_body.is_none(), "a leaf row's full span == own span ⇒ None");
+    }
+
+    #[test]
+    fn export_rows_heading_first_page_has_empty_star_body() {
+        // The page opens with a heading ⇒ preamble_end == 0 AND sections
+        // non-empty ⇒ the `*` row's own_body is EMPTY (its H1 is indexed as
+        // a real row; nothing is lost).
+        let t = "# One\nbody one\n\n## Two\nbody two\n";
+        let d = Doc::new(t.as_bytes().to_vec());
+        let rows = d.export_rows("One");
+        assert_eq!(rows[0].ref_, "*");
+        assert_eq!(rows[0].own_body, "");
+        assert_eq!(rows[1].ref_, "1");
+        assert_eq!(rows[1].title, "One");
+    }
+
+    #[test]
+    fn export_rows_fenced_hash_is_not_a_heading() {
+        // A `#` inside a fenced code block must stay body, not open a section.
+        let t = "# Real\n\ntext with a fence:\n```\n# not a heading\n## still not\n```\n\n## Second\n";
+        let d = Doc::new(t.as_bytes().to_vec());
+        let rows = d.export_rows("Real");
+        assert_eq!(rows.len(), 3, "* + Real + Second — the fenced # lines are sections");
+        let first = &rows[1];
+        assert!(
+            first.own_body.contains("# not a heading"),
+            "the fenced # line must be content of section 1, got: {:?}",
+            first.own_body
+        );
+        assert_eq!(rows[2].ref_, "1.1");
+    }
+
+    #[test]
+    fn show_star_ref_returns_preamble() {
+        let t = "intro only\n\n# Top\n\nTop body\n";
+        let d = Doc::new(t.as_bytes().to_vec());
+        assert_eq!(d.own_bytes("*").unwrap(), b"intro only\n\n");
+        // a heading-first page: `*` → empty span
+        let d2 = Doc::new(b"# A\nbody\n".to_vec());
+        assert_eq!(d2.own_bytes("*").unwrap(), b"");
+        // a heading-less page: `*` → the whole body
+        let d3 = Doc::new(b"no headings here\n".to_vec());
+        assert_eq!(d3.own_bytes("*").unwrap(), b"no headings here\n");
     }
 
     #[test]
