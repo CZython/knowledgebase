@@ -93,19 +93,37 @@ pub(crate) fn cmd_show(file: &Path, ref_: Option<&str>, body: bool, full: bool, 
         return Ok(EXIT_OK);
     }
 
-    let idx = doc.resolve(r).map_err(|e| (e.to_string(), EXIT_SECTION))?;
-    let s = &doc.sections[idx];
+    // The `'*'` page-level row (the preamble) is *not* a heading section —
+    // `resolve` maps it to the `usize::MAX` sentinel, so it skips the
+    // `sections[idx]` indexing below and renders from the page span.
+    let is_page_row = r == Doc::PAGE_ROW_REF;
+    let (span_title, span_level, start_line, end_line): (String, u8, usize, usize) =
+        if is_page_row {
+            let rgn = doc.page_span();
+            (
+                file.file_name()
+                    .and_then(|n| n.to_str().map(String::from))
+                    .unwrap_or_default(),
+                0,
+                0,
+                rgn.end,
+            )
+        } else {
+            let idx = doc.resolve(r).map_err(|e| (e.to_string(), EXIT_SECTION))?;
+            let s = &doc.sections[idx];
+            let end_line = if use_full { s.end_line } else { s.own_end_line };
+            (s.title.clone(), s.level, s.start_line, end_line)
+        };
     if json {
         let span = if use_full { "full" } else { "body" };
-        let end_line = if use_full { s.end_line } else { s.own_end_line };
         println!(
             "{{\"ref\":{},\"title\":{},\"level\":{},\"span\":\"{}\",\"line\":{},\"lines\":{},\"etag\":{},\"text\":{}}}",
-            jstr(&s.ref_),
-            jstr(&s.title),
-            s.level,
+            jstr(if is_page_row { Doc::PAGE_ROW_REF } else { r }),
+            jstr(&span_title),
+            span_level,
             span,
-            s.start_line + 1,
-            end_line.saturating_sub(s.start_line),
+            start_line + 1,
+            end_line.saturating_sub(start_line),
             jstr(&etag_of(&bytes)),
             jstr(&String::from_utf8_lossy(&bytes))
         );
