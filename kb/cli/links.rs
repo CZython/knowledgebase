@@ -358,7 +358,8 @@ fn render_links(
                             Some(p) => {
                                 let id = format!("{}:{}", p.typ, p.slug);
                                 let u = p.uuid.clone().unwrap_or_else(|| kb_core::uuid::uuid_of(&id, &p.abs_path));
-                                (id, uuid_short_for(db, &u, &p.abs_path).unwrap_or_else(|_| u))
+                                let short = uuid_short_for(db, &u, &p.abs_path).unwrap_or(u);
+                                (id, short)
                             }
                             None => (r.clone(), String::new()),
                         };
