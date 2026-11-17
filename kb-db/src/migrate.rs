@@ -18,7 +18,7 @@
 use crate::sql::{Connection, Result};
 
 /// Current schema version (recorded in `meta.version` for future upgrades).
-pub const SCHEMA_VERSION: &str = "2";
+pub const SCHEMA_VERSION: &str = "3";
 
 /// D2: the *single owner* of the `pages` gate-phrase column name. The SQL
 /// column literal used to be hand-typed in 4+ queries across `kb/main.rs` —
@@ -93,6 +93,33 @@ CREATE TABLE IF NOT EXISTS links (
 );
 CREATE INDEX IF NOT EXISTS idx_links_to ON links(to_path);
 
+-- §v3: the `sections` table (section-search / `kb quick-search`). One row
+-- per page heading + one per page (the `'*'` preamble row). `ref` stores
+-- the CANONICAL form only (dotted number or `'*'`); a title-path is a
+-- resolution input (`Doc::resolve`), never a stored value. `ordinal` is
+-- document order (the `'*'` row is 0) — the tie-break sort key so `1.2`
+-- precedes `1.10`. No `REFERENCES pages(uuid)`: `kb-db` is the
+-- Turso-routed façade and never sets the `foreign_keys` pragma, so a
+-- `ON DELETE CASCADE` there would be inert; page GC deletes sections
+-- explicitly (`delete_page` / `gc_orphaned_pages` / `full_rebuild`).
+-- `full_body` is storage-only (`--full` returns) — NOT FTS-indexed: it is
+-- a superset of `own_body` and would double-count the same tokens.
+CREATE TABLE IF NOT EXISTS sections (
+  page_uuid   TEXT    NOT NULL,
+  ref         TEXT    NOT NULL,
+  ordinal     INTEGER NOT NULL,
+  level       INTEGER NOT NULL,
+  title       TEXT    NOT NULL,
+  own_body    TEXT    NOT NULL,
+  full_body   TEXT,
+  own_end_line INTEGER,
+  mtime_ns    INTEGER NOT NULL,
+  own_hash    TEXT    NOT NULL,
+  PRIMARY KEY (page_uuid, ref)
+);
+CREATE INDEX IF NOT EXISTS idx_sections_page    ON sections(page_uuid);
+CREATE INDEX IF NOT EXISTS idx_sections_ordinal ON sections(page_uuid, ordinal);
+
 -- Legacy SQLite FTS5 artifacts (from pre-Turso databases) are dropped so an
 -- upgraded file does not keep a virtual table the engine cannot read. This
 -- is best-effort: `IF EXISTS` is a no-op on a fresh Turso database.
@@ -122,7 +149,9 @@ DROP TABLE IF EXISTS pages_fts_config;
 /// until the reconcile adds it.
 const FTS_INDEX_SQL: &str = "\
 CREATE INDEX IF NOT EXISTS idx_pages_fts ON pages
-  USING fts (title, description, body, frontmatter_text);";
+  USING fts (title, description, body, frontmatter_text);
+CREATE INDEX IF NOT EXISTS idx_sections_fts ON sections
+  USING fts (title, own_body);";
 
 /// The `pages`-column-backed *B-tree* indexes that must be created only
 /// **after** [`reconcile_pages_columns`] has guaranteed their columns exist.

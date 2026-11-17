@@ -143,6 +143,18 @@ fn index_derives_all_row_tables_and_fts() {
     assert_eq!(count(&s.db, "links"), 1);
     let styles = strings(&s.db, "SELECT style FROM links ORDER BY style");
     assert_eq!(styles, vec!["wikilink".to_string()]);
+
+    // §v3 `sections` rows (section-search). `notes/note.md` opens with the
+    // `# Attention API` heading, so its `'*'` preamble row is empty (heading
+    // at line 0 and a section exists → not the whole-body fallback) and there
+    // is one content row: `*` + `1` = 2 rows. `loose.md` is no-type → skipped.
+    assert_eq!(
+        count(&s.db, "sections"),
+        2,
+        "note.md → * (empty preamble) + 1 (Attention API)"
+    );
+    let refs = strings(&s.db, "SELECT ref FROM sections ORDER BY ordinal");
+    assert_eq!(refs, vec!["*".to_string(), "1".to_string()]);
 }
 
 #[test]

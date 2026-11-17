@@ -371,6 +371,40 @@ pub(crate) enum Cmd {
         #[arg(long)]
         limit: Option<usize>,
     },
+
+    /// Section-first full-text search: the content FTS runs over the
+    /// `sections` index (a page's preamble + its headings); the
+    /// `type:` / `language:` / `tag:` / `Null` / gate-phrase filters run
+    /// over `pages` and restrict *which pages' sections* are searchable.
+    /// A single match returns the section's own-body (or `full_body`
+    /// under `--full`); an ambiguous set returns a narrowing candidate
+    /// list; `--force` takes the top-1. `--json` emits the full-record
+    /// envelope a consuming GUI/agent can filter. (Quick lookup —
+    /// `kb search` is the page-level surface.)
+    #[command(alias = "qs")]
+    QuickSearch {
+        /// One or more search terms, **all flags first** (`--db`, `--json`,
+        /// `--force`, `--full`, `--limit`) then the terms:
+        /// `kb qs --json type:wiki thyristor`. The same grammar as
+        /// `kb search`: a bare word, a `~` OR-term, a `-` NOT-term, a
+        /// `key:value` filter, or a quoted phrase (`"exact phrase"`).
+        #[arg(value_name = "TERM", num_args = 1..)]
+        terms: Vec<String>,
+        /// Emit the full-record JSON envelope (status / match / candidates
+        /// / hint) instead of the human shapes.
+        #[arg(long)]
+        json: bool,
+        /// Always take the top-1 (skip the ambiguity check).
+        #[arg(long)]
+        force: bool,
+        /// Return `full_body` (incl. subsections) instead of `own_body`.
+        #[arg(long)]
+        full: bool,
+        /// Cap the SQL `LIMIT` (default 20); a consuming consumer can cap
+        /// further.
+        #[arg(long)]
+        limit: Option<usize>,
+    },
     /// Numbered per-page list under `[path]` (default: all roots): location,
     /// title, tags, search_required_phrase, link count; label pages expand to their
     /// referenced files/folder.
@@ -655,8 +689,9 @@ pub(crate) fn main() {
     // this shortcut fall through to a stray "0 results" search.
     static SUBCMDS: &[&str] = &[
         "toc", "show", "section", "replace", "patch", "add", "roots",
-        "drop-root", "refresh", "full-rebuild", "search", "browse", "tag",
-        "tag-alias", "links", "resolve", "info", "stats", "cron",
+        "drop-root", "refresh", "full-rebuild", "search", "quick-search",
+        "qs", "browse", "tag", "tag-alias", "links", "resolve", "info",
+        "stats", "cron",
         "tui",
         "create",
         "verify",
@@ -808,6 +843,20 @@ pub(crate) fn run(cli: &Cli) -> i32 {
                 *json,
                 limit.unwrap_or(20),
             ),
+        Cmd::QuickSearch {
+            terms,
+            json,
+            force,
+            full,
+            limit,
+        } => cmd_qs(
+            cli.db.as_deref(),
+            &terms.join(" "),
+            *json,
+            *force,
+            *full,
+            *limit,
+        ),
         Cmd::Browse { path, json } => cmd_browse(cli.db.as_deref(), path.as_deref(), *json),
         Cmd::Tag { tag, json } => cmd_tag(cli.db.as_deref(), tag, *json),
         Cmd::TagAlias { add, canonical, rm, list, export, import, file, json } => cmd_tag_alias(

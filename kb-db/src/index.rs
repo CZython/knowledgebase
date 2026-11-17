@@ -29,6 +29,7 @@ use crate::Db;
 use kb_core::frontmatter;
 use kb_core::identity;
 use kb_core::links;
+use kb_core::section as kb_section;
 use kb_core::meta::NoteType;
 use kb_core::tags as kb_tags;
 use std::path::Path;
@@ -70,6 +71,11 @@ pub struct PageRecord {
     /// indexer now writes the raw `&'static str` from
     /// `LinkKind::style_str`).
     pub link_rows: Vec<(String, String)>, // (target, style)
+    /// §v3 `sections` rows (section-search). One `'*'` preamble row followed
+    /// by one row per heading, in document order (the `Vec` position *is*
+    /// the `ordinal` column; `ref` is already canonical — dotted number or
+    /// `'*'`). Empty only for an empty page body.
+    pub section_rows: Vec<kb_section::SectionSpan>,
 }
 
 /// The result of indexing one page (used by `IndexOutcome::SkippedNoType`
@@ -257,6 +263,12 @@ pub fn build_page(
         None
     };
 
+    // §v3: the `sections` rows — the page-level `'*'` preamble row + one per
+    // heading, exported over the post-frontmatter body (the sections the
+    // user reads, minus the frontmatter the parser would otherwise fence).
+    let body_bytes = fm.body.as_bytes().to_vec();
+    let section_rows = kb_section::Doc::new(body_bytes).export_rows(&slug);
+
     let abs_str = abs_path.to_string_lossy().to_string();
     let uuid = kb_core::uuid::uuid_of(&id, &abs_str);
 
@@ -282,6 +294,7 @@ pub fn build_page(
         gate_terms,
         tag_rows: tags,
         link_rows,
+        section_rows,
     })
 }
 
@@ -437,7 +450,40 @@ pub fn upsert_page(db: &Db, rec: &PageRecord) -> Result<usize> {
         ],
     )?;
 
-    // 5. Gate rows.
+    // 5. §v3 section rows — replaced wholesale (same rationale as
+    //    gates/tags/links: a heading the page *removed* must leave the
+    //    index too). Keyed on `page_uuid` (the row's identity), not the
+    //    page's abs_path. `ordinal` is the row's position in
+    //    `rec.section_rows` (`'*'` = 0, headings in document order).
+    tx.execute(
+        "DELETE FROM sections WHERE page_uuid = ?1",
+        params![rec.uuid],
+    )?;
+    let ins_sec = tx.prepare_cached(
+        "INSERT OR IGNORE INTO sections (page_uuid, ref, ordinal, level, title,\
+         own_body, full_body, own_end_line, mtime_ns, own_hash) \
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+    )?;
+    for (ordinal, s) in rec.section_rows.iter().enumerate() {
+        let own_hash = etag_of(
+            format!("{}\0{}\0{}", s.ref_, s.title, s.own_body).as_bytes(),
+        );
+        ins_sec.execute(params![
+            rec.uuid,
+            s.ref_,
+            ordinal as i64,
+            s.level as i64,
+            s.title,
+            s.own_body,
+            s.full_body,
+            s.own_end_line as i64,
+            rec.mtime_ns,
+            own_hash,
+        ])?;
+    }
+    drop(ins_sec);
+
+    // 6. Gate rows.
     let ins_gate =
         tx.prepare_cached("INSERT OR IGNORE INTO page_gates (abs_path, term) VALUES (?1, ?2)")?;
     for t in &rec.gate_terms {
@@ -515,7 +561,25 @@ pub fn backfill_uuid(conn: &crate::sql::Connection) -> Result<usize> {
 /// Delete a page (and its row-table entries) from the DB. Called by the
 /// refresh GC when a file is no longer under any registered root.
 pub fn delete_page(db: &Db, abs_path: &str) -> Result<usize> {
+    // §v3: resolve the page's section-row key (its uuid) *before* the
+    // transaction — the `SELECT` and the `DELETE`s must not hold a `conn`
+    // borrow across each other.
+    let uuid: Option<String> = db
+        .conn
+        .query_row(
+            "SELECT uuid FROM pages WHERE abs_path = ?1",
+            params![abs_path],
+            |r| r.get(0),
+        )
+        .ok()
+        .flatten();
     let tx = db.conn.unchecked_transaction()?;
+    if let Some(uuid) = &uuid {
+        tx.execute(
+            "DELETE FROM sections WHERE page_uuid = ?1",
+            params![uuid],
+        )?;
+    }
     tx.execute(
         "DELETE FROM page_gates WHERE abs_path = ?1",
         params![abs_path],
