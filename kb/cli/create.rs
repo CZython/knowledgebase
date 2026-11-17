@@ -55,6 +55,7 @@ pub(crate) fn cmd_create(dbpath: Option<&Path>, filename: &str, a: &CreateArgs) 
                 kind: kind.clone(),
                 title: title.clone(),
                 id: None,
+                uuid: None,
                 created: false,
                 edited: false,
                 indexed: false,
@@ -101,7 +102,7 @@ pub(crate) fn cmd_create(dbpath: Option<&Path>, filename: &str, a: &CreateArgs) 
     let edited = false;
 
     // ---- index (best-effort; disk is authoritative, `kb refresh` repairs) --
-    let IndexOutcome { indexed, id, note } = index_created(dbpath, &target)?;
+    let IndexOutcome { indexed, id, uuid, note } = index_created(dbpath, &target)?;
 
     if json {
         let r = CreateReport {
@@ -109,6 +110,7 @@ pub(crate) fn cmd_create(dbpath: Option<&Path>, filename: &str, a: &CreateArgs) 
             kind,
             title,
             id: id.as_deref(),
+            uuid: uuid.as_deref(),
             created: true,
             edited,
             indexed,
@@ -120,6 +122,9 @@ pub(crate) fn cmd_create(dbpath: Option<&Path>, filename: &str, a: &CreateArgs) 
     } else if indexed {
         if let Some(i) = &id {
             println!("kb: indexed as {i}");
+        }
+        if let Some(u) = &uuid {
+            println!("kb: uuid {u}");
         }
     }
     if let Some(n) = note {
@@ -212,6 +217,7 @@ fn resolve_target(
 struct IndexOutcome {
     indexed:bool,
     id:Option<String>,
+    uuid:Option<String>,
     note:Option<String>,
 }
 
@@ -224,6 +230,7 @@ fn index_created(
     let roots = roots_with_seq(&db)?;
     let mut indexed = false;
     let mut id: Option<String> = None;
+    let mut uuid: Option<String> = None;
     let mut note: Option<String> = None;
     if roots.is_empty() {
         note = Some(
@@ -244,6 +251,7 @@ fn index_created(
                 Ok(rec) => match kb_db::index::upsert_page(&db, &rec) {
                     Ok(_) => {
                         id = Some(rec.id.clone());
+                        uuid = Some(rec.uuid.clone());
                         indexed = true;
                     }
                     Err(e) => note = Some(format!("indexed skipped (DB upsert: {e})")),
@@ -254,7 +262,7 @@ fn index_created(
             },
         }
     }
-    Ok(IndexOutcome { indexed, id, note })
+    Ok(IndexOutcome { indexed, id, uuid, note })
 }
 
 
@@ -268,6 +276,7 @@ pub(crate) struct CreateReport<'a> {
     pub(crate) kind:String,
     pub(crate) title:String,
     pub(crate) id:Option<&'a str>,
+    pub(crate) uuid:Option<&'a str>,
     pub(crate) created:bool,
     pub(crate) edited:bool,
     pub(crate) indexed:bool,
@@ -285,6 +294,8 @@ impl CreateReport<'_> {
         o.s("title", &self.title);
         let id_opt: Option<String> = self.id.map(|s| s.to_string());
         o.opt("id", &id_opt);
+        let uuid_opt: Option<String> = self.uuid.map(|s| s.to_string());
+        o.opt("uuid", &uuid_opt);
         o.b("created", self.created);
         o.b("edited", self.edited);
         o.b("indexed", self.indexed);

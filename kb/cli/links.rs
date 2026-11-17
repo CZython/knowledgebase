@@ -147,7 +147,7 @@ pub(crate) fn cmd_links(dbpath: Option<&Path>, target: &str, dedup: bool, json: 
         back.dedup();
 
         // ---- JSON + human renderers share the same resolution (A2 extraction) --
-        render_links(&abs_path, &forward, &back, &abs_index, json);
+        render_links(&db, &abs_path, &forward, &back, &abs_index, json);
         return Ok(EXIT_OK);
     }
 
@@ -276,42 +276,77 @@ fn render_links_list(
 /// the two `if json { … } else { … }` blocks used to be ~70 lines inline,
 /// making the verb read as three concerns when it is really one.)
 fn render_links(
+    db: &Db,
     abs_path: &str,
     forward: &[(String, String, Option<String>)],
     back: &[String],
     abs_index: &std::collections::HashMap<String, &resolver::Page>,
     json: bool,
 ) {
+    // The page's own uuid: read the stored value (every row indexed by a
+    // modern build has one), else re-derive via `uuid_of(id, abs_path)`
+    // from the corpus so an agent can paste it back into a path-arg verb.
+    let page_uuid: String = {
+        let p = abs_index
+            .get(abs_path)
+            .expect("cmd_links resolved abs_path through the corpus; it must be in the index");
+        match &p.uuid {
+            Some(u) => u.clone(),
+            None => {
+                let id = format!("{}:{}", p.typ, p.slug);
+                kb_core::uuid::uuid_of(&id, &p.abs_path)
+            }
+        }
+    };
+    let page_short = uuid_short_for(db, &page_uuid, abs_path).unwrap_or(page_uuid.clone());
     if json {
         let fwd_items: Vec<String> = forward.iter().map(|(to_path, style, resolved)| {
-            format!(
-                "{{\n    \"style\": {},\n    \"to_path\": {},\n    \"resolves_to\": {}\n  }}",
-                jstr(style),
-                jstr(to_path),
-                match resolved {
-                    Some(r) => jstr(r),
-                    None => "null".to_string(),
-                },
-            )
+            let mut parts = vec![format!("\"style\": {}", jstr(style))];
+            parts.push(format!("\"to_path\": {}", jstr(to_path)));
+            match resolved {
+                Some(r) => {
+                    parts.push(format!("\"resolves_to\": {}", jstr(r)));
+                    if let Some(p) = abs_index.get(r) {
+                        let id = format!("{}:{}", p.typ, p.slug);
+                        let u = p.uuid.clone().unwrap_or_else(|| kb_core::uuid::uuid_of(&id, &p.abs_path));
+                        parts.push(format!("\"target_uuid\": {}", jstr(&u)));
+                        parts.push(format!(
+                            "\"target_uuid_short\": {}",
+                            jstr(&uuid_short_for(db, &u, &p.abs_path).unwrap_or_else(|_| u.to_string()))
+                        ));
+                    }
+                }
+                None => parts.push("\"resolves_to\": null".to_string()),
+            }
+            format!("{{ {} }}", parts.join(", "))
         }).collect();
         let back_items: Vec<String> = back.iter().map(|from_path| {
-            format!(
-                "{{\n    \"abs_path\": {},\n    \"id\": {}\n  }}",
-                jstr(from_path),
-                match abs_index.get(from_path) {
-                    Some(p) => jstr(&format!("{}:{}", p.typ, p.slug)),
-                    None => "null".to_string(),
-                },
-            )
+            let mut parts = vec![format!("\"abs_path\": {}", jstr(from_path))];
+            match abs_index.get(from_path) {
+                Some(p) => {
+                    let id = format!("{}:{}", p.typ, p.slug);
+                    parts.push(format!("\"id\": {}", jstr(&id)));
+                    let u = p.uuid.clone().unwrap_or_else(|| kb_core::uuid::uuid_of(&id, &p.abs_path));
+                    parts.push(format!("\"uuid\": {}", jstr(&u)));
+                    parts.push(format!(
+                        "\"uuid_short\": {}",
+                        jstr(&uuid_short_for(db, &u, from_path).unwrap_or_else(|_| u.to_string()))
+                    ));
+                }
+                None => parts.push("\"id\": null".to_string()),
+            }
+            format!("{{ {} }}", parts.join(", "))
         }).collect();
         println!(
-            "{{\n  \"page\": {},\n  \"forward\": [{}],\n  \"backlinks\": [{}]\n}}",
+            "{{\n  \"page\": {},\n  \"uuid\": {},\n  \"uuid_short\": {},\n  \"forward\": [{}],\n  \"backlinks\": [{}]\n}}",
             jstr(abs_path),
+            jstr(&page_uuid),
+            jstr(&page_short),
             fwd_items.join(","),
             back_items.join(","),
         );
     } else {
-        println!("page: {abs_path}");
+        println!("page: {abs_path}  ({page_short})");
         if forward.is_empty() {
             println!("\nforward links: none");
         } else {
@@ -319,11 +354,19 @@ fn render_links(
             for (to_path, style, resolved) in forward.iter() {
                 let annotated = match resolved {
                     Some(r) => {
-                        let display = abs_index
-                            .get(r)
-                            .map(|p| format!("{}:{}", p.typ, p.slug))
-                            .unwrap_or(r.clone());
-                        format!("  → {display}")
+                        let (display, short) = match abs_index.get(r) {
+                            Some(p) => {
+                                let id = format!("{}:{}", p.typ, p.slug);
+                                let u = p.uuid.clone().unwrap_or_else(|| kb_core::uuid::uuid_of(&id, &p.abs_path));
+                                (id, uuid_short_for(db, &u, &p.abs_path).unwrap_or_else(|_| u))
+                            }
+                            None => (r.clone(), String::new()),
+                        };
+                        if short.is_empty() {
+                            format!("  → {display}")
+                        } else {
+                            format!("  → {display}  ({short})")
+                        }
                     }
                     None => "  (unresolved)".to_string(),
                 };
@@ -337,7 +380,10 @@ fn render_links(
             let _ = abs_index; // (kept for symmetry — the corpus is what we used)
             for from_path in back.iter() {
                 if let Some(p) = abs_index.get(from_path) {
-                    println!("  {from_path}  ({}:{})", p.typ, p.slug);
+                    let id = format!("{}:{}", p.typ, p.slug);
+                    let u = p.uuid.clone().unwrap_or_else(|| kb_core::uuid::uuid_of(&id, &p.abs_path));
+                    let short = uuid_short_for(db, &u, &p.abs_path).unwrap_or_else(|_| u.to_string());
+                    println!("  {from_path}  ({id})  ({short})");
                 } else {
                     println!("  {from_path}");
                 }
@@ -372,25 +418,33 @@ pub(crate) fn cmd_resolve(dbpath: Option<&Path>, query: &str, json: bool) -> Kb 
         return match rows.len() {
             1 => {
                 let abs = rows.into_iter().next().unwrap();
-                let id = db
+                let (id, uuid) = db
                     .conn
                     .query_row(
-                        "SELECT id FROM pages WHERE abs_path = ?1",
+                        "SELECT id, uuid FROM pages WHERE abs_path = ?1",
                         rusqlite::params![abs.clone()],
-                        |r| r.get::<_, String>(0),
+                        |r| Ok((r.get::<_, String>(0)?, r.get::<_, Option<String>>(1)?)),
                     )
-                    .unwrap_or_else(|_| abs.clone());
+                    .unwrap_or_else(|_| (abs.clone(), None));
+                let uuid = uuid.unwrap_or_else(|| {
+                    // Legacy row without a stored uuid: re-derive from the
+                    // (id, abs_path) pair — the same content the indexer used.
+                    kb_core::uuid::uuid_of(&id, &abs)
+                });
+                let uuid_short = uuid_short_for(&db, &uuid, &abs).unwrap_or(uuid.clone());
                 if json {
                     let mut o = JObject::new();
                     o.s("query", query);
                     o.s("outcome", "unique");
                     let mut c = JObject::new();
                     c.s("id", &id);
+                    c.s("uuid", &uuid);
+                    c.s("uuid_short", &uuid_short);
                     c.s("abs_path", &abs);
                     o.raw("candidates", block_array(&[c.render_compact()]));
                     println!("{}", o.render_compact());
                 } else {
-                    println!("1  {id}  {}   [resolved via uuid]", abs);
+                    println!("1  {uuid_short}  {id}  {}   [resolved via uuid]", abs);
                 }
                 return Ok(EXIT_OK);
             }
@@ -443,7 +497,14 @@ pub(crate) fn cmd_resolve(dbpath: Option<&Path>, query: &str, json: bool) -> Kb 
             let p = idx.get(abs.as_str())
                 .expect("resolve() returned an abs_path not present in the input pages");
             let mut o = JObject::new();
-            o.s("id", &format!("{}:{}", p.typ, p.slug));
+            let id = format!("{}:{}", p.typ, p.slug);
+            o.s("id", &id);
+            // The page uuid, so a candidate can be pasted straight back into a
+            // path-arg verb without re-typing the slug. Derived if the row
+            // predates the stored-uuid backfill (see the hex-uuid arm above).
+            let uuid = p.uuid.clone().unwrap_or_else(|| kb_core::uuid::uuid_of(&id, &p.abs_path));
+            o.s("uuid", &uuid);
+            o.s("uuid_short", &uuid_short_for(&db, &uuid, &p.abs_path).unwrap_or(uuid));
             o.s("type", &p.typ);
             o.s("slug", &p.slug);
             o.s("abs_path", &p.abs_path);
@@ -469,9 +530,12 @@ pub(crate) fn cmd_resolve(dbpath: Option<&Path>, query: &str, json: bool) -> Kb 
         // kb-core/spec/resolve_spec.rs). Panic = that invariant broke.
         let p = idx.get(resolved[0].as_str())
             .expect("resolve() returned an abs_path not present in the input pages");
+        let id = format!("{}:{}", p.typ, p.slug);
+        let uuid = p.uuid.clone().unwrap_or_else(|| kb_core::uuid::uuid_of(&id, &p.abs_path));
+        let short = uuid_short_for(&db, &uuid, &p.abs_path).unwrap_or_else(|_| uuid.clone());
         println!(
-            "1  {:<24} {:<6} {}  {}   [resolved to abs_path]",
-            format!("{}:{}", p.typ, p.slug), p.typ, p.slug, p.abs_path
+            "1  {short}  {id}  {}   [resolved to abs_path]",
+            p.abs_path
         );
     } else {
         // a collision — the §4 contract: a candidate list, never a hard error.
@@ -480,9 +544,12 @@ pub(crate) fn cmd_resolve(dbpath: Option<&Path>, query: &str, json: bool) -> Kb 
             // the candidate list is a `p.abs_path.as_str()` from `pages`.
             let p = idx.get(abs.as_str())
                 .expect("resolve() returned an abs_path not present in the input pages");
+            let id = format!("{}:{}", p.typ, p.slug);
+            let uuid = p.uuid.clone().unwrap_or_else(|| kb_core::uuid::uuid_of(&id, &p.abs_path));
+            let short = uuid_short_for(&db, &uuid, &p.abs_path).unwrap_or_else(|_| uuid.clone());
             println!(
-                "{:>3}  {:<24} {:<6} {}  {}   [candidate]",
-                i + 1, format!("{}:{}", p.typ, p.slug), p.typ, p.slug, p.abs_path
+                "{:>3}  {short}  {id}  {}   [candidate]",
+                i + 1, p.abs_path
             );
         }
         println!(
