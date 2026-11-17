@@ -56,6 +56,10 @@ pub struct Page {
     /// by stages 1–4 (identity resolution); carried for the T8 section-level
     /// gate — [`section_present`] checks a written `#section` against this.
     pub body: String,
+    /// The page's stored uuid (`pages.uuid`; `uuid_of(id, abs_path)`; 16 hex).
+    /// Present on every row indexed by a modern build (v0.1+); `None` for
+    /// in-memory test pages or pages predating the backfill.
+    pub uuid: Option<String>,
 }
 
 /// The §4 resolution outcome. `Unique` names one page; `Candidates` names a
@@ -274,6 +278,7 @@ mod tests {
             typ: typ.into(),
             rel_path: rel.into(),
             body: body.into(),
+            uuid: None,
         }
     }
 
