@@ -1157,7 +1157,7 @@ pub(crate) fn load_corpus(db: &Db) -> Result<Vec<resolver::Page>, (String, i32)>
     // on the target page). `COALESCE(body,'')` mirrors the established caller
     // pattern in `links.rs` / `tui/mod.rs` so the row type stays `String`.
     let stmt = db.conn
-        .prepare("SELECT abs_path, title, type, rel_path, COALESCE(body, '') FROM pages")
+        .prepare("SELECT abs_path, title, type, rel_path, COALESCE(body, ''), uuid FROM pages")
         .map_err(|e| (format!("prepare corpus: {e}"), EXIT_ERR))?;
     let rows = stmt
         .query_map((), |r| {
@@ -1167,13 +1167,14 @@ pub(crate) fn load_corpus(db: &Db) -> Result<Vec<resolver::Page>, (String, i32)>
                 r.get::<_, String>(2)?,
                 r.get::<_, String>(3)?,
                 r.get::<_, String>(4)?,
+                r.get::<_, Option<String>>(5)?,
             ))
         })
         .map_err(|e| (format!("corpus query: {e}"), EXIT_ERR))?
         .collect::<Result<Vec<_>, _>>()
         .map_err(|e| (format!("corpus rows: {e}"), EXIT_ERR))?;
     let mut pages = Vec::with_capacity(rows.len());
-    for (abs_path, slug, typ, rel_path, body) in rows {
+    for (abs_path, slug, typ, rel_path, body, uuid) in rows {
         let slug = slug.ok_or_else(|| {
             (
                 format!(
@@ -1190,6 +1191,7 @@ pub(crate) fn load_corpus(db: &Db) -> Result<Vec<resolver::Page>, (String, i32)>
             typ,
             rel_path,
             body,
+            uuid,
         });
     }
     Ok(pages)
@@ -1867,6 +1869,7 @@ mod links_tests {
             typ: typ.to_string(),
             rel_path: abs.rsplit('/').next().unwrap_or(abs).to_string(),
             body: body.to_string(),
+            uuid: None,
         }
     }
 
