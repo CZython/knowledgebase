@@ -207,3 +207,78 @@ fn qs_rejects_a_nonsense_query_but_succeeds_on_a_known_one() {
     let (code, _o2, err2) = s.run(&["qs", "nonsense-word"]);
     assert_eq!(code, 0, "unknown token is a clean empty, exit 0: {err2}");
 }
+
+/// The qs page-identity fields use the **canonical** names shared by
+/// `search`, `tag`, `browse`, and `resolve` (`uuid` / `uuid_short` / `id` /
+/// `title`) — *not* `qs`-specific variants (`page_uuid` / `page_uuid_short` /
+/// `page_display_id` / `page_title`). An agent that reads one `kb` surface
+/// must be able to read every other: a single, uniform vocabulary.
+///
+/// This pins both directions for **both** the `match` shape (single) and the
+/// `candidates` shape (ambiguous), and also that `own_hash` (index-time etag
+/// material) is deliberately NOT surfaced in the match object — an
+/// `if_unchanged` etag must come from `kb show`, not from qs.
+/// Assert that canonical identity names are present (in both the spaced
+/// `render()` form — used by the `match` object — and the no-space
+/// `render_compact()` form — used by `candidates` entries), and that the
+/// legacy `page_*` / `own_hash` family is absent in both forms.
+fn assert_canonical_uuid_shape(out: &str) {
+    // Each canonical key must appear in at least one of the two render styles.
+    for k in ["uuid", "uuid_short", "id", "title"] {
+        let spaced = format!("\"{k}\": ");
+        let compact = format!("\"{k}\":");
+        assert!(
+            out.contains(&spaced) || out.contains(&compact),
+            "qs JSON must emit the canonical key {k:?} (matching \
+             search/tag/browse/resolve); got: {out}"
+        );
+    }
+    // The legacy family must be absent in BOTH render styles.
+    for k in [
+        "page_uuid",
+        "page_uuid_short",
+        "page_display_id",
+        "page_title",
+        "own_hash",
+    ] {
+        let spaced = format!("\"{k}\": ");
+        let compact = format!("\"{k}\":");
+        assert!(
+            !out.contains(&spaced) && !out.contains(&compact),
+            "qs JSON must NOT emit the legacy / qs-specific key {k:?}; got: {out}"
+        );
+    }
+}
+
+#[test]
+fn qs_json_single_match_uses_canonical_page_identity_names() {
+    let s = Qs::new("identity_single");
+    s.page("one.md", "One", "# One\nthe quokka burrows\n");
+    let (code, _o, err) = s.add();
+    assert_eq!(code, 0, "add: {err}");
+
+    let (code, out, err) = s.run(&["qs", "--json", "quokka"]);
+    assert_eq!(code, 0, "qs --json: {err}");
+    assert!(
+        out.contains("\"match\": {") || out.contains("\"match\":{"),
+        "single-hit JSON must populate 'match': {out}"
+    );
+    assert_canonical_uuid_shape(&out);
+}
+
+#[test]
+fn qs_json_ambiguous_candidates_use_canonical_page_identity_names() {
+    let s = Qs::new("identity_amb");
+    s.page("one.md", "One", "# One\nthe quokka burrows\n");
+    s.page("two.md", "Two", "# Two\nthe quokka digs\n");
+    let (code, _o, err) = s.add();
+    assert_eq!(code, 0, "add: {err}");
+
+    let (code, out, err) = s.run(&["qs", "--json", "quokka"]);
+    assert_eq!(code, 0, "qs --json: {err}");
+    assert!(
+        out.contains("\"candidates\": [") || out.contains("\"candidates\":["),
+        "ambiguous-hit JSON must populate 'candidates': {out}"
+    );
+    assert_canonical_uuid_shape(&out);
+}
