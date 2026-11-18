@@ -556,6 +556,83 @@ pub fn backfill_uuid(conn: &crate::sql::Connection) -> Result<usize> {
     Ok(filled)
 }
 
+/// One-time, idempotent backfill of the `sections` index for pages that
+/// predate the `'*'`-preamble / per-heading rows (introduced at §v3). `migrate`
+/// creates the `sections` table, but a `pages` row written before that — or a
+/// page never re-indexed since — has *no* `sections` rows, so `kb quick-search`
+/// returns nothing for it. This derives each page's rows from the `body` it
+/// already stores (the very input `build_page` feeds `Doc::export_rows`), so a
+/// live database back-fills *without* touching the filesystem.
+///
+/// The section rows are re-exported per page and re-inserted wholesale (mirror
+/// of `upsert_page` step 5): `own_hash` is derived identically there, so a
+/// re-run is content-stable (`INSERT OR IGNORE` keeps the first). Bounded
+/// memory as in [`backfill_uuid`] — a fixed `LIMIT` per iteration, streamed
+/// into a `Vec`, then written and re-selected — so the largest live
+/// allocation is one batch of page bodies, not the whole `pages` table.
+///
+/// Returns the number of pages back-filled (0 when every page already has
+/// rows — the steady state this leaves the database in).
+pub fn backfill_sections(conn: &crate::sql::Connection) -> Result<usize> {
+    const BATCH: i64 = 1000;
+    let mut filled = 0usize;
+    loop {
+        let stmt = conn.prepare(
+            "SELECT uuid, title, body, mtime_ns
+             FROM pages
+             WHERE uuid IS NOT NULL AND uuid <> ''
+               AND NOT EXISTS (SELECT 1 FROM sections s WHERE s.page_uuid = pages.uuid)
+             LIMIT ?1",
+        )?;
+        let batch: Vec<(String, Option<String>, Option<String>, i64)> = stmt
+            .query_map(params![BATCH], |r| {
+                Ok((
+                    r.get::<_, String>(0)?,
+                    r.get::<_, Option<String>>(1)?,
+                    r.get::<_, Option<String>>(2)?,
+                    r.get::<_, i64>(3)?,
+                ))
+            })?
+            .collect::<Result<Vec<_>>>()?;
+        if batch.is_empty() {
+            break;
+        }
+        let del = conn.prepare_cached("DELETE FROM sections WHERE page_uuid = ?1")?;
+        let ins = conn.prepare_cached(
+            "INSERT OR IGNORE INTO sections (page_uuid, ref, ordinal, level, title,\
+             own_body, full_body, own_end_line, mtime_ns, own_hash) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+        )?;
+        for (uuid, title, body, mtime_ns) in batch {
+            let body = body.unwrap_or_default();
+            let page_title = title.unwrap_or_default();
+            let doc = kb_section::Doc::new(body.as_bytes().to_vec());
+            let rows = doc.export_rows(&page_title);
+            del.execute(params![uuid])?;
+            for (ordinal, s) in rows.iter().enumerate() {
+                let own_hash =
+                    etag_of(format!("{}\0{}\0{}", s.ref_, s.title, s.own_body).as_bytes());
+                ins.execute(params![
+                    uuid,
+                    s.ref_,
+                    ordinal as i64,
+                    s.level as i64,
+                    s.title,
+                    s.own_body,
+                    s.full_body,
+                    s.own_end_line as i64,
+                    mtime_ns,
+                    own_hash,
+                ])?;
+            }
+            filled += 1;
+        }
+        drop(del);
+        drop(ins);
+    }
+    Ok(filled)
+}
+
 /// Delete a page (and its row-table entries) from the DB. Called by the
 /// refresh GC when a file is no longer under any registered root.
 pub fn delete_page(db: &Db, abs_path: &str) -> Result<usize> {
@@ -841,5 +918,106 @@ mod tests {
         // Idempotent: a re-run finds no sentinel rows at all (both already set).
         let again = backfill_uuid(&conn).unwrap();
         assert_eq!(again, 0, "second backfill must be a no-op; got {again}");
+    }
+
+    /// §v3 backfill, the "nothing in the DB" case: a `pages` row written before
+    /// the `sections` table exists (or never re-indexed since) has *no*
+    /// section rows, so `kb quick-search` misses it. `backfill_sections` must
+    /// derive that page's rows from its stored `body` — the exact input
+    /// `build_page` feeds `Doc::export_rows` — so the result is content
+    /// identical to a fresh index: the `'*'` preamble row (title from the
+    /// stored `pages.title`) + one row per heading. And it must be idempotent
+    /// (a re-run reports 0: the `NOT EXISTS` predicate no longer matches).
+    #[test]
+    fn backfill_sections_derives_rows_from_stored_body_and_is_idempotent() {
+        let conn = crate::sql::Connection::open_in_memory().unwrap();
+        crate::migrate::migrate(&conn).unwrap(); // §v3 schema, `sections` empty
+
+        // A legacy page: it carries a body but, from an older build, no
+        // section rows. The `'*'` row's `title` must be the page's slug
+        // (matching `build_page`'s `export_rows(&slug)`). A *preamble* page
+        // (text before the first heading) is the interesting case: the `'*'`
+        // row must carry that intro span, and each heading its own body.
+        let id = "note:Backfill";
+        let abs = "/r/legacy.md";
+        let body = "introduction text\n\n## One\none body\n\n## Two\ntwo body\n";
+        conn.execute(
+            "INSERT INTO pages (abs_path, id, type, root, rel_path, title, mtime_ns, content_hash, uuid)
+             VALUES (?1,?2,'note','/r','legacy.md',?3,9999,'h',?4)",
+            params![abs, id, id, kb_core::uuid::uuid_of(id, abs)],
+        )
+        .unwrap();
+        conn.execute(
+            "UPDATE pages SET body = ?1 WHERE abs_path = ?2",
+            params![body, abs],
+        )
+        .unwrap();
+
+        let before: i64 = conn
+            .query_row("SELECT COUNT(*) FROM sections", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(before, 0, "start: sections is empty");
+
+        let filled = backfill_sections(&conn).unwrap();
+        assert_eq!(
+            filled, 1,
+            "must derive the legacy page's rows; got {filled}"
+        );
+
+        // `'*'` preamble row: the text before the first heading, titled by slug.
+        let (star_level, star_title, star_body): (i64, String, String) = conn
+            .query_row(
+                "SELECT level, title, own_body FROM sections WHERE ref = '*'",
+                [],
+                |r| {
+                    Ok((
+                        r.get::<_, i64>(0)?,
+                        r.get::<_, String>(1)?,
+                        r.get::<_, String>(2)?,
+                    ))
+                },
+            )
+            .expect("'*' row present");
+        assert_eq!(star_level, 0, "the '*' row is page-level; got {star_level}");
+        assert_eq!(
+            star_title, id,
+            "'*' row titled by the page slug; got {star_title:?}"
+        );
+        assert!(
+            star_body.contains("introduction text"),
+            "'*' row must be the preamble; got {star_body:?}"
+        );
+
+        // Headings: One + Two, each with its own body.
+        let one_body: String = conn
+            .query_row(
+                "SELECT own_body FROM sections WHERE title = 'One'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert!(one_body.contains("one body"), "One body: {one_body:?}");
+        let two_body: String = conn
+            .query_row(
+                "SELECT own_body FROM sections WHERE title = 'Two'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert!(two_body.contains("two body"), "Two body: {two_body:?}");
+
+        // Total rows: '*' + One + Two = 3.
+        let total: i64 = conn
+            .query_row("SELECT COUNT(*) FROM sections", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(total, 3, "'*' + 2 headings; got {total}");
+
+        // Idempotent: the `NOT EXISTS` predicate no longer matches.
+        let again = backfill_sections(&conn).unwrap();
+        assert_eq!(again, 0, "second backfill must be a no-op; got {again}");
+        let total2: i64 = conn
+            .query_row("SELECT COUNT(*) FROM sections", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(total2, 3, "no duplicated rows after re-run; got {total2}");
     }
 }
