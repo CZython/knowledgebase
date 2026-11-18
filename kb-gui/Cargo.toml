@@ -1,0 +1,40 @@
+# kb-gui — the native egui desktop client for `kb` (PLAN-GUI.md)
+#
+# A *new assumed shell*, sibling to `kb-user`/`kb-hardened` (PLAN-GUI §3.1):
+# it depends on the proven core (`kb-core`) and the DB shell (`kb-db`) and
+# duplicates the CLI/TUI data-layer behavior under `kb-gui/src/data` — no
+# `kb-shell` crate. Its duplication is guarded by parity tests against the
+# CLI/TUI as milestones land (G0 has none yet).
+#
+# Excluded from the workspace `default-members` (root Cargo.toml) so a plain
+# `cargo build` / CI of the CLI is unchanged; build it explicitly:
+#   cargo build -p kb-gui
+#
+# Native only: eframe/egui with the `glow` render path — no webview, no wgpu
+# adapter probe before the first frame (PLAN-GUI §3.4, §4).
+[package]
+name = "kb-gui"
+publish = false
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+description = "kb-gui — a native egui desktop client for the kb knowledge base: browse, search, read, and edit a Markdown corpus. Package `kb-gui`, binary `kb-gui`."
+
+[lints]
+# Inherit the workspace lint levels verbatim (`unsafe_code = "forbid"`).
+workspace = true
+
+[[bin]]
+name = "kb-gui"
+path = "src/main.rs"
+
+[dependencies]
+clap    = { workspace = true }
+kb-core = { workspace = true }
+kb-db   = { workspace = true }
+eframe  = { workspace = true }
+egui    = { workspace = true }
+rfd             = { workspace = true }
+pulldown-cmark  = { workspace = true }

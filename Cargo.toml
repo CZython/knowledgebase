@@ -12,7 +12,10 @@
 # "proven" (kb-core) and "assumed" (kb-db + the shell) so that boundary is
 # visible in the crate graph. See PLAN.md §9/§10 and HARDENED_BUILD.md.
 resolver = "2"
-members = ["kb-core", "kb-db", "kb-user", "kb-hardened"]
+members = ["kb-core", "kb-db", "kb-user", "kb-hardened", "kb-gui"]
+# `kb-gui` is excluded from the default build: `cargo build` / CI of the CLI
+# stays unchanged (PLAN-GUI §3.1). Build it explicitly: `cargo build -p kb-gui`.
+default-members = ["kb-core", "kb-db", "kb-user", "kb-hardened"]
 
 # Shared lint levels, inherited by every crate (PLAN §9/§10: the whole tree
 # is `unsafe`-free — no `unsafe` in kb-core, kb-db, the CLI body, or any
@@ -105,3 +108,31 @@ unicode-width = "0.2"
 # never pulls them into its dep tree.
 serde = { version = "1", features = ["derive"] }
 toml  = "0.8"
+
+# --- GUI (kb-gui only) ---
+# eframe/egui desktop, native (no webview: PLAN-GUI §4). G0 pins the exact
+# render path: `default-features = false` + `glow` so we never pay for a wgpu
+# adapter probe before the first frame (PLAN-GUI §3.4). `default_fonts`,
+# `x11`, `wayland`, `clipboard`, `accesskit` are the Linux-native closure of
+# winit; `links` is deferred (no hyperlink handling in G0). Pinned to the
+# exact cached release on this box — do not float (PLAN-GUI §4).
+eframe = { version = "0.37.0", default-features = false, features = [
+    "glow",
+    "default_fonts",
+    "system_fonts",
+    "clipboard",
+    "accesskit",
+    "x11",
+    "wayland",
+] }
+egui   = { version = "0.37.0" }
+
+# --- GUI native dialogs + Markdown (kb-gui only) ---
+# Native (X11/Wayland/macOS/Windows) file & folder pickers via the XDG
+# desktop portal; the lightest feature set that works on both X11 and Wayland
+# (no GTK dependency needed). G1 uses it for "Add folder as root" (§6.14) and
+# "Open Markdown file…" (§6.13).
+rfd = { version = "0.17", default-features = false, features = ["xdg-portal"] }
+# Markdown parsing for the read-only formatted renderer (G1 §6.8 / §7) and the
+# local outline panel. Only our own IR is used; the HTML renderer is unused.
+pulldown-cmark = "0.13"
