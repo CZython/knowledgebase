@@ -31,7 +31,6 @@ pub(crate) struct QsRow {
     pub(crate) own_body: String,
     pub(crate) full_body: Option<String>,
     pub(crate) own_end_line: i64,
-    pub(crate) own_hash: String,
     pub(crate) score: f64,
 }
 
@@ -258,7 +257,9 @@ pub(crate) fn qs_rows(
             let own_body: String = r.get(5)?;
             let full_body: Option<String> = r.get(6)?;
             let own_end_line: i64 = r.get(7)?;
-            let own_hash: String = r.get(8)?;
+            // (index 8 is sections.own_hash — the stored index-time etag;
+            //  deliberately NOT read into the row. An `if_unchanged` etag
+            //  must come from the live file via `kb show`, not from here.)
             let page_display_id: String = r.get(9)?;
             let page_title: Option<String> = r.get(10)?;
             let page_abs_path: String = r.get(11)?;
@@ -280,7 +281,6 @@ pub(crate) fn qs_rows(
                 own_body,
                 full_body,
                 own_end_line,
-                own_hash,
                 score,
             })
         })
@@ -378,16 +378,22 @@ fn render_json(
 }
 
 /// One `match` object (the full record for a single / forced row).
+///
+/// Page-identity fields use the **canonical names shared by `search`, `tag`,
+/// `browse`, and `resolve`** — `id` (display id), `uuid` (full), and
+/// `uuid_short` (shortest-unique prefix) — *not* `qs`-specific variants, so a
+/// consumer that reads one `kb` surface can read every other. The section's
+/// own `ref` / `section_title` / body span stay (they are `qs`-specific).
 fn render_match_obj(r: &QsRow, full: bool) -> String {
     let mut o = JObject::new();
-    o.s("page_uuid", &r.page_uuid);
+    o.s("uuid", &r.page_uuid);
     if !r.page_uuid_short.is_empty() && r.page_uuid_short != r.page_uuid {
-        o.s("page_uuid_short", &r.page_uuid_short);
+        o.s("uuid_short", &r.page_uuid_short);
     }
-    o.s("page_display_id", &r.page_display_id);
+    o.s("id", &r.page_display_id);
     if let Some(t) = &r.page_title {
         if !t.is_empty() {
-            o.s("page_title", t);
+            o.s("title", t);
         }
     }
     o.s("ref", &r.ref_);
@@ -401,19 +407,28 @@ fn render_match_obj(r: &QsRow, full: bool) -> String {
         }
     }
     o.i("own_end_line", r.own_end_line);
-    o.s("own_hash", &r.own_hash);
     o.raw("score", format!("{:.6}", r.score));
     o.render()
 }
 
 /// One `candidates` entry (a narrower handle + score, no body).
+///
+/// Same **canonical** page-identity names as `render_match_obj` (and as
+/// `search` / `tag` / `browse` / `resolve`): `uuid`, `uuid_short`, `id` — so
+/// the candidate list and the `match` object (and every other `kb` surface)
+/// speak one vocabulary.
 fn render_candidate_obj(r: &QsRow) -> String {
     let mut o = JObject::new();
-    o.s("page_uuid", &r.page_uuid);
+    o.s("uuid", &r.page_uuid);
     if !r.page_uuid_short.is_empty() && r.page_uuid_short != r.page_uuid {
-        o.s("page_uuid_short", &r.page_uuid_short);
+        o.s("uuid_short", &r.page_uuid_short);
     }
-    o.s("page_display_id", &r.page_display_id);
+    o.s("id", &r.page_display_id);
+    if let Some(t) = &r.page_title {
+        if !t.is_empty() {
+            o.s("title", t);
+        }
+    }
     o.s("ref", &r.ref_);
     o.i("level", r.level);
     o.i("ordinal", r.ordinal);

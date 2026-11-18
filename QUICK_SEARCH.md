@@ -478,44 +478,56 @@ the consumer's call, not the search's.
   "query": "<the original query string, verbatim>",
 
   "match": {
-    "page_uuid": "…",              // full 16-hex page identity
-    "page_uuid_short": "…",        // shortest-unique prefix (resolver-friendly)
-    "page_display_id": "wiki:components",   // type:slug
-    "page_title": "…",
-    "page_type": "wiki",
+    // Page identity — the SAME field names `search`, `tag`, `browse`, and
+    // `resolve` use (one vocabulary across every `kb` surface):
+    "uuid": "…",                    // full 16-hex page identity (pages.uuid)
+    "uuid_short": "…",              // shortest-unique prefix (resolver-friendly)
+    "id": "wiki:components",        // type:slug
+    "title": "…",
+    // Section span — `qs`-specific (the page-level fields above are the
+    // canonical ones; the span fields below are this verb's payload):
     "ref": "1.3",                  // canonical dotted number; '*' for the
                                     // page-level (preamble) row
     "level": 2,                    // 0 for the page-level row, else 1..=6
     "section_title": "Thyristor",  // the page title for the '*' row
-    "own_body": "…",              // span, subs EXCL; the PREAMBLE
-                                   // (body[0..preamble_end], or the whole
-                                   // body for a heading-less page) for '*'
-    "full_body": "…",             // span incl. subs; == own_body for '*' row
-    "own_end_line": 124,          // GUI position hints
-    "ordinal": 5,                // document order within the page (* is 0)
-    "own_hash": "…",              // etag of (ref, title, own_body)
-    "score": 12.4                 // fts_score over (title, own_body)
+    "own_body": "…",               // span, subs EXCL; the PREAMBLE
+                                    // (body[0..preamble_end], or the whole
+                                    // body for a heading-less page) for '*'
+    "full_body": "…",              // span incl. subs; == own_body for '*' row
+    "own_end_line": 124,           // GUI position hints
+    "ordinal": 5,                  // document order within the page (* is 0)
+    "score": 12.4                  // fts_score over (title, own_body)
   } | null,
   // `match` is populated iff status == "single" (or "ambiguous" + --force)
+  //
+  // Note: `match.id` uses the same name as `search`/`tag`/`browse`/`resolve`
+  // for the *page's* display id (the `type:slug`), and `match.uuid` is the
+  // page's full 16-hex identity. An agent that takes a `qs` hit and then
+  // `kb show <uuid> <ref>` (or `if_unchanged`-edits it) must read the etag
+  // from `kb show`, **not** from `qs`'s `own_body`/`own_end_line`/etc. — the
+  // section's stored `sections.own_hash` was deliberately NOT surfaced in the
+  // JSON because it is index-time etag material, and an `if_unchanged`
+  // etag must be derived from the live file.
 
   "candidates": [                  // populated iff status == "ambiguous"
     {
-      "page_uuid": "…",
-      "page_display_id": "wiki:components",
+      "uuid": "…",                 // full page uuid
+      "id": "wiki:components",     // type:slug
       "ref": "1.3",
       "level": 2,
       "ordinal": 5,
       "section_title": "Thyristor",
       "score": 12.4
     },
-    { "page_uuid": "…", "ref": "*", "level": 0, "ordinal": 0,
+    { "uuid": "…", "id": "wiki:Watchmaking", "ref": "*", "level": 0,
+      "ordinal": 0,
       "section_title": "Watchmaking: bespoke Flieger build log", "score": 4.1 },
     { … }
   ],
 
-  "hint": "<page-uuid> <ref>" | null   // copy-pasteable `kb show` target;
-                                        // for the '*' row, ref is omitted
-                                        // (kb show <page-uuid>, no ref)
+  "hint": "<uuid> <ref>" | null   // copy-pasteable `kb show` target;
+                                   // for the '*' row, ref is omitted
+                                   // (kb show <uuid>, no ref)
 }
 ```
 
@@ -524,7 +536,7 @@ For the GUI: read `status`; `single` → render `match.own_body` (or
 and fetch a candidate's full body on demand via `kb show`
 (→ `candidate.hint` is the paste target); `empty` → surface the
 narrowing hint. The `match.*` fields the consumer does not render
-(`page_uuid`, `own_hash`, `score`, `page_display_id`, …) are
+(`uuid`, `score`, `id`, …) are
 **returned anyway** — preserve them, cache them, or drop them.
 
 ## Flags (the minimal set)
