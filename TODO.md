@@ -1,0 +1,96 @@
+# TODO — 5-task roadmap
+
+Status legend: `[ ]` not started · `[~]` in progress · `[x]` done
+
+---
+
+## T1 — GUI (egui desktop client)
+
+Spec: `PLAN-GUI.md`. Crate: new `kb-gui` in the workspace.
+
+- [ ] G0 — Foundation
+  - [ ] Add `kb-gui` cargo package (binary) to the workspace; pin `egui`/`eframe` versions
+  - [ ] Startup sequence within budget: open DB, load roots, first frame (PLAN-GUI §3.4)
+  - [ ] Window layout skeleton: top bar / collections rail / note list / editor host / status bar (§6.1–6.7)
+  - [ ] DB access off the render thread (§3.2); source-of-truth contract (§3.3)
+- [ ] G1 — All pages + collections + search parity
+  - [ ] Pages list grouped by root/collection (§2.1, 6.3–6.4)
+  - [ ] Search overlay with parity to `kb search` and `kb qs` (§6.8)
+  - [ ] Launch states: no path/ref → home (§6.13); no roots → welcome + add-root flow (§6.14)
+- [ ] G2 — Raw editor + save + frontmatter
+  - [ ] Raw Markdown editor, save to disk, dirty tracking (§9.2)
+  - [ ] Frontmatter inspector (§6.9)
+- [ ] G3 — Formatted read view + generic Markdown
+  - [ ] Read-only rendered view, no embedded browser (§7)
+  - [ ] Generic Markdown + conversion rules (§6.15)
+- [ ] G4 — WYSIWYG block editing MVP
+  - [ ] Block-span model, structural edits, inline formatting, round-trip guarantees (§8)
+- [ ] G5 — Settings and corpus management parity
+  - [ ] Roots add/drop, refresh, tag aliases visible in UI (§6.12)
+- [ ] G6 — Polish: theming/custom themes (§11), keyboard shortcuts (§6.11), dialogs (§6.10)
+- [ ] G7 — Packaging and release (shares infrastructure with T5)
+- [ ] Testing: unit, integration, manual matrix, startup measurement, CI gates (§13)
+
+---
+
+## T2 — MCP server
+
+Spec: `MCP.md`. Home: `kb-hardened`, hidden `kb mcp` subcommand, stdio JSON-RPC.
+
+- [ ] JSON-RPC over stdio skeleton inside `kb-hardened` (hand-rolled or minimal dep, no network)
+- [ ] `initialize` / `tools/list` / `tools/call` for the curated tool surface (MCP §"Tool surface")
+- [ ] Sanitizer chokepoint: `kb/mcp/sanitizer.rs`, no-path-escape + no-network properties with tests (§"The sanitizer")
+- [ ] Identity: uuid in, path never out (§"Identity")
+- [ ] Per-page opt-out honored: `mcp_hidden: true` frontmatter (§"Per-page opt-out")
+- [ ] Hidden subcommand: not in `--help`, documented as hidden (verification checklist §"The surface is hidden")
+- [ ] Verification checklist green: works, no network, escape property tests, build gate (§"Verification checklist")
+- [ ] Resolve open decisions (MCP §"Open decisions (blocked on the user)")
+
+---
+
+## T3 — E2E test: install → create → search → toc → refresh
+
+- [ ] Write cross-platform e2e script: `cargo install` from tag → create root → create pages → `kb search` → `kb toc` → `kb refresh`; assert expected JSON/exit codes
+- [ ] Run green on Linux (native + musl binary)
+- [ ] Run on Windows: **Win10 VM in QEMU/KVM is available for local instrumentation** (SSH/VNC in; pass PAT + `--db` as env, not args)
+  - [ ] Capture the known-Windows problems and file/fix them here before CI (see T4)
+- [ ] Parameterize: `--db` path, page count, assertions as a single shared harness (shell or Rust test)
+
+T3/T4 note: Windows problems spotted up front — the known suspect areas: path quoting in shell scripts, `~`/`USERPROFILE` data-dir resolution, `kb.db-wal`/`kb.db-shm` file locking under Windows, `cargo install` exit-code surfacing, and UTF-8 in the Windows console. Confirm each or clear it on the VM.
+
+---
+
+## T4 — E2E in CI (Linux + Windows)
+
+- [ ] `ci.yml`: add `e2e-linux` job (runs T3 harness on the linux-musl binary)
+- [ ] `ci.yml`: add `e2e-windows` job (MSVC runner; `cargo install` → T3 harness via PowerShell, not bash)
+- [ ] Ensure the 5 gates still run and auto-merge-dev fires on all green
+- [ ] Gate T3 harness as its own artifact or checked-in script so both jobs share one source of truth
+
+---
+
+## T5 — Native packaging
+
+Spec: `PACKAGING.md`. Users need a clickable icon per platform.
+
+- [ ] `dist/nfpm.yaml` + `dist/package-linux.sh` → `.deb` and `.pkg.tar.zst`
+- [ ] `dist/package-appimage.sh` + `AppDir`/`AppRun` → `.AppImage`
+- [ ] Windows `.msi` via cargo-wix (author + commit WiX files)
+- [ ] macOS `.pkg` via `pkgbuild`
+- [ ] **Uninstall-keeps-pages contract** per platform: delete DB + sidecars + (empty) data dir, never Markdown pages
+  - [ ] Linux: generated `postrm` / `kb_uninstall_data()` function
+  - [ ] AppImage: `--uninstall`
+  - [ ] Windows: MSI cleanup (D9 sibling-package guard)
+  - [ ] macOS: bundled `kb-uninstall` helper (receipts, not `command -v`)
+- [ ] `release.yml`: platform matrix (linux, windows, macos), upload globs, checksums job
+- [ ] Icons: ship platform icons (`.png`/`.ico`/`.icns`) in the packages so installers show a clickable icon
+- [ ] Verification matrix per platform (PACKAGING §"Verification matrix"), including Windows smoke test on the VM
+- [ ] Phase 4 (later): signing + notarization, needs GITHUB secrets
+
+---
+
+## Sequence (fixed, user-ordered)
+
+T1 → T2 → T3 → T4 → T5.
+
+Win10 QEMU/KVM VM is available for T3/T4 (Windows e2e) and T5 (Windows packaging smoke tests).
