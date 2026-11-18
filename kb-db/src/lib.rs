@@ -229,6 +229,10 @@ impl Db {
         // column. No-op (single empty SELECT) once every row carries a uuid,
         // and again after the first `refresh`/`create` (which populate it).
         index::backfill_uuid(&self.conn)?;
+        // §v3 one-time backfill: derive each pre-§v3 page's `sections` rows
+        // from its stored `body`, so `kb quick-search` works on a live database
+        // without a `refresh`/re-`add`. No-op once every page has rows.
+        index::backfill_sections(&self.conn)?;
         Ok(())
     }
 
