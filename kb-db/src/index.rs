@@ -29,8 +29,8 @@ use crate::Db;
 use kb_core::frontmatter;
 use kb_core::identity;
 use kb_core::links;
-use kb_core::section as kb_section;
 use kb_core::meta::NoteType;
+use kb_core::section as kb_section;
 use kb_core::tags as kb_tags;
 use std::path::Path;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -465,9 +465,7 @@ pub fn upsert_page(db: &Db, rec: &PageRecord) -> Result<usize> {
          VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
     )?;
     for (ordinal, s) in rec.section_rows.iter().enumerate() {
-        let own_hash = etag_of(
-            format!("{}\0{}\0{}", s.ref_, s.title, s.own_body).as_bytes(),
-        );
+        let own_hash = etag_of(format!("{}\0{}\0{}", s.ref_, s.title, s.own_body).as_bytes());
         ins_sec.execute(params![
             rec.uuid,
             s.ref_,
@@ -575,10 +573,7 @@ pub fn delete_page(db: &Db, abs_path: &str) -> Result<usize> {
         .flatten();
     let tx = db.conn.unchecked_transaction()?;
     if let Some(uuid) = &uuid {
-        tx.execute(
-            "DELETE FROM sections WHERE page_uuid = ?1",
-            params![uuid],
-        )?;
+        tx.execute("DELETE FROM sections WHERE page_uuid = ?1", params![uuid])?;
     }
     tx.execute(
         "DELETE FROM page_gates WHERE abs_path = ?1",

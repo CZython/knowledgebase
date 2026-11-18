@@ -1588,13 +1588,23 @@ mod tests {
         let t = "plain body line one\nplain body line two\n";
         let d = Doc::new(t.as_bytes().to_vec());
         let rows = d.export_rows("Plain");
-        assert_eq!(rows.len(), 1, "a heading-less page exports exactly the '*' row");
+        assert_eq!(
+            rows.len(),
+            1,
+            "a heading-less page exports exactly the '*' row"
+        );
         let r = &rows[0];
         assert_eq!(r.ref_, "*");
         assert_eq!(r.level, 0);
         assert_eq!(r.title, "Plain");
-        assert_eq!(r.own_body, t, "'*' own_body is the whole body when there are no headings");
-        assert_eq!(r.full_body, None, "no subsections ⇒ full_body is the (empty-encoding) None");
+        assert_eq!(
+            r.own_body, t,
+            "'*' own_body is the whole body when there are no headings"
+        );
+        assert_eq!(
+            r.full_body, None,
+            "no subsections ⇒ full_body is the (empty-encoding) None"
+        );
     }
 
     #[test]
@@ -1611,13 +1621,19 @@ mod tests {
         let top = &rows[1];
         assert_eq!(top.ref_, "1");
         assert_eq!(top.own_body, "# Top\n\nTop body\n\n");
-        assert!(top.full_body.is_some(), "a parent row has subsections ⇒ Some full_body");
+        assert!(
+            top.full_body.is_some(),
+            "a parent row has subsections ⇒ Some full_body"
+        );
         // full_body for `1` = from `# Top` through the end of `## Sub`.
         let want_top_full = "# Top\n\nTop body\n\n## Sub\n\nSub body\n";
         assert_eq!(top.full_body.as_deref().unwrap(), want_top_full);
         let sub = &rows[2];
         assert_eq!(sub.ref_, "1.1");
-        assert!(sub.full_body.is_none(), "a leaf row's full span == own span ⇒ None");
+        assert!(
+            sub.full_body.is_none(),
+            "a leaf row's full span == own span ⇒ None"
+        );
     }
 
     #[test]
@@ -1637,10 +1653,15 @@ mod tests {
     #[test]
     fn export_rows_fenced_hash_is_not_a_heading() {
         // A `#` inside a fenced code block must stay body, not open a section.
-        let t = "# Real\n\ntext with a fence:\n```\n# not a heading\n## still not\n```\n\n## Second\n";
+        let t =
+            "# Real\n\ntext with a fence:\n```\n# not a heading\n## still not\n```\n\n## Second\n";
         let d = Doc::new(t.as_bytes().to_vec());
         let rows = d.export_rows("Real");
-        assert_eq!(rows.len(), 3, "* + Real + Second — the fenced # lines are sections");
+        assert_eq!(
+            rows.len(),
+            3,
+            "* + Real + Second — the fenced # lines are sections"
+        );
         let first = &rows[1];
         assert!(
             first.own_body.contains("# not a heading"),
