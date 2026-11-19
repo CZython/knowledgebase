@@ -4,6 +4,9 @@
 target/
 **/*.rs.bk
 
+# X11 GUI smoke-test scratch (screenshots, runtime DB/WAL, launcher, pid)
+.smoke/
+
 # Build artifacts produced by dist/build-*.sh (keep the .sh scripts tracked).
 dist/*.AppImage
 dist/kb-*

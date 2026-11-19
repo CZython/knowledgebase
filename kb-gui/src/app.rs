@@ -14,13 +14,13 @@
 //! "Add folder as root" / "Open Markdown file" flows that the Welcome and
 //! Home screens (and `☰`) use.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 
 use eframe::egui;
 
 use crate::data::{self, WorkerHandle};
-use crate::state::{AppState, LaunchRoute, OpenPageState, ThemeChoice, ViewMode};
+use crate::state::{AppState, DocumentKind, LaunchRoute, OpenPageState, ThemeChoice, ViewMode};
 
 /// The top-level application (one per window).
 pub struct App {
@@ -147,6 +147,14 @@ impl App {
         }
     }
 
+    /// `true` when the page at `abs_path` has a corpus row (PLAN-GUI §162–182
+    /// "indexed in pages" — the distinguishing fact between a `KbPage` and an
+    /// `UnindexedMarkdown`). Read for document classification in the
+    /// `Evt::Page` fold.
+    fn is_indexed(&self, abs_path: &str) -> bool {
+        self.state.pages.iter().any(|p| p.abs_path == abs_path)
+    }
+
     /// Select a page by abs_path. Triggers a body load through the worker;
     /// the body lands in `open_page` when the `Evt::Page` arrives.
     pub fn open_page(&mut self, abs_path: &str) {
@@ -160,6 +168,8 @@ impl App {
                 body: None,
                 error: None,
                 baseline: None,
+                kind: DocumentKind::GenericMarkdown,
+                banner_dismissed: false,
             });
         }
         if let Some(worker) = &self.worker {
@@ -173,6 +183,39 @@ impl App {
     pub fn close_page(&mut self) {
         self.state.selected_page = None;
         self.state.open_page = None;
+    }
+
+    /// Dismiss the open document's conversion/add-root banner for the
+    /// session (PLAN-GUI §6.15 rule 6). Non-fatal: the action remains
+    /// available from the `⋯` menu / Settings, so dismissal is not permanent.
+    pub fn dismiss_banner(&mut self) {
+        if let Some(slot) = self.state.open_page.as_mut() {
+            slot.banner_dismissed = true;
+        }
+    }
+
+    /// Open the conversion dialog for the open (generic/unindexed) document
+    /// (PLAN-GUI §6.15 "Convert flow"; G3 wires the dialog + `Cmd::ConvertPage`).
+    pub fn open_conversion(&mut self) {
+        self.state.convert_open = true;
+    }
+
+    /// Add the open document's containing folder as a root, then re-index
+    /// (PLAN-GUI §6.15 "UnindexedMarkdown" banner → **Add root**). The worker
+    /// re-loads the corpus on success; the next `Evt::Page` re-fold
+    /// re-classifies the now-indexed document as a `KbPage` and the banner
+    /// disappears.
+    pub fn add_root_for_open_page(&mut self) {
+        let Some(path) = self.state.open_page.as_ref().map(|p| p.abs_path.clone()) else {
+            return;
+        };
+        let parent = Path::new(&path)
+            .parent()
+            .map(|p| p.to_path_buf())
+            .unwrap_or_default();
+        if let Some(worker) = &self.worker {
+            worker.send(data::Cmd::AddRoot(parent));
+        }
     }
 
     /// Apply the one-shot launch route (`kb-gui <file>` /
@@ -208,6 +251,16 @@ impl App {
         }
         if let Some(abs) = resolved {
             self.state.view_mode = ViewMode::Raw;
+            self.open_page(&abs);
+        } else if std::path::Path::new(spec).is_file() {
+            // Not in the corpus (generic/outside-roots markdown), but a real
+            // file on disk (PLAN-GUI §181: "a file path always opens; only
+            // `kb` features are gated"). Open it directly — the `Evt::Page`
+            // fold classifies it (banner + disabled features).
+            let canonical =
+                std::fs::canonicalize(spec).unwrap_or_else(|_| std::path::PathBuf::from(spec));
+            let abs = canonical.to_string_lossy().into_owned();
+            self.state.view_mode = ViewMode::Formatted;
             self.open_page(&abs);
         }
     }
@@ -272,6 +325,38 @@ impl App {
                 gates,
                 description: None,
                 language: None,
+            });
+        }
+    }
+
+    /// Convert the open (generic/unindexed) document into a full `KbPage`
+    /// (PLAN-GUI §6.15 "Convert flow"). Sends `Cmd::ConvertPage` with the
+    /// open page's baseline (conflict guard) + the dialog's `type:` /
+    /// `title:` / `tags:` / `gates:`; the worker preserves the body + other
+    /// frontmatter, sets/extends the frontmatter, adds a root if needed,
+    /// writes atomically, reindexes, and answers with `Converted` /
+    /// `Conflict` / `Warn`.
+    pub fn convert_open_page(
+        &mut self,
+        page_type: String,
+        title: String,
+        tags: Vec<String>,
+        gates: Vec<String>,
+    ) {
+        let slot = match self.state.open_page.as_ref() {
+            Some(s) if s.body.is_some() && s.baseline.is_some() => s,
+            _ => return,
+        };
+        let abs_path = slot.abs_path.clone();
+        let baseline = slot.baseline.clone().unwrap_or_default();
+        if let Some(worker) = &self.worker {
+            worker.send(data::Cmd::ConvertPage {
+                abs_path,
+                expected_disk: baseline,
+                page_type,
+                title,
+                tags,
+                gates,
             });
         }
     }
@@ -683,6 +768,30 @@ impl App {
                 ungated_count,
                 distinct_languages,
             } => {
+                // A *later* corpus load (e.g. an `AddRoot` / `Refresh`) changed
+                // the indexed set — if the currently-open page is now in the
+                // corpus, re-classify it (UnindexedMarkdown → KbPage) so the
+                // banner drops and `kb` features enable (PLAN-GUI §6.15 step 4).
+                if let Some(slot) = self.state.open_page.as_ref() {
+                    if let Some(body) = &slot.body {
+                        let new_kind =
+                            crate::state::classify(body, self.is_indexed(&slot.abs_path));
+                        if new_kind != slot.kind
+                            && !slot.banner_dismissed
+                            && new_kind == DocumentKind::KbPage
+                        {
+                            // The document is now a full `kb` page — drop the
+                            // banner and mark it clean (PLAN-GUI §6.15 step 4).
+                            // No re-open needed: the body is current on disk.
+                            if let Some(s) = self.state.open_page.as_mut() {
+                                s.kind = new_kind;
+                                s.banner_dismissed = false;
+                            }
+                            self.last_warn = None;
+                            self.state.save_status = data::SaveStatus::Saved;
+                        }
+                    }
+                }
                 // The corpus (and its collection facets + visibility counts)
                 // just arrived. Store it all; the rail and the list read
                 // straight off these fields.
@@ -743,11 +852,17 @@ impl App {
                 // the inspector re-seed afterwards.
                 let ap = abs_path.clone();
                 if self.state.selected_page.as_deref() == Some(abs_path.as_str()) {
+                    // Classify the loaded body against the corpus (PLAN-GUI
+                    // §6.15 / §162–182): GenericMarkdown when no valid `type:`,
+                    // else KbPage if indexed, else UnindexedMarkdown.
+                    let kind = crate::state::classify(&body, self.is_indexed(&abs_path));
                     match self.state.open_page.as_mut() {
                         Some(slot) if slot.abs_path == abs_path => {
                             slot.body = Some(body);
                             slot.error = None;
                             slot.baseline = Some(baseline);
+                            slot.kind = kind;
+                            slot.banner_dismissed = false;
                         }
                         _ => {
                             self.state.open_page = Some(OpenPageState {
@@ -755,6 +870,8 @@ impl App {
                                 body: Some(body),
                                 error: None,
                                 baseline: Some(baseline),
+                                kind,
+                                banner_dismissed: false,
                             });
                         }
                     }
@@ -816,6 +933,25 @@ impl App {
                     worker.send(data::Cmd::OpenPage(abs_path));
                 }
                 self.state.save_status = data::SaveStatus::Saved;
+            }
+            data::Evt::Converted { abs_path, .. } => {
+                // `ConvertPage` succeeded (PLAN-GUI §6.15 step 4): the page is
+                // now indexed (a `KbPage`). Close the dialog, re-open the page
+                // so the `Evt::Page` fold re-classifies it (the banner
+                // disappears and all `kb` features enable), and mark it clean.
+                self.last_warn = None;
+                self.state.convert_open = false;
+                if self
+                    .state
+                    .open_page
+                    .as_ref()
+                    .is_some_and(|p| p.abs_path == abs_path)
+                {
+                    self.state.save_status = data::SaveStatus::Saved;
+                    if let Some(worker) = &self.worker {
+                        worker.send(data::Cmd::OpenPage(abs_path));
+                    }
+                }
             }
             data::Evt::Warn(msg) => {
                 self.last_warn = Some(msg);

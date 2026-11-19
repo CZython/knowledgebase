@@ -30,13 +30,16 @@
 //!   full vertical space they need to actually scroll.
 
 pub(crate) mod chrome;
+pub(crate) mod convert;
 pub(crate) mod editor;
 pub(crate) mod home;
 pub(crate) mod inspector;
 pub(crate) mod list;
+pub(crate) mod md;
 pub(crate) mod outline;
 pub(crate) mod preview;
 pub(crate) mod rail;
+pub(crate) mod render;
 pub(crate) mod search;
 pub(crate) mod welcome;
 
@@ -76,9 +79,13 @@ pub fn paint(app: &mut App, ui: &mut egui::Ui) {
             chrome::top_bar(ui, app);
             ui.separator();
 
-            if launch_home && !has_roots {
+            // A selected page (corpus row or a generic on-disk file opened
+            // via the launch route / file picker) always renders the shell —
+            // it takes priority over the Welcome/Home screens. Welcome/Home
+            // are the "nothing open" states (§6.14).
+            if !has_selection && launch_home && !has_roots {
                 welcome::paint(ui, app);
-            } else if launch_home && !has_selection {
+            } else if !has_selection && launch_home {
                 home::paint(ui, app);
             } else {
                 ui.horizontal_top(|ui| {
@@ -89,14 +96,20 @@ pub fn paint(app: &mut App, ui: &mut egui::Ui) {
                     // The open page (if any) renders in the preview + outline
                     // panes. When nothing is selected the panes paint their
                     // own placeholder, so the shell layout stays stable.
+                    // Cloned before dispatching to the editor (which needs
+                    // `&mut app`), so the outline below still has its data.
                     let page = app.state().open_page.clone();
                     let body = page.as_ref().and_then(|p| p.body.clone());
                     let mode = app.state().view_mode;
                     if mode == crate::state::ViewMode::Raw {
-                        // G2: the raw view is the editable editor.
+                        // G2: the raw view is the editable editor (the §6.15
+                        // banner is painted by the preview path; the editor
+                        // carries its own Conflict banner).
                         editor::paint(app, ui);
                     } else {
-                        preview::paint(ui, &page, mode);
+                        // G3: takes `app` (not just `ui`) so the §6.15
+                        // conversion/add-root banner can dispatch its actions.
+                        preview::paint(app, ui);
                     }
                     ui.separator();
                     outline::paint(ui, &page, &body);
@@ -114,6 +127,11 @@ pub fn paint(app: &mut App, ui: &mut egui::Ui) {
             // (no-op when `InspectorState::open` is false). It is the *last*
             // thing painted so it overlays the shell + the search overlay.
             inspector::paint_if_open(app, ui);
+            // The "convert to page" dialog (G3, §6.15) paints on top, same
+            // rule (no-op when `convert_open` is false). Painted last of all
+            // so it overlays the inspector too (the convert dialog owns the
+            // `type`/`title` fields it commits, per §6.15 step 1).
+            convert::paint_if_open(app, ui);
         }
 
         Phase::Error(msg) => {
