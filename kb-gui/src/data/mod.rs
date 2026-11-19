@@ -72,9 +72,41 @@ pub enum Cmd {
         description: Option<String>,
         language: Option<String>,
     },
+    /// Save a page's *frontmatter* by applying a batch of verified `FmOp`s
+    /// over the current on-disk bytes (G2, PLAN-GUI §6.9 "commit path"):
+    /// conflict-guard → apply ops in order → atomic write → single-page
+    /// reindex. The *byte* payload is computed by the worker (the UI sends
+    /// the ops, not the new bytes), so the on-wire shape stays small and
+    /// the worker owns the "bytes are the source of truth" rule.
+    SaveFrontmatter {
+        abs_path: String,
+        expected_disk: Vec<u8>,
+        ops: Vec<FmOp>,
+    },
     /// Stop the worker: finish the current operation, drop the connection,
     /// exit the loop.
     Quit,
+}
+
+/// A single frontmatter edit, expressed in the *verified* kernel's terms
+/// (PLAN-GUI §6.9: "verified `kb_core::frontmatter` ops only"). The worker
+/// applies a batch of these over the on-disk bytes in order, via
+/// `set_scalar` / `append_list_item` / `remove_list_item` — never a free-form
+/// YAML rewrite. `Clone` so the UI can diff drafts into a batch and recompute
+/// it on a `Revert` (the op set is the source of truth for a commit).
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[allow(clippy::enum_variant_names)]
+pub enum FmOp {
+    /// `set_scalar(key, value)`. A scalar set: `SetScalar`.
+    SetScalar { key: String, value: String },
+    /// `remove_field(key)` — drop a scalar/list field entirely (`Remove`).
+    Remove { key: String },
+    /// `append_list_item(key, value)` — add a token to a list
+    /// (`AppendItem`).
+    AppendItem { key: String, value: String },
+    /// `remove_list_item(key, value)` — remove a specific list token
+    /// (`RemoveItem`).
+    RemoveItem { key: String, value: String },
 }
 
 /// An event from the DB worker to the UI thread (PLAN-GUI §3.2).
@@ -94,6 +126,11 @@ pub enum Evt {
         collections: Vec<(String, usize)>,
         gated_count: usize,
         ungated_count: usize,
+        /// Distinct non-empty `language:` values across the corpus
+        /// (PLAN-GUI §6.9 autocomplete source for the frontmatter inspector).
+        /// Sorted for stability. Free-text values are still accepted by the
+        /// inspector; this list is only a speed aid.
+        distinct_languages: Vec<String>,
     },
     /// A page body arrived after an `OpenPage`. Carries the `bytes` as they
     /// were on disk at read time — the editor's conflict-guard baseline
@@ -382,6 +419,30 @@ pub fn spawn_worker() -> WorkerHandle {
                             }
                         }
                     }
+                    Cmd::SaveFrontmatter {
+                        abs_path,
+                        expected_disk,
+                        ops,
+                    } => {
+                        let Some(conn) = db.as_ref() else {
+                            let _ = evt_tx.send(Evt::Fatal("db not open".into()));
+                            break;
+                        };
+                        match save_frontmatter(conn, &abs_path, &expected_disk, &ops) {
+                            PageWrite::Saved => {
+                                let _ = evt_tx.send(Evt::Saved { abs_path });
+                                // Re-load the corpus so the list/outline/rail
+                                // tags + gate facets reflect the new frontmatter.
+                                let _ = load_corpus_evt(&evt_tx, conn);
+                            }
+                            PageWrite::Conflict => {
+                                let _ = evt_tx.send(Evt::Conflict { abs_path });
+                            }
+                            PageWrite::Failed(msg) => {
+                                let _ = evt_tx.send(Evt::Warn(msg));
+                            }
+                        }
+                    }
                     Cmd::Quit => break,
                 }
             }
@@ -433,6 +494,7 @@ fn load_corpus_evt(evt_tx: &Sender<Evt>, conn: &DbGuard) -> Result<(), String> {
     let pages = corpus::load_pages(&conn.db, None)?;
     let roots_known = corpus::has_roots(&conn.db);
     let (collections, gated_count, ungated_count) = corpus::collection_facets(&pages);
+    let distinct_languages = corpus::distinct_languages(&conn.db);
     evt_tx
         .send(Evt::Corpus {
             pages,
@@ -440,6 +502,7 @@ fn load_corpus_evt(evt_tx: &Sender<Evt>, conn: &DbGuard) -> Result<(), String> {
             collections,
             gated_count,
             ungated_count,
+            distinct_languages,
         })
         .map_err(|e| format!("emit corpus: {e}"))
 }
@@ -498,6 +561,86 @@ fn save_page(conn: &DbGuard, abs_path: &str, expected_disk: &[u8], new_bytes: &[
     match reindex_single(conn, abs_path) {
         Ok(_indexed_or_skipped) => PageWrite::Saved,
         Err(msg) => PageWrite::Failed(format!("wrote {abs_path}; DB upsert note: {msg}")),
+    }
+}
+
+/// `SaveFrontmatter` → conflict guard → apply the `FmOp` batch (in order, via
+/// the verified `kb_core::frontmatter` kernel) → atomic write → single-page
+/// reindex.
+///
+/// The worker recomputes the new bytes from the on-disk bytes + ops, so the
+/// "bytes are the source of truth" rule (PLAN-GUI §6.9) stays local to the
+/// worker: the UI sends *what to change* (the op set) and the worker decides
+/// *what the bytes become* using only `set_scalar` / `append_list_item` /
+/// `remove_list_item` / `remove_field`. Same conflict-guard + atomic-write +
+/// no-op-write semantics as `save_page` (PLAN-GUI §3.3).
+fn save_frontmatter(
+    conn: &DbGuard,
+    abs_path: &str,
+    expected_disk: &[u8],
+    ops: &[FmOp],
+) -> PageWrite {
+    let path = Path::new(abs_path);
+    // 1) Conflict guard: re-read and compare against the UI's baseline.
+    let on_disk = match std::fs::read(path) {
+        Ok(b) => b,
+        Err(e) => return PageWrite::Failed(format!("re-read {abs_path} before write: {e}")),
+    };
+    if on_disk != expected_disk {
+        return PageWrite::Conflict;
+    }
+    if ops.is_empty() {
+        // No-op commit: the drafts equal the on-disk values — nothing to write.
+        return PageWrite::Saved;
+    }
+    // 2) Apply the op batch in order over the on-disk bytes. An op that
+    //    errors (e.g. a `RemoveItem` on a missing token the UI lost track of)
+    //    is a *warn*, not a clobber — the file is not yet written.
+    let mut bytes = on_disk.clone();
+    for op in ops {
+        let out = match op {
+            FmOp::SetScalar { key, value } => kb_core::frontmatter::set_scalar(&bytes, key, value),
+            FmOp::Remove { key } => kb_core::frontmatter::remove_field(&bytes, key),
+            FmOp::AppendItem { key, value } => {
+                kb_core::frontmatter::append_list_item(&bytes, key, value)
+            }
+            FmOp::RemoveItem { key, value } => {
+                kb_core::frontmatter::remove_list_item(&bytes, key, value)
+            }
+        };
+        match out {
+            Ok(v) => bytes = v,
+            Err(err) => {
+                return PageWrite::Failed(format!(
+                    "frontmatter op {:?} failed: {err} (file unchanged)",
+                    summarize_op(op)
+                ))
+            }
+        }
+    }
+    // 3) No-op write: byte-identical ⇒ nothing to do (the op set collapsed).
+    if bytes == on_disk {
+        return PageWrite::Saved;
+    }
+    // 4) Atomic write.
+    if let Err(e) = atomic_write(path, &bytes) {
+        return PageWrite::Failed(format!("write {abs_path} atomically: {e}"));
+    }
+    // Reindex the single page (best-effort: a reindex failure is a *warn*).
+    match reindex_single(conn, abs_path) {
+        Ok(_indexed_or_skipped) => PageWrite::Saved,
+        Err(msg) => PageWrite::Failed(format!("wrote {abs_path}; DB upsert note: {msg}")),
+    }
+}
+
+/// A short human form of an `FmOp` for the status-bar / warn line (keeps the
+/// enum's shape out of the message).
+fn summarize_op(op: &FmOp) -> String {
+    match op {
+        FmOp::SetScalar { key, value } => format!("set {key}={value:?}"),
+        FmOp::Remove { key } => format!("remove {key}"),
+        FmOp::AppendItem { key, value } => format!("add {key}+{value:?}"),
+        FmOp::RemoveItem { key, value } => format!("drop {key}-{value:?}"),
     }
 }
 

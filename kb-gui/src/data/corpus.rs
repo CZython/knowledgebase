@@ -208,6 +208,22 @@ pub fn has_roots(db: &DbLike) -> bool {
     n > 0
 }
 
+/// The distinct non-empty `language:` values across the corpus, sorted for a
+/// stable autocomplete (PLAN-GUI §6.9: "language: SELECT DISTINCT language
+/// FROM pages (plus free text)"). Tolerant of the `language` column being
+/// absent on a very old DB (returns empty rather than erroring).
+pub fn distinct_languages(db: &DbLike) -> Vec<String> {
+    let mut out: BTreeMap<String, ()> = BTreeMap::new();
+    if let Ok(stmt) = db.conn.prepare("SELECT DISTINCT language FROM pages WHERE language IS NOT NULL AND language != '' ORDER BY language") {
+        if let Ok(rows) = stmt.query_map((), |r| r.get::<_, String>(0)) {
+            for row in rows.flatten() {
+                out.insert(row, ());
+            }
+        }
+    }
+    out.keys().cloned().collect()
+}
+
 /// Collection facets (PLAN-GUI §2.1). One entry per *distinct* gate term,
 /// case-insensitively deduped. The *stored* spelling of the first-appearance
 /// canonical casing is the label (stable, title-cased as the corpus has it).

@@ -275,6 +275,277 @@ impl App {
             });
         }
     }
+
+    /// Seed the frontmatter inspector from the open page's on-disk frontmatter
+    /// (PLAN-GUI §6.9). Captures the baseline (the values the op-diff is
+    /// computed against) and seeds the drafts to the same values, so a
+    /// freshly-opened panel is *clean* (no pending changes) until the user
+    /// edits a field. Called when the panel first opens for a page.
+    pub fn seed_inspector(&mut self) {
+        let Some(slot) = self.state.open_page.as_ref() else {
+            return;
+        };
+        let Some(body) = slot.body.as_ref() else {
+            return;
+        };
+        let bytes = body.as_bytes();
+        let fm = kb_core::frontmatter::parse(body);
+        // `language:` is not a `Frontmatter` field — read it raw off the
+        // frontmatter bytes (it is an *extra* scalar, per §6.9).
+        let language = kb_core::frontmatter::scalar_value(bytes, "language");
+        let tags = kb_core::frontmatter::list_values(bytes, "tags").unwrap_or_default();
+        let collections =
+            kb_core::frontmatter::list_values(bytes, "search_required_phrase").unwrap_or_default();
+        let ins = &mut self.state.inspector;
+        ins.abs_path = Some(slot.abs_path.clone());
+        let type_val = fm.type_raw.clone().unwrap_or_default();
+        ins.baseline_type = if type_val.is_empty() {
+            None
+        } else {
+            Some(type_val.clone())
+        };
+        ins.baseline_title = fm.title.clone();
+        ins.baseline_description = fm.description.clone();
+        ins.baseline_language = language.clone();
+        ins.baseline_tags = tags.clone();
+        ins.baseline_collections = collections.clone();
+        // Seed the drafts to the baseline (clean state on open).
+        ins.draft_type = type_val;
+        ins.draft_title = fm.title.clone().unwrap_or_default();
+        ins.draft_description = fm.description.clone().unwrap_or_default();
+        ins.draft_language = language.unwrap_or_default();
+        ins.draft_tags = tags;
+        ins.draft_collections = collections;
+        ins.draft_tags_input.clear();
+        ins.draft_collections_input.clear();
+        ins.focus = crate::state::InspectorField::Type;
+        ins.open = true;
+    }
+
+    /// Toggle the frontmatter inspector (PLAN-GUI §6.11, `Ctrl+Shift+F`).
+    /// Opening seeds the drafts from the open page if unseeded (or the page
+    /// changed); closing just flips the flag (drafts persist so a re-open is
+    /// cheap).
+    pub fn toggle_inspector(&mut self) {
+        let ins = &mut self.state.inspector;
+        if ins.open {
+            ins.open = false;
+            return;
+        }
+        if self.state.selected_page.is_none() {
+            // No page open: still open the panel; `seed_inspector` is a no-op
+            // and the panel renders its placeholder until a page opens.
+            ins.open = true;
+            return;
+        }
+        // Re-seed if the drafts are missing or stale (a different page is
+        // now selected than the drafts were captured for).
+        let stale = match (&ins.abs_path, self.state.open_page.as_ref()) {
+            (Some(a), Some(s)) if a == &s.abs_path => {
+                ins.baseline_type.is_none()
+                    && ins.baseline_title.is_none()
+                    && ins.draft_type.is_empty()
+                    && ins.draft_title.is_empty()
+                    && ins.draft_description.is_empty()
+                    && ins.draft_tags.is_empty()
+                    && ins.baseline_tags.is_empty()
+                    && ins.baseline_collections.is_empty()
+            }
+            _ => true,
+        };
+        if stale {
+            self.seed_inspector();
+        } else {
+            ins.open = true;
+        }
+    }
+
+    /// Compute the pending `FmOp` batch by diffing the drafts against the
+    /// baseline (PLAN-GUI §6.9: the op set *is* the commit). Empty = clean.
+    ///
+    /// The diff is order-stable: scalars first (type, title, description,
+    /// language), then tags (removes then adds), then collections. This keeps
+    /// the worker's apply-order deterministic and the warn message readable.
+    pub fn inspector_ops(&self) -> Vec<data::FmOp> {
+        let ins = &self.state.inspector;
+        let mut ops = Vec::new();
+        // Scalar fields: a draft change against the baseline ⇒ one op.
+        // (baseline_value, key, draft_value) for the four scalar fields.
+        let scalar: Vec<(Option<String>, &str, String)> = vec![
+            (ins.baseline_type.clone(), "type", ins.draft_type.clone()),
+            (ins.baseline_title.clone(), "title", ins.draft_title.clone()),
+            (
+                ins.baseline_description.clone(),
+                "description",
+                ins.draft_description.clone(),
+            ),
+            (
+                ins.baseline_language.clone(),
+                "language",
+                ins.draft_language.clone(),
+            ),
+        ];
+        for (base, key, draft) in scalar {
+            // An empty draft means "remove the field" (the panel's clear-able
+            // semantics); an empty baseline means "add the field".
+            let draft_nonempty = !draft.trim().is_empty();
+            let base_nonempty = base
+                .as_deref()
+                .map(|b| !b.trim().is_empty())
+                .unwrap_or(false);
+            let changed = base.as_deref() != Some(draft.as_str());
+            match (base_nonempty, draft_nonempty, changed) {
+                // Both present and the value differs → set.
+                (true, true, true) => ops.push(data::FmOp::SetScalar {
+                    key: key.to_string(),
+                    value: draft,
+                }),
+                // Present in file, cleared in draft → remove the field.
+                (true, false, _) => ops.push(data::FmOp::Remove {
+                    key: key.to_string(),
+                }),
+                // Absent in file, added in draft → set.
+                (false, true, _) => ops.push(data::FmOp::SetScalar {
+                    key: key.to_string(),
+                    value: draft,
+                }),
+                // Unchanged / both empty → nothing.
+                (false, false, _) | (true, true, false) => {}
+            }
+        }
+        // tags: diff the ordered lists (removes then adds, first-occurrence
+        // order preserved).
+        for t in &ins.baseline_tags {
+            if !ins.draft_tags.iter().any(|d| d == t) {
+                ops.push(data::FmOp::RemoveItem {
+                    key: "tags".to_string(),
+                    value: t.clone(),
+                });
+            }
+        }
+        for t in &ins.draft_tags {
+            if !ins.baseline_tags.iter().any(|b| b == t) {
+                ops.push(data::FmOp::AppendItem {
+                    key: "tags".to_string(),
+                    value: t.clone(),
+                });
+            }
+        }
+        for c in &ins.baseline_collections {
+            if !ins.draft_collections.iter().any(|d| d == c) {
+                ops.push(data::FmOp::RemoveItem {
+                    key: "search_required_phrase".to_string(),
+                    value: c.clone(),
+                });
+            }
+        }
+        for c in &ins.draft_collections {
+            if !ins.baseline_collections.iter().any(|b| b == c) {
+                ops.push(data::FmOp::AppendItem {
+                    key: "search_required_phrase".to_string(),
+                    value: c.clone(),
+                });
+            }
+        }
+        ops
+    }
+
+    /// The pending-changes summary (a short human line for the panel footer +
+    /// the status bar). `None` = no changes (clean). The string mirrors the
+    /// op order for scannability.
+    pub fn inspector_pending_summary(&self) -> Option<String> {
+        let ops = self.inspector_ops();
+        if ops.is_empty() {
+            return None;
+        }
+        let mut parts = Vec::with_capacity(ops.len());
+        for op in &ops {
+            parts.push(data_mod_summarize(op));
+        }
+        Some(parts.join(", "))
+    }
+
+    /// Commit the inspector's drafts: send the `FmOp` batch through the
+    /// worker (conflict-guard → apply → write → reindex). No-op when clean.
+    /// On `Saving` the panel disables its own inputs and Commit button until
+    /// the worker's `Saved` / `Conflict` / `Warn` arrives.
+    pub fn commit_inspector(&mut self) {
+        let Some(slot) = self.state.open_page.as_ref() else {
+            return;
+        };
+        let Some(baseline) = slot.baseline.clone() else {
+            return;
+        };
+        let ins = &self.state.inspector;
+        if ins.abs_path.as_deref() != Some(slot.abs_path.as_str()) {
+            // Stale drafts (a different page is open than the seeds were for).
+            return;
+        }
+        let ops = self.inspector_ops();
+        if ops.is_empty() {
+            // Clean: a commit is a no-op the worker would refuse anyway.
+            return;
+        }
+        self.state.save_status = data::SaveStatus::Saving;
+        self.state.inspector.saving = true;
+        if let Some(worker) = &self.worker {
+            worker.send(data::Cmd::SaveFrontmatter {
+                abs_path: slot.abs_path.clone(),
+                expected_disk: baseline,
+                ops,
+            });
+        } else {
+            self.state.save_status = data::SaveStatus::Unsaved;
+            self.state.inspector.saving = false;
+        }
+    }
+
+    /// Revert the inspector's drafts to the baseline (a `Revert` — undo all
+    /// local edits without hitting disk). The panel's chips + inputs + scalar
+    /// fields reset to the captured seeds.
+    pub fn revert_inspector(&mut self) {
+        let ins = &mut self.state.inspector;
+        ins.saving = false;
+        ins.draft_type = ins.baseline_type.clone().unwrap_or_default();
+        ins.draft_title = ins.baseline_title.clone().unwrap_or_default();
+        ins.draft_description = ins.baseline_description.clone().unwrap_or_default();
+        ins.draft_language = ins.baseline_language.clone().unwrap_or_default();
+        ins.draft_tags = ins.baseline_tags.clone();
+        ins.draft_collections = ins.baseline_collections.clone();
+        ins.draft_tags_input.clear();
+        ins.draft_collections_input.clear();
+        self.state.save_status = data::SaveStatus::Saved;
+    }
+
+    /// Re-seed the inspector's baseline + drafts from the just-landed page
+    /// body if the inspector is open for that page (the body arrived, so the
+    /// on-disk frontmatter is now known). Safe to call when the inspector is
+    /// not open for the page (a no-op). The drafts are discarded — the user
+    /// must re-edit (a fresh open is the only consistent state).
+    fn maybe_reseed_inspector_for(&mut self, abs_path: &str) {
+        if self.state.inspector.abs_path.as_deref() == Some(abs_path)
+            && self.state.inspector.open
+            && self
+                .state
+                .open_page
+                .as_ref()
+                .is_some_and(|s| s.body.is_some())
+        {
+            self.seed_inspector();
+        }
+    }
+}
+
+/// A short human form of an `FmOp` for the pending-changes footer (mirrors
+/// the worker-side `summarize_op`, kept in `app.rs` so the UI doesn't
+/// depend on the data module's private helper).
+fn data_mod_summarize(op: &data::FmOp) -> String {
+    match op {
+        data::FmOp::SetScalar { key, value } => format!("set {key}={value:?}"),
+        data::FmOp::Remove { key } => format!("remove {key}"),
+        data::FmOp::AppendItem { key, value } => format!("+{key} {value:?}"),
+        data::FmOp::RemoveItem { key, value } => format!("-{key} {value:?}"),
+    }
 }
 
 /// Apply a built-in theme to the egui context. G0 supports three choices;
@@ -381,6 +652,22 @@ fn handle_g1_shortcuts(app: &mut App, ui: &egui::Ui, ctx: &egui::Context) {
     {
         app.save_page();
     }
+    // `Ctrl+Shift+F` / `Cmd+Shift+F` — toggle the frontmatter inspector
+    // (PLAN-GUI §6.11). Shift-qualified so it doesn't collide with the
+    // browser-style Ctrl+F find (which egui doesn't own, but the user's
+    // muscle-memory says "F = find properties").
+    if ctrl_or_cmd && mods.shift && ui.input(|i| i.key_pressed(egui::Key::F)) {
+        app.toggle_inspector();
+    }
+    // `Ctrl+Enter` / `Cmd+Enter` — commit the inspector's drafts (PLAN-GUI
+    // §6.9 keyboard: "Ctrl+Enter commits the inspector"). Fires only when a
+    // page is open and the inspector has something to commit.
+    if ctrl_or_cmd
+        && ui.input(|i| i.key_pressed(egui::Key::Enter))
+        && app.state().selected_page.is_some()
+    {
+        app.commit_inspector();
+    }
 }
 
 impl App {
@@ -394,6 +681,7 @@ impl App {
                 collections,
                 gated_count,
                 ungated_count,
+                distinct_languages,
             } => {
                 // The corpus (and its collection facets + visibility counts)
                 // just arrived. Store it all; the rail and the list read
@@ -402,6 +690,7 @@ impl App {
                 self.state.collections = collections;
                 self.state.gated_count = gated_count;
                 self.state.ungated_count = ungated_count;
+                self.state.distinct_languages = distinct_languages;
                 self.state.pages = pages;
                 // Selection / open-page: keep the user's current selection
                 // if it is still present in the new corpus; otherwise drop
@@ -449,9 +738,10 @@ impl App {
                 baseline,
             } => {
                 // The body (and its on-disk baseline) arrived for the selected
-                // page. Fold into `open_page`. If the selected page is
-                // different (the user clicked another page before this body
-                // landed), drop the stale body.
+                // page. Clone the path up front so the match arms below can
+                // move it into `OpenPageState` and we can still use it for
+                // the inspector re-seed afterwards.
+                let ap = abs_path.clone();
                 if self.state.selected_page.as_deref() == Some(abs_path.as_str()) {
                     match self.state.open_page.as_mut() {
                         Some(slot) if slot.abs_path == abs_path => {
@@ -470,6 +760,10 @@ impl App {
                     }
                     // A fresh load resets the document to clean.
                     self.state.save_status = data::SaveStatus::default();
+                    // Re-seed the inspector from the fresh frontmatter so its
+                    // drafts (and the op-diff baseline) reflect what just
+                    // landed on disk.
+                    self.maybe_reseed_inspector_for(&ap);
                 }
             }
             data::Evt::Saved { abs_path } => {
@@ -489,6 +783,16 @@ impl App {
                         }
                     }
                     self.state.save_status = data::SaveStatus::Saved;
+                    // The save is done — clear the inspector's `saving` flag
+                    // and re-seed its baseline so "clean" again means the
+                    // freshly-written bytes (the drafts are now the baseline).
+                    self.state.inspector.saving = false;
+                    if self.state.inspector.abs_path.as_deref() == Some(abs_path.as_str()) {
+                        // Re-seed: the new on-disk values become the baseline
+                        // AND the drafts (the commit is the source of truth
+                        // now).
+                        self.seed_inspector();
+                    }
                 }
             }
             data::Evt::Conflict { abs_path } => {

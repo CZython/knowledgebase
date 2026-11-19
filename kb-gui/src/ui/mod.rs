@@ -32,6 +32,7 @@
 pub(crate) mod chrome;
 pub(crate) mod editor;
 pub(crate) mod home;
+pub(crate) mod inspector;
 pub(crate) mod list;
 pub(crate) mod outline;
 pub(crate) mod preview;
@@ -109,6 +110,10 @@ pub fn paint(app: &mut App, ui: &mut egui::Ui) {
             // when closed — `SearchView::open` is the toggle's source of
             // truth).
             search::paint_if_open(app, ui);
+            // The frontmatter inspector (G2, §6.9) paints on top, same rule
+            // (no-op when `InspectorState::open` is false). It is the *last*
+            // thing painted so it overlays the shell + the search overlay.
+            inspector::paint_if_open(app, ui);
         }
 
         Phase::Error(msg) => {
