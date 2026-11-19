@@ -247,6 +247,83 @@ pub struct OpenPageState {
     pub baseline: Option<Vec<u8>>,
 }
 
+/// The frontmatter inspector's working state (PLAN-GUI §6.9). Holds the
+/// *draft* values the user is editing, keyed off the open page's *on-disk*
+/// values captured when the panel seeded (the baseline). The UI computes the
+/// dirty op-set by diffing draft vs. baseline; `Commit` sends it to the
+/// worker, `Revert` resets the drafts to the baseline.
+///
+/// The panel is `open`-aware: a `Cmd/Ctrl+Shift+F` or `Properties` button
+/// toggle flips `open` (and seeds `baseline` from the open page's parsed
+/// frontmatter on first open, so a `Revert` has a real target).
+#[derive(Debug, Clone, Default)]
+pub struct InspectorState {
+    /// Panel visible (the §6.9 toggle).
+    pub open: bool,
+    /// The absolute path the drafts correspond to (`None` when no page open
+    /// or the drafts are stale — the panel renders a placeholder).
+    pub abs_path: Option<String>,
+    /// The on-disk (baseline) raw scalar values, captured at seed time.
+    pub baseline_type: Option<String>,
+    pub baseline_title: Option<String>,
+    pub baseline_description: Option<String>,
+    pub baseline_language: Option<String>,
+    pub baseline_tags: Vec<String>,
+    pub baseline_collections: Vec<String>,
+    /// The live draft values the panel paints (seeded from the baseline).
+    pub draft_type: String,
+    pub draft_title: String,
+    pub draft_description: String,
+    pub draft_language: String,
+    pub draft_tags: Vec<String>,
+    pub draft_tags_input: String,
+    pub draft_collections: Vec<String>,
+    pub draft_collections_input: String,
+    /// The field order for Tab / Shift+Tab traversal (PLAN-GUI §6.9):
+    /// `type, title, description, language, tags, collections` (indices 0..=5).
+    pub focus: InspectorField,
+    /// Set when a `SaveFrontmatter` is in flight (the panel disables Commit /
+    /// reflects "saving…" in the panel header).
+    pub saving: bool,
+}
+
+/// A focusable field in the inspector (the Tab traversal order — §6.9).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum InspectorField {
+    #[default]
+    Type,
+    Title,
+    Description,
+    Language,
+    Tags,
+    Collections,
+}
+
+impl InspectorField {
+    /// The next field in the Tab order (wraps to `Type`).
+    pub fn next(&self) -> Self {
+        match self {
+            Self::Type => Self::Title,
+            Self::Title => Self::Description,
+            Self::Description => Self::Language,
+            Self::Language => Self::Tags,
+            Self::Tags => Self::Collections,
+            Self::Collections => Self::Type,
+        }
+    }
+    /// The previous field in the Shift+Tab order (wraps to `Collections`).
+    pub fn prev(&self) -> Self {
+        match self {
+            Self::Type => Self::Collections,
+            Self::Title => Self::Type,
+            Self::Description => Self::Title,
+            Self::Language => Self::Description,
+            Self::Tags => Self::Language,
+            Self::Collections => Self::Tags,
+        }
+    }
+}
+
 /// Which body the open document shows (PLAN-GUI §6.2 top-bar toggle,
 /// `Cmd/Ctrl+E`). G1 renders both read-only.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -274,6 +351,8 @@ pub struct AppState {
     /// so the rail and list can never disagree).
     pub gated_count: usize,
     pub ungated_count: usize,
+    /// Distinct non-empty `language:` values, for the inspector autocomplete.
+    pub distinct_languages: Vec<String>,
     /// At least one root is registered (drives the Welcome vs Home split —
     /// PLAN-GUI §6.13/§6.14).
     pub roots_known: bool,
@@ -312,6 +391,10 @@ pub struct AppState {
     /// changed on disk under us and a Reload / Keep-mine choice is offered.
     #[allow(dead_code)] // read by the G2 editor footer (ui::chrome status bar) once wired
     pub save_status: crate::data::SaveStatus,
+    /// The frontmatter inspector's drafts + open flag (PLAN-GUI §6.9).
+    /// `open = false` by default; `Cmd/Ctrl+Shift+F` or the Properties
+    /// button toggles it.
+    pub inspector: InspectorState,
 }
 
 impl AppState {
@@ -327,6 +410,7 @@ impl AppState {
             roots_known: false,
             launch,
             theme,
+            distinct_languages: Vec::new(),
             collection: CollectionKey::All,
             group_by: GroupBy::None,
             list_filter: String::new(),
@@ -338,6 +422,7 @@ impl AppState {
             view_mode: ViewMode::default(),
             search: SearchView::default(),
             save_status: crate::data::SaveStatus::default(),
+            inspector: InspectorState::default(),
         }
     }
 }

@@ -77,8 +77,23 @@ pub fn top_bar(ui: &mut egui::Ui, app: &mut App) {
             }
         });
 
-        // Right: search shortcut + Formatted/Raw toggle + (outline — G3).
+        // Right: Properties + search shortcut + Formatted/Raw toggle.
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            // Properties button (G2, §6.9): toggles the frontmatter
+            // inspector. Visible only when a page is open.
+            if has_selection {
+                let pending =
+                    app.state().inspector.open && app.inspector_pending_summary().is_some();
+                let label = if pending {
+                    "⚙ properties ●"
+                } else {
+                    "⚙ properties"
+                };
+                if ui.button(label).clicked() {
+                    app.toggle_inspector();
+                }
+                ui.separator();
+            }
             // Toggle Formatted/Raw. G1 reads `app.state().view_mode`; the
             // toggle flips it (the preview re-renders next frame).
             let mode = app.state().view_mode;
