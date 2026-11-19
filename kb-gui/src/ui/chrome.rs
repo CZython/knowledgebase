@@ -131,6 +131,26 @@ pub fn status_bar(ui: &mut egui::Ui, app: &App) {
                     ui.weak(" · no roots registered");
                 }
 
+                // Save-state chip (G2 editor footer): only meaningful when an
+                // open document exists. `Saved` is rendered in the
+                // editor header, so the status bar surfaces the three
+                // transient states (Unsaved / Saving / Conflict).
+                if app.state().open_page.is_some() {
+                    let save_status = app.state().save_status;
+                    match save_status {
+                        crate::data::SaveStatus::Saved => {}
+                        crate::data::SaveStatus::Unsaved => {
+                            ui.colored_label(egui::Color32::from_rgb(200, 160, 60), " · unsaved");
+                        }
+                        crate::data::SaveStatus::Saving => {
+                            ui.colored_label(egui::Color32::from_rgb(120, 160, 220), " · saving…");
+                        }
+                        crate::data::SaveStatus::Conflict => {
+                            ui.colored_label(egui::Color32::LIGHT_RED, " · CONFLICT");
+                        }
+                    }
+                }
+
                 // Right side: the selected page's path + any last warning.
                 if let Some(abs) = &app.state().selected_page {
                     if let Some(row) = app.state().pages.iter().find(|p| &p.abs_path == abs) {

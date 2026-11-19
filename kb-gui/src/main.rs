@@ -44,6 +44,11 @@ struct Args {
     #[arg(long)]
     startup_report: bool,
 
+    /// Quit after this many frames (0 = run until the window is closed). Used
+    /// by the headless smoke test to get a deterministic first-frame run.
+    #[arg(long, default_value_t = 0)]
+    max_frames: u32,
+
     /// A Markdown page to open after the shell appears (`file` or
     /// `file#Section`). Optional — without it, the app lands on Home.
     page: Option<String>,
@@ -72,24 +77,32 @@ fn trace_startup() -> bool {
         .unwrap_or(false)
 }
 
+/// The recorded spawn→first-paint time in milliseconds (the single source of
+/// truth the `--startup-report` / smoke test reads). A module-level shared
+/// static so `record_first_frame` and `first_frame_ms` see the same
+/// `OnceLock` (two same-named statics in two function bodies are NOT the
+/// same variable).
+fn ms_static() -> &'static std::sync::OnceLock<u64> {
+    static MS: std::sync::OnceLock<u64> = std::sync::OnceLock::new();
+    &MS
+}
+
 /// The recorded spawn→first-paint time in milliseconds, or `None` if frame 1
 /// has not painted yet. Public so the startup test (and `--startup-report`)
 /// can read a single source of truth instead of re-anchoring the clock.
 pub(crate) fn first_frame_ms() -> Option<u64> {
-    static MS: std::sync::OnceLock<u64> = std::sync::OnceLock::new();
-    MS.get().copied()
+    ms_static().get().copied()
 }
 
 /// Called exactly once, on the first frame that actually paints the shell.
 /// Prints the budget verdict when `--startup-report` / `KB_GUI_TRACE_STARTUP`
 /// is on; records the value into the process-global the tests read.
 pub(crate) fn record_first_frame() {
-    static MS: std::sync::OnceLock<u64> = std::sync::OnceLock::new();
     let ms = process_start().elapsed().as_millis() as u64;
-    if MS.get().is_some() {
+    if ms_static().get().is_some() {
         return; // already recorded
     }
-    let _ = MS.set(ms);
+    let _ = ms_static().set(ms);
     let report = state::StartupReport::new(ms);
     if trace_startup() {
         eprintln!("[kb-gui] {}", report.line());
@@ -114,16 +127,15 @@ pub fn main() {
     };
 
     let launch = route_from_arg(args.page);
+    let max_frames = args.max_frames;
     let result = eframe::run_native(
         "kb",
         options,
         Box::new(move |cc| {
             app::apply_theme(cc, theme);
-            Ok(Box::new(app::App::new(
-                args.db.clone(),
-                launch.clone(),
-                theme,
-            )))
+            let mut app = app::App::new(args.db.clone(), launch.clone(), theme);
+            app.set_max_frames(max_frames);
+            Ok(Box::new(app))
         }),
     );
 

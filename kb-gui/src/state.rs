@@ -241,6 +241,10 @@ pub struct OpenPageState {
     pub body: Option<String>,
     /// A load error (bad path, read failure). Rendered in the host.
     pub error: Option<String>,
+    /// The byte baseline captured when the body was opened (`expected_disk`
+    /// for the `Cmd::Save` conflict guard, PLAN-GUI §3.3). `None` until the
+    /// body has actually loaded.
+    pub baseline: Option<Vec<u8>>,
 }
 
 /// Which body the open document shows (PLAN-GUI §6.2 top-bar toggle,
@@ -292,11 +296,22 @@ pub struct AppState {
     /// The open document (PLAN-GUI §6.5) — the body + error; `None` when no
     /// page is open (Home/Welcome shows instead).
     pub open_page: Option<OpenPageState>,
+    /// The inline "new note" form is shown (G2; PLAN-GUI §6.5).
+    pub create_open: bool,
+    /// The new-note form's title input (local to the form; not persisted).
+    pub create_title: String,
+    /// The new-note form's type input (`wiki` / `note` / `label`).
+    pub create_type: String,
     /// Formatted vs Raw body (the top-bar toggle, `Cmd/Ctrl+E`).
     pub view_mode: ViewMode,
     /// The `Cmd+K` overlay's results + query + scope. Kept across close/open
     /// so navigating back into results does not refetch.
     pub search: SearchView,
+    /// The open-document save state (PLAN-GUI §6.5 footer). `Saved` (default)
+    /// = clean; `Unsaved` = dirty; `Saving` = in flight; `Conflict` = the file
+    /// changed on disk under us and a Reload / Keep-mine choice is offered.
+    #[allow(dead_code)] // read by the G2 editor footer (ui::chrome status bar) once wired
+    pub save_status: crate::data::SaveStatus,
 }
 
 impl AppState {
@@ -317,8 +332,12 @@ impl AppState {
             list_filter: String::new(),
             selected_page: None,
             open_page: None,
+            create_open: false,
+            create_title: String::new(),
+            create_type: "wiki".to_string(),
             view_mode: ViewMode::default(),
             search: SearchView::default(),
+            save_status: crate::data::SaveStatus::default(),
         }
     }
 }

@@ -32,6 +32,11 @@ pub struct App {
     worker: Option<WorkerHandle>,
     /// The most recent non-fatal worker warning (rendered in the status bar).
     last_warn: Option<String>,
+    /// Quit after this many frames (0 = run until the window is closed). Used
+    /// by the headless smoke test for a deterministic first-frame run.
+    max_frames: u32,
+    /// The frame counter for the `max_frames` quit.
+    frames: u32,
 }
 
 impl App {
@@ -41,7 +46,15 @@ impl App {
             db_hint,
             worker: None,
             last_warn: None,
+            max_frames: 0,
+            frames: 0,
         }
+    }
+
+    /// Quit after this many painted frames (0 = run until the window closes).
+    /// Used by the headless smoke test for a deterministic first-frame run.
+    pub fn set_max_frames(&mut self, n: u32) {
+        self.max_frames = n;
     }
 
     /// The mutable render state (used by the UI modules to mutate e.g. the
@@ -122,7 +135,7 @@ impl App {
         // chip + the status bar stay consistent with what we fire.
         self.state.search.scope = scope.clone();
         if let Some(worker) = &self.worker {
-            let _ = worker.send(data::Cmd::Search { query, scope });
+            worker.send(data::Cmd::Search { query, scope });
         }
     }
 
@@ -146,10 +159,11 @@ impl App {
                 abs_path: abs_path.to_string(),
                 body: None,
                 error: None,
+                baseline: None,
             });
         }
         if let Some(worker) = &self.worker {
-            let _ = worker.send(data::Cmd::OpenPage(abs_path.to_string()));
+            worker.send(data::Cmd::OpenPage(abs_path.to_string()));
         }
     }
 
@@ -159,6 +173,107 @@ impl App {
     pub fn close_page(&mut self) {
         self.state.selected_page = None;
         self.state.open_page = None;
+    }
+
+    /// Apply the one-shot launch route (`kb-gui <file>` /
+    /// `kb-gui <file>#Section`) against the now-loaded corpus: resolve the
+    /// abs path, select the page, and switch to the editable raw view. The
+    /// route is consumed (replaced by `Home`) so a later corpus refresh
+    /// (e.g. `kb refresh` while running) does not re-open the launch page
+    /// over the user's navigation.
+    fn apply_launch_route(&mut self) {
+        let route = std::mem::replace(&mut self.state.launch, LaunchRoute::Home);
+        let spec = match route {
+            LaunchRoute::Home => return,
+            // `OpenSection`'s section-anchor jump lands in G3 (the outline
+            // can scroll the editor to the heading); for now open the page.
+            LaunchRoute::OpenFile(spec) | LaunchRoute::OpenSection { file: spec, .. } => spec,
+        };
+        let spec = spec.as_str();
+        // Resolve: an exact row abs_path, or the row whose display id or
+        // title matches (the "uuid / slug / title" page-ref rules, §2.4).
+        let mut resolved: Option<String> = self
+            .state
+            .pages
+            .iter()
+            .find(|p| p.abs_path == spec)
+            .map(|p| p.abs_path.clone());
+        if resolved.is_none() {
+            resolved = self
+                .state
+                .pages
+                .iter()
+                .find(|p| p.id == spec || p.title.as_deref() == Some(spec))
+                .map(|p| p.abs_path.clone());
+        }
+        if let Some(abs) = resolved {
+            self.state.view_mode = ViewMode::Raw;
+            self.open_page(&abs);
+        }
+    }
+
+    /// Mark the open document dirty (the editor text changed). The UI calls
+    /// this when the raw/formatted buffer's text drifts from the baseline.
+    pub fn mark_unsaved(&mut self) {
+        if self.state.save_status == data::SaveStatus::Conflict {
+            // A conflict is the strongest signal — do not downgrade it to
+            // Unsaved (the user still owes a Reload / Keep-mine decision).
+            return;
+        }
+        self.state.save_status = data::SaveStatus::Unsaved;
+    }
+
+    /// Save the open document (PLAN-GUI §3.3): the editor's current bytes go
+    /// over the wire with the baseline captured at open; the worker does the
+    /// conflict guard → atomic write → single-page reindex and answers with
+    /// `Saved` / `Conflict` / `Warn`.
+    pub fn save_page(&mut self) {
+        // Gather the save payload; skip the dispatch when the slot is not
+        // ready to write (body missing or baseline uncaptured).
+        let slot = match self.state.open_page.as_ref() {
+            Some(s) if s.body.is_some() && s.baseline.is_some() => s,
+            _ => return,
+        };
+        let abs_path = slot.abs_path.clone();
+        let baseline = slot.baseline.clone().unwrap_or_default();
+        let body = slot.body.clone().unwrap_or_default();
+        let new_bytes = body.into_bytes();
+        self.state.save_status = data::SaveStatus::Saving;
+        if let Some(worker) = &self.worker {
+            worker.send(data::Cmd::Save {
+                abs_path,
+                expected_disk: baseline,
+                new_bytes,
+            });
+        } else {
+            // No worker yet (first frame not sent). Fall back to clean rather
+            // than wedging in `Saving` forever.
+            self.state.save_status = data::SaveStatus::Unsaved;
+        }
+    }
+
+    /// Create a new note in a directory. The worker scaffolds + writes +
+    /// indexes and answers with `Created` (then auto-opens via `Cmd::OpenPage`)
+    /// or `Warn` (a validation / IO failure).
+    pub fn create_page(
+        &mut self,
+        directory: String,
+        title: String,
+        page_type: String,
+        tags: Vec<String>,
+        gates: Vec<String>,
+    ) {
+        if let Some(worker) = &self.worker {
+            worker.send(data::Cmd::CreatePage {
+                directory,
+                title,
+                page_type,
+                tags,
+                gates,
+                description: None,
+                language: None,
+            });
+        }
     }
 }
 
@@ -205,7 +320,7 @@ impl eframe::App for App {
         //    §3.2 / §3.4).
         if self.worker.is_none() {
             let handle = data::spawn_worker();
-            let _ = handle.send(data::Cmd::LoadCorpus {
+            handle.send(data::Cmd::LoadCorpus {
                 launch: self.state.launch.clone(),
                 db: self.db_hint.clone(),
             });
@@ -223,6 +338,15 @@ impl eframe::App for App {
         //    (worker events, input, …). G0's steady state is one paint per
         //    event loop tick; cheap because the shell is light.
         ctx.request_repaint();
+
+        // 6) `--max-frames N`: quit after N painted frames (the headless
+        //    smoke test drives a deterministic first-frame run + exit).
+        if self.max_frames > 0 {
+            self.frames += 1;
+            if self.frames >= self.max_frames {
+                ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+            }
+        }
     }
 }
 
@@ -246,6 +370,16 @@ fn handle_g1_shortcuts(app: &mut App, ui: &egui::Ui, ctx: &egui::Context) {
     }
     if ctrl_or_cmd && !mods.shift && ui.input(|i| i.key_pressed(egui::Key::E)) {
         app.toggle_view_mode();
+    }
+    // `Ctrl+S` / `Cmd+S` — save the open document (the editor's own
+    // `TextEdit` does not swallow a `Ctrl+S`; it only consumes single-key
+    // events while it has focus). Fires only when a page is open.
+    if ctrl_or_cmd
+        && !mods.shift
+        && ui.input(|i| i.key_pressed(egui::Key::S))
+        && app.state().selected_page.is_some()
+    {
+        app.save_page();
     }
 }
 
@@ -279,6 +413,11 @@ impl App {
                     }
                 }
                 self.state.phase = crate::state::Phase::Ready;
+                // Apply the one-shot launch route now that the corpus is in
+                // hand (PLAN-GUI §3.4: `kb-gui <file>` opens that page once
+                // the page list is ready). Applied *after* the selection
+                // reconciliation above so a stale selection cannot win.
+                self.apply_launch_route();
             }
             data::Evt::SearchResults {
                 query,
@@ -304,26 +443,75 @@ impl App {
                 s.missing_tag = missing_tag;
                 s.cursor = 0;
             }
-            data::Evt::Page { abs_path, body } => {
-                // The body arrived for the selected page. Fold it into
-                // `open_page`. If the selected page is different (the
-                // user clicked another page before this body landed), drop
-                // the stale body.
+            data::Evt::Page {
+                abs_path,
+                body,
+                baseline,
+            } => {
+                // The body (and its on-disk baseline) arrived for the selected
+                // page. Fold into `open_page`. If the selected page is
+                // different (the user clicked another page before this body
+                // landed), drop the stale body.
                 if self.state.selected_page.as_deref() == Some(abs_path.as_str()) {
                     match self.state.open_page.as_mut() {
                         Some(slot) if slot.abs_path == abs_path => {
                             slot.body = Some(body);
                             slot.error = None;
+                            slot.baseline = Some(baseline);
                         }
                         _ => {
                             self.state.open_page = Some(OpenPageState {
                                 abs_path,
                                 body: Some(body),
                                 error: None,
+                                baseline: Some(baseline),
                             });
                         }
                     }
+                    // A fresh load resets the document to clean.
+                    self.state.save_status = data::SaveStatus::default();
                 }
+            }
+            data::Evt::Saved { abs_path } => {
+                // The write + reindex landed. Mark the document clean.
+                self.last_warn = None;
+                if self
+                    .state
+                    .open_page
+                    .as_ref()
+                    .is_some_and(|p| p.abs_path == abs_path)
+                {
+                    // Re-baseline: the on-disk bytes are now *our* bytes, so
+                    // the conflict guard's baseline is the edited content.
+                    if let Some(slot) = self.state.open_page.as_mut() {
+                        if let Some(body) = slot.body.as_ref() {
+                            slot.baseline = Some(body.as_bytes().to_vec());
+                        }
+                    }
+                    self.state.save_status = data::SaveStatus::Saved;
+                }
+            }
+            data::Evt::Conflict { abs_path } => {
+                // The file changed on disk under us — flag the conflict so the
+                // editor can offer Reload / Keep-mine (PLAN-GUI §3.3).
+                self.last_warn = Some(format!(
+                    "{abs_path} changed on disk since this session — Reload or Keep-mine"
+                ));
+                if self
+                    .state
+                    .open_page
+                    .as_ref()
+                    .is_some_and(|p| p.abs_path == abs_path)
+                {
+                    self.state.save_status = data::SaveStatus::Conflict;
+                }
+            }
+            data::Evt::Created { abs_path, .. } => {
+                // A new note was written + indexed. Open it in the editor.
+                if let Some(worker) = &self.worker {
+                    worker.send(data::Cmd::OpenPage(abs_path));
+                }
+                self.state.save_status = data::SaveStatus::Saved;
             }
             data::Evt::Warn(msg) => {
                 self.last_warn = Some(msg);
@@ -331,7 +519,6 @@ impl App {
             data::Evt::Fatal(msg) => {
                 self.state.phase = crate::state::Phase::Error(msg);
             }
-            data::Evt::Saved { .. } => {} // reserved for G2
         }
     }
 }
