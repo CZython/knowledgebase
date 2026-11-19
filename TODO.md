@@ -8,18 +8,18 @@ Status legend: `[ ]` not started · `[~]` in progress · `[x]` done
 
 Spec: `PLAN-GUI.md`. Crate: new `kb-gui` in the workspace.
 
-- [ ] G0 — Foundation
-  - [ ] Add `kb-gui` cargo package (binary) to the workspace; pin `egui`/`eframe` versions
-  - [ ] Startup sequence within budget: open DB, load roots, first frame (PLAN-GUI §3.4)
-  - [ ] Window layout skeleton: top bar / collections rail / note list / editor host / status bar (§6.1–6.7)
-  - [ ] DB access off the render thread (§3.2); source-of-truth contract (§3.3)
-- [ ] G1 — All pages + collections + search parity
-  - [ ] Pages list grouped by root/collection (§2.1, 6.3–6.4)
-  - [ ] Search overlay with parity to `kb search` and `kb qs` (§6.8)
-  - [ ] Launch states: no path/ref → home (§6.13); no roots → welcome + add-root flow (§6.14)
-- [ ] G2 — Raw editor + save + frontmatter
-  - [ ] Raw Markdown editor, save to disk, dirty tracking (§9.2)
-  - [ ] Frontmatter inspector (§6.9)
+- [x] G0 — Foundation
+  - [x] Add `kb-gui` cargo package (binary) to the workspace; pin `egui`/`eframe` versions
+  - [x] Startup sequence within budget: open DB, load roots, first frame (PLAN-GUI §3.4)
+  - [x] Window layout skeleton: top bar / collections rail / note list / editor host / status bar (§6.1–6.7)
+  - [x] DB access off the render thread (§3.2); source-of-truth contract (§3.3)
+- [x] G1 — All pages + collections + search parity
+  - [x] Pages list grouped by root/collection (§2.1, 6.3–6.4)
+  - [x] Search overlay with parity to `kb search` and `kb qs` (§6.8)
+  - [x] Launch states: no path/ref → home (§6.13); no roots → welcome + add-root flow (§6.14)
+- [x] G2 — Raw editor + save + frontmatter
+  - [x] Raw Markdown editor, save to disk, dirty tracking (§9.2)
+  - [x] Frontmatter inspector (§6.9)
 - [ ] G3 — Formatted read view + generic Markdown
   - [ ] Read-only rendered view, no embedded browser (§7)
   - [ ] Generic Markdown + conversion rules (§6.15)
