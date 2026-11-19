@@ -61,7 +61,7 @@ pub fn picker_add_root(app: &mut App) -> bool {
         .pick_folder();
     match folder {
         Some(path) => {
-            let _ = worker.send(Cmd::AddRoot(path));
+            worker.send(Cmd::AddRoot(path));
             true
         }
         None => false,

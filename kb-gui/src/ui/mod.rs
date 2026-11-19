@@ -30,6 +30,7 @@
 //!   full vertical space they need to actually scroll.
 
 pub(crate) mod chrome;
+pub(crate) mod editor;
 pub(crate) mod home;
 pub(crate) mod list;
 pub(crate) mod outline;
@@ -90,7 +91,12 @@ pub fn paint(app: &mut App, ui: &mut egui::Ui) {
                     let page = app.state().open_page.clone();
                     let body = page.as_ref().and_then(|p| p.body.clone());
                     let mode = app.state().view_mode;
-                    preview::paint(ui, &page, mode);
+                    if mode == crate::state::ViewMode::Raw {
+                        // G2: the raw view is the editable editor.
+                        editor::paint(app, ui);
+                    } else {
+                        preview::paint(ui, &page, mode);
+                    }
                     ui.separator();
                     outline::paint(ui, &page, &body);
                 });

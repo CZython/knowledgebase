@@ -53,9 +53,25 @@ pub enum Cmd {
         query: String,
         scope: Option<String>,
     },
-    /// Save a page's body (conflict-check → atomic write → reindex). Reserved (G2).
-    #[allow(dead_code)] // reserved for G2
-    Save { abs_path: String, bytes: Vec<u8> },
+    /// Save a page's body (conflict-check → atomic write → reindex). wired in G2.
+    Save {
+        abs_path: String,
+        expected_disk: Vec<u8>,
+        new_bytes: Vec<u8>,
+    },
+    /// Create a new note (scaffold frontmatter + body, write, upsert into index).
+    /// `directory` is the parent dir (a registered root path). `title` is
+    /// required; `page_type`, `tags`, `gates`, `description`, `language`
+    /// are optional frontmatter values for the scaffold.
+    CreatePage {
+        directory: String,
+        title: String,
+        page_type: String,
+        tags: Vec<String>,
+        gates: Vec<String>,
+        description: Option<String>,
+        language: Option<String>,
+    },
     /// Stop the worker: finish the current operation, drop the connection,
     /// exit the loop.
     Quit,
@@ -79,9 +95,14 @@ pub enum Evt {
         gated_count: usize,
         ungated_count: usize,
     },
-    /// A page body arrived after an `OpenPage`. Reserved (G2).
-    #[allow(dead_code)]
-    Page { abs_path: String, body: String },
+    /// A page body arrived after an `OpenPage`. Carries the `bytes` as they
+    /// were on disk at read time — the editor's conflict-guard baseline
+    /// (PLAN-GUI §3.3: a later `Save` is refused unless disk still matches).
+    Page {
+        abs_path: String,
+        body: String,
+        baseline: Vec<u8>,
+    },
     /// Search results arrived. `missing_tag` is `Some(tag_value)` when the
     /// query's `tag:` filter had no corpus row (the CLI's specific message).
     SearchResults {
@@ -90,14 +111,44 @@ pub enum Evt {
         rows: Vec<SearchHit>,
         missing_tag: Option<String>,
     },
-    /// A save completed. Reserved (G2).
-    #[allow(dead_code)]
+    /// A save completed (conflict check passed, atomic write + single-page
+    /// reindex landed).
     Saved { abs_path: String },
+    /// A save was refused because the on-disk bytes no longer match what the
+    /// editor opened (PLAN-GUI §3.3: conflict guard → Reload / Keep-mine /
+    /// Diff, never a silent clobber).
+    Conflict { abs_path: String },
+    /// A new note was created (scaffold + write + upsert succeeded). The
+    /// `id` (`type:slug`) is the stable identity token returned by the
+    /// upsert; the UI does not surface it in G2 (the file path is what the
+    /// user sees) but it is here for future navigation / deep-link work.
+    Created {
+        abs_path: String,
+        #[allow(dead_code)]
+        id: String,
+    },
     /// A non-fatal error in a worker operation (the corpus remains usable).
     Warn(String),
     /// A fatal startup error (DB open / migration failed); the UI should
     /// switch to its Error phase.
     Fatal(String),
+}
+
+/// The open-document save state (PLAN-GUI §6.5: `Saved` / `Saving…` /
+/// `Unsaved changes` / `Conflict`). The UI renders this in the editor host's
+/// footer; the worker's events drive the transitions.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum SaveStatus {
+    /// The page is clean and matches disk (or was just created).
+    #[default]
+    Saved,
+    /// A save is in flight (a `Cmd::Save` was queued, no answer yet).
+    Saving,
+    /// The editor has edits not yet on disk (uncommitted).
+    Unsaved,
+    /// A save was refused (the file changed on disk under us). The editor
+    /// offers Reload / Keep-mine.
+    Conflict,
 }
 
 /// UI-side handle to a running worker. `recv` drains pending events without
@@ -112,9 +163,12 @@ pub struct WorkerHandle {
 }
 
 impl WorkerHandle {
-    /// Queue a command for the worker. `Err` means the worker is gone.
-    pub fn send(&self, cmd: Cmd) -> Result<(), mpsc::SendError<Cmd>> {
-        self.tx.send(cmd)
+    /// Queue a command for the worker. Best-effort: if the worker is gone,
+    /// the send is a no-op (the `Cmd` is dropped) rather than a returned
+    /// `SendError` (which would be large and is always discarded by callers
+    /// — see `app.rs` / `welcome.rs`).
+    pub fn send(&self, cmd: Cmd) {
+        let _ = self.tx.send(cmd);
     }
 
     /// Drain every event currently pending. Non-blocking: an empty `Vec`
@@ -253,20 +307,80 @@ pub fn spawn_worker() -> WorkerHandle {
                         }
                     }
                     Cmd::OpenPage(abs_path) => {
-                        // G1: read the file body (read-only). The write path,
-                        // conflict guard, and single-page reindex land in G2.
+                        // G2: read the file body *and* capture the on-disk
+                        // bytes as the conflict-guard baseline (PLAN-GUI §3.3).
                         match std::fs::read(&abs_path) {
                             Ok(bytes) => {
                                 let body = String::from_utf8_lossy(&bytes).into_owned();
-                                let _ = evt_tx.send(Evt::Page { abs_path, body });
+                                let _ = evt_tx.send(Evt::Page {
+                                    abs_path,
+                                    body,
+                                    baseline: bytes,
+                                });
                             }
                             Err(e) => {
                                 let _ = evt_tx.send(Evt::Warn(format!("open {abs_path}: {e}")));
                             }
                         }
                     }
-                    Cmd::Save { .. } => {
-                        let _ = evt_tx.send(Evt::Warn("reserved for G2".into()));
+                    Cmd::Save {
+                        abs_path,
+                        expected_disk,
+                        new_bytes,
+                    } => {
+                        let Some(conn) = db.as_ref() else {
+                            let _ = evt_tx.send(Evt::Fatal("db not open".into()));
+                            break;
+                        };
+                        match save_page(conn, &abs_path, &expected_disk, &new_bytes) {
+                            PageWrite::Saved => {
+                                let _ = evt_tx.send(Evt::Saved { abs_path });
+                                // Re-load the corpus so the list/outline reflect
+                                // the new update time + any title/gate changes.
+                                let _ = load_corpus_evt(&evt_tx, conn);
+                            }
+                            PageWrite::Conflict => {
+                                let _ = evt_tx.send(Evt::Conflict { abs_path });
+                            }
+                            PageWrite::Failed(msg) => {
+                                let _ = evt_tx.send(Evt::Warn(msg));
+                            }
+                        }
+                    }
+                    Cmd::CreatePage {
+                        directory,
+                        title,
+                        page_type,
+                        tags,
+                        gates,
+                        description,
+                        language,
+                    } => {
+                        let Some(conn) = db.as_ref() else {
+                            let _ = evt_tx.send(Evt::Fatal("db not open".into()));
+                            break;
+                        };
+                        match create_page(
+                            conn,
+                            &directory,
+                            &title,
+                            &page_type,
+                            &tags,
+                            &gates,
+                            description.as_deref(),
+                            language.as_deref(),
+                        ) {
+                            Created::Done { abs_path, id } => {
+                                let _ = evt_tx.send(Evt::Created { abs_path, id });
+                                let _ = load_corpus_evt(&evt_tx, conn);
+                            }
+                            Created::Skipped(msg) => {
+                                let _ = evt_tx.send(Evt::Warn(msg));
+                            }
+                            Created::Failed(msg) => {
+                                let _ = evt_tx.send(Evt::Warn(msg));
+                            }
+                        }
                     }
                     Cmd::Quit => break,
                 }
@@ -333,4 +447,257 @@ fn load_corpus_evt(evt_tx: &Sender<Evt>, conn: &DbGuard) -> Result<(), String> {
 fn open_at(path: &Path) -> Result<kb_db::Db, String> {
     let db = kb_db::Db::open(path).map_err(|e| format!("open {path:?}: {e}"))?;
     Ok(db)
+}
+
+/// The outcome of a `Save` (PLAN-GUI §3.3). `Saved` = the conflict guard
+/// passed and the write + reindex landed; `Conflict` = the on-disk bytes no
+/// longer match the editor's baseline (the *write* was not attempted);
+/// `Failed` = a real I/O or index error (already formatted for the status bar).
+enum PageWrite {
+    Saved,
+    Conflict,
+    Failed(String),
+}
+
+/// `Save` → conflict guard → atomic write → single-page reindex.
+///
+/// Mirrors the TUI commit path (`kb/tui/mod.rs`, `Mode::Edit` branch) and the
+/// CLI `create` index path verbatim, so the GUI's writes reconcile
+/// byte-identically with `kb refresh`:
+/// 1. Re-read the file; it must equal the byte slice the editor opened
+///    (`expected_disk`) — a mid-session external edit is refused as a
+///    *Conflict* (PLAN-GUI §3.3 "never silent clobbering"), *not* written.
+/// 2. If `new_bytes == on_disk` the edit is a no-op: the file is byte-
+///    identical, so there is nothing to write and nothing to reindex (the
+///    "open then commit" no-artifact rule, PLAN-GUI §3.3 rule 3 "a save never
+///    rewrites bytes it did not edit").
+/// 3. Otherwise atomically write (`unique_tmp_in`-style temp + `rename`) and
+///    reindex the single page with `build_page(_, include_language: true)` +
+///    `upsert_page` (the `language:`-clobber fix: `true`, not the historical
+///    `false` the TUI carried — see the TUI comment at the call site).
+fn save_page(conn: &DbGuard, abs_path: &str, expected_disk: &[u8], new_bytes: &[u8]) -> PageWrite {
+    let path = Path::new(abs_path);
+    // 1) Conflict guard: re-read and compare against the editor's baseline.
+    let on_disk = match std::fs::read(path) {
+        Ok(b) => b,
+        Err(e) => return PageWrite::Failed(format!("re-read {abs_path} before write: {e}")),
+    };
+    if on_disk != expected_disk {
+        return PageWrite::Conflict;
+    }
+    // 2) No-op write: byte-identical ⇒ nothing to do (no write, no reindex).
+    if on_disk == new_bytes {
+        return PageWrite::Saved;
+    }
+    // 3) Atomic write.
+    if let Err(e) = atomic_write(path, new_bytes) {
+        return PageWrite::Failed(format!("write {abs_path} atomically: {e}"));
+    }
+    // Reindex the single page (best-effort: disk is authoritative, a reindex
+    // failure is a *warn* on the already-written file — same as the TUI/CLI).
+    match reindex_single(conn, abs_path) {
+        Ok(_indexed_or_skipped) => PageWrite::Saved,
+        Err(msg) => PageWrite::Failed(format!("wrote {abs_path}; DB upsert note: {msg}")),
+    }
+}
+
+/// The outcome of a `CreatePage`. `Done` = the scaffold was written *and*
+/// indexed (the row is in the DB). `Skipped` = the file was written but
+/// indexing was skipped (no roots / not under a root / not indexable) — a
+/// warn, never an error, matching the CLI `create` contract. `Failed` = a
+/// real I/O or validation error.
+enum Created {
+    Done { abs_path: String, id: String },
+    Skipped(String),
+    Failed(String),
+}
+
+/// `CreatePage` → resolve target → scaffold → atomic write → upsert.
+///
+/// Scaffolds the exact byte-shape `kb create` writes (PLAN §4): a YAML
+/// frontmatter block (`type:` + `title:` + `description:` + `tags:` +
+/// `search_required_phrase:`) followed by `# <title>`. Gate terms and extra
+/// tags are folded into `search_required_phrase:` / `tags:` lists. The
+/// `--type` value must be one of `wiki|note|label` (the CLI's `NoteType`
+/// domain) — anything else is a `Failed`.
+#[allow(clippy::too_many_arguments)] // the full `kb create` parameter set (CLI parity)
+fn create_page(
+    conn: &DbGuard,
+    directory: &str,
+    title: &str,
+    page_type: &str,
+    tags: &[String],
+    gates: &[String],
+    description: Option<&str>,
+    language: Option<&str>,
+) -> Created {
+    // Validate the type (the CLI's domain, PLAN §4 "wiki|note|label").
+    if !matches!(page_type, "wiki" | "note" | "label") {
+        return Created::Failed(format!(
+            "--type must be wiki|note|label (got {page_type:?})"
+        ));
+    }
+    // Derive a clean filename stem from the title (no NUL / newline chars,
+    // `.md` always present).
+    let title_clean = title.trim();
+    if title_clean.is_empty() {
+        return Created::Failed("create: NAME must not be empty".into());
+    }
+    if title_clean
+        .chars()
+        .any(|c| c == '\0' || c == '\n' || c == '\r')
+    {
+        return Created::Failed("create: NAME must not contain newlines or NUL bytes".into());
+    }
+    let stem = title_clean
+        .trim()
+        .replace(|c: char| c.is_whitespace() || c == '\t', "-")
+        .replace(['/', '\\', ':', '"', '<', '>', '|', '?', '*'], "-");
+    if stem.is_empty() {
+        return Created::Failed("create: NAME must yield a non-empty page title".into());
+    }
+    // Resolve the target path against the directory (append `.md` when absent).
+    let dir = Path::new(directory);
+    let target = dir.join(format!("{stem}.md"));
+    if let Some(ext) = target.extension().and_then(|e| e.to_str()) {
+        if ext != "md" {
+            return Created::Failed(format!(
+                "create: {stem:?} is not a .md page (extension {ext:?}) — indexes .md only"
+            ));
+        }
+    }
+    if target.exists() {
+        return Created::Failed(format!("create: {} already exists", target.display()));
+    }
+    // Make sure the directory exists (a root's sub-folder may not yet).
+    if let Some(parent) = target.parent() {
+        if !parent.as_os_str().is_empty() {
+            if let Err(e) = std::fs::create_dir_all(parent) {
+                return Created::Failed(format!("create {}: {e}", parent.display()));
+            }
+        }
+    }
+    // Scaffold (PLAN §4). The description / tags / gates / language are
+    // folded in as YAML list / scalar fields; the body starts with `# title`.
+    let desc = description.unwrap_or_default();
+    let tags_yaml = if tags.is_empty() {
+        "tags: []".to_string()
+    } else {
+        let mut s = "tags:".to_string();
+        for t in tags {
+            s.push_str(&format!("\n  - {t}"));
+        }
+        s
+    };
+    let gates_yaml = if gates.is_empty() {
+        "search_required_phrase: []".to_string()
+    } else {
+        let mut s = "search_required_phrase:".to_string();
+        for g in gates {
+            s.push_str(&format!("\n  - {g}"));
+        }
+        s
+    };
+    let lang = language.filter(|l| !l.is_empty());
+    let lang_yaml = lang.map(|l| format!("\nlanguage: {l}")).unwrap_or_default();
+    let desc_yaml = if desc.is_empty() {
+        "description:".to_string()
+    } else {
+        format!("description: {desc}")
+    };
+    let scaffold = format!(
+        "---\ntype: {page_type}\ntitle: {title_clean}\n{desc_yaml}\n{tags_yaml}\n{gates_yaml}{lang_yaml}\n---\n\n# {title_clean}\n\n"
+    );
+    // Atomic write.
+    if let Err(e) = atomic_write(&target, scaffold.as_bytes()) {
+        return Created::Failed(format!("write {}: {e}", target.display()));
+    }
+    let abs_target = std::fs::canonicalize(&target).unwrap_or_else(|_| target.clone());
+    let abs_s = abs_target.to_string_lossy().to_string();
+    // Index (best-effort: a skip is a note, not an error, matching the CLI).
+    let outcome = match reindex_single(conn, &abs_s) {
+        Ok(r) => r,
+        Err(msg) => return Created::Failed(format!("indexed write failed: {msg}")),
+    };
+    match outcome {
+        Some(id) => Created::Done {
+            abs_path: abs_s,
+            id,
+        },
+        None => Created::Skipped(format!(
+            "{} created ({} bytes) — skipped indexing (run `kb add <dir>` first, then `kb refresh`)",
+            abs_s,
+            scaffold.len()
+        )),
+    }
+}
+
+/// Reindex a single on-disk page (the same `build_page` + `upsert_page`
+/// pair the CLI `refresh`/`create`/`commit` use). Returns:
+/// * `Ok(Some(id))` — the page indexed; the new row's display id.
+/// * `Ok(None)`     — the page is on disk but not under any registered root
+///   (the CLI's "no roots / not under a root" skip; a warn, never an error).
+/// * `Err(msg)`     — `build_page`/`upsert_page` failed (frontmatter / DB).
+///
+/// `include_language` is always `true`: the page's `language:` must survive
+/// (the historical `false` TUI path silently nulled it back to the DB's NULL
+/// on every commit — see the TUI's comment at the `build_page` call site).
+fn reindex_single(conn: &DbGuard, abs_path: &str) -> std::result::Result<Option<String>, String> {
+    let roots = roots_with_seq(&conn.db)?;
+    let (root, rel) = match kb_db::walk_snapshot::winning_root(&roots, abs_path) {
+        Some(r) => r,
+        None => return Ok(None),
+    };
+    match kb_db::index::build_page(Path::new(abs_path), &root, &rel, true) {
+        Ok(rec) => match kb_db::index::upsert_page(&conn.db, &rec) {
+            Ok(_) => Ok(Some(rec.id)),
+            Err(e) => Err(format!("DB upsert: {e}")),
+        },
+        Err(e) => Err(format!("frontmatter: {e}")),
+    }
+}
+
+/// The registered roots as `(path, seq)` pairs, for `winning_root`
+/// (port of `kb` CLI's `roots_with_seq`, `kb/main.rs:1147` — the same SELECT,
+/// so the GUI never desyncs from the CLI's root-resolution rule).
+fn roots_with_seq(db: &kb_db::Db) -> std::result::Result<Vec<(String, i64)>, String> {
+    let stmt = db
+        .conn
+        .prepare("SELECT path, seq FROM roots ORDER BY seq")
+        .map_err(|e| format!("prepare roots: {e}"))?;
+    let rows = stmt
+        .query_map((), |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?)))
+        .map_err(|e| format!("query roots: {e}"))?
+        .collect::<std::result::Result<Vec<_>, _>>()
+        .map_err(|e| format!("read roots: {e}"))?;
+    Ok(rows)
+}
+
+/// Atomic file write: same-directory temp file + `sync_all` + `rename` over
+/// the target (a port of `kb::atomic_write`'s *semantics*, `kb/main.rs:1738` —
+/// this workspace has no shared helper; the GUI keeps its own so the binary
+/// stays independent of the CLI's crate tree).
+fn atomic_write(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+    use std::io::Write as _;
+    let dir = path
+        .parent()
+        .filter(|p| !p.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
+    let name = path
+        .file_name()
+        .map(|f| f.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "kb-gui.tmp".to_string());
+    let pid = std::process::id();
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    let tmp = dir.join(format!("{name}.tmp.{pid}.{nanos}"));
+    {
+        let mut f = std::fs::File::create(&tmp)?;
+        f.write_all(bytes)?;
+        f.sync_all()?;
+    }
+    std::fs::rename(&tmp, path)?;
+    Ok(())
 }
