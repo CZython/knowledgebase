@@ -20,9 +20,9 @@ Spec: `PLAN-GUI.md`. Crate: new `kb-gui` in the workspace.
 - [x] G2 — Raw editor + save + frontmatter
   - [x] Raw Markdown editor, save to disk, dirty tracking (§9.2)
   - [x] Frontmatter inspector (§6.9)
-- [ ] G3 — Formatted read view + generic Markdown
-  - [ ] Read-only rendered view, no embedded browser (§7)
-  - [ ] Generic Markdown + conversion rules (§6.15)
+- [x] G3 — Formatted read view + generic Markdown (IR+parser `ui/md.rs`, renderer `ui/render.rs`, `DocumentKind`+classify, §6.15 banner + Convert dialog `ui/convert.rs`, `Cmd::ConvertPage` worker, inspector gating)
+  - [x] Read-only rendered view, no embedded browser (§7)
+  - [x] Generic Markdown + conversion rules (§6.15) — e2e: pure-body file → indexed note
 - [ ] G4 — WYSIWYG block editing MVP
   - [ ] Block-span model, structural edits, inline formatting, round-trip guarantees (§8)
 - [ ] G5 — Settings and corpus management parity

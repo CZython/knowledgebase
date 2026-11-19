@@ -83,6 +83,24 @@ pub enum Cmd {
         expected_disk: Vec<u8>,
         ops: Vec<FmOp>,
     },
+    /// Convert a `GenericMarkdown` / `UnindexedMarkdown` document into a
+    /// full `KbPage` (G3, PLAN-GUI §6.15 "Convert flow"). Conflict-guard →
+    /// set `type:` / `title:` + append chosen `tags:` / `search_required_phrase:`
+    /// over the on-disk bytes (the body and all other fields are *preserved*;
+    /// the file is never rewritten whole) → if the page is outside every root,
+    /// add its containing folder as a root → atomic write → single-page
+    /// reindex (`build_page` + `upsert_page`) → reload the corpus (the next
+    /// `OpenPage` re-classifies the document as `KbPage` and the banner
+    /// disappears). `page_type` is one of `wiki|note|label`; an empty `title`
+    /// / `tags` / `gates` leave the existing value untouched.
+    ConvertPage {
+        abs_path: String,
+        expected_disk: Vec<u8>,
+        page_type: String,
+        title: String,
+        tags: Vec<String>,
+        gates: Vec<String>,
+    },
     /// Stop the worker: finish the current operation, drop the connection,
     /// exit the loop.
     Quit,
@@ -161,6 +179,17 @@ pub enum Evt {
     /// user sees) but it is here for future navigation / deep-link work.
     Created {
         abs_path: String,
+        #[allow(dead_code)]
+        id: String,
+    },
+    /// A `ConvertPage` succeeded (conflict guard passed, `type:`/`title:`/
+    /// `tags:` written, the page is now indexed *or* its folder was added as
+    /// a root). The UI re-classifies the open document as a `KbPage` via `Cmd::OpenPage`
+    /// and closes the conversion dialog (PLAN-GUI §6.15 step 4: "the banner
+    /// disappears and all `kb` features enable").
+    Converted {
+        abs_path: String,
+        /// The page's new id (`type:slug`), for navigation / deep links.
         #[allow(dead_code)]
         id: String,
     },
@@ -443,6 +472,43 @@ pub fn spawn_worker() -> WorkerHandle {
                             }
                         }
                     }
+                    Cmd::ConvertPage {
+                        abs_path,
+                        expected_disk,
+                        page_type,
+                        title,
+                        tags,
+                        gates,
+                    } => {
+                        let Some(conn) = db.as_ref() else {
+                            let _ = evt_tx.send(Evt::Fatal("db not open".into()));
+                            break;
+                        };
+                        match convert_page(
+                            conn,
+                            &abs_path,
+                            &expected_disk,
+                            &page_type,
+                            title.trim(),
+                            &tags,
+                            &gates,
+                        ) {
+                            Converted::Done { id } => {
+                                let _ = evt_tx.send(Evt::Converted { abs_path, id });
+                                // Reload the corpus so the list/outline/rail
+                                // reflect the newly-indexed page (the page is
+                                // now a `KbPage`). The `OpenPage` re-fold in
+                                // the UI re-classifies and drops the banner.
+                                let _ = load_corpus_evt(&evt_tx, conn);
+                            }
+                            Converted::Conflict => {
+                                let _ = evt_tx.send(Evt::Conflict { abs_path });
+                            }
+                            Converted::Failed(msg) => {
+                                let _ = evt_tx.send(Evt::Warn(msg));
+                            }
+                        }
+                    }
                     Cmd::Quit => break,
                 }
             }
@@ -631,6 +697,139 @@ fn save_frontmatter(
         Ok(_indexed_or_skipped) => PageWrite::Saved,
         Err(msg) => PageWrite::Failed(format!("wrote {abs_path}; DB upsert note: {msg}")),
     }
+}
+
+/// `ConvertPage` → conflict guard → apply frontmatter ops (set `type:`, set
+/// `title:` if non-empty, append each `tags:` / `search_required_phrase:`
+/// term) → if the page is outside every root, add its containing folder as a
+/// root → atomic write → single-page reindex (`build_page` + `upsert_page`).
+///
+/// The body and all *other* frontmatter fields are preserved: only the ops
+/// above are applied over the on-disk bytes (PLAN-GUI §6.15 step 3:
+/// "conversion preserves the body and all existing frontmatter fields; it
+/// only adds/sets the missing `type:`, title fallback, and any chosen list
+/// items. It never rewrites the whole file"). A `page_type` not in
+/// `wiki|note|label` is a `Failed` before any write is attempted.
+fn convert_page(
+    conn: &DbGuard,
+    abs_path: &str,
+    expected_disk: &[u8],
+    page_type: &str,
+    title: &str,
+    tags: &[String],
+    gates: &[String],
+) -> Converted {
+    if !matches!(page_type, "wiki" | "note" | "label") {
+        return Converted::Failed(format!(
+            "--type must be wiki|note|label (got {page_type:?})"
+        ));
+    }
+    // 1) Conflict guard: re-read and compare against the UI's baseline.
+    let path = Path::new(abs_path);
+    let mut on_disk = match std::fs::read(path) {
+        Ok(b) => b,
+        Err(e) => return Converted::Failed(format!("re-read {abs_path} before write: {e}")),
+    };
+    if on_disk != expected_disk {
+        return Converted::Conflict;
+    }
+    // 1b) If the file carries no frontmatter frame at all (a pure body, as a
+    //     generic Markdown page typically is), seed a minimal empty frame so
+    //     the field ops below can land. §6.15: conversion *adds* a valid
+    //     `type:` (and optional fields); it never rewrites or drops the body.
+    //     The empty frame is byte-transparent to the body — `parse` still
+    //     returns the whole text as `body`.
+    if kb_core::frontmatter::find_fm(&on_disk).is_none() {
+        let mut seeded = Vec::with_capacity(on_disk.len() + 9);
+        seeded.extend_from_slice(b"---\n---\n\n");
+        seeded.extend_from_slice(&on_disk);
+        on_disk = seeded;
+    }
+    // 2) Build the op set (in order): set type always, set title if
+    //    non-empty, append each tag, append each gate term.
+    let mut ops: Vec<FmOp> = vec![FmOp::SetScalar {
+        key: "type".to_string(),
+        value: page_type.to_string(),
+    }];
+    if !title.is_empty() {
+        ops.push(FmOp::SetScalar {
+            key: "title".to_string(),
+            value: title.to_string(),
+        });
+    }
+    for t in tags {
+        ops.push(FmOp::AppendItem {
+            key: "tags".to_string(),
+            value: t.clone(),
+        });
+    }
+    for g in gates {
+        ops.push(FmOp::AppendItem {
+            key: "search_required_phrase".to_string(),
+            value: g.clone(),
+        });
+    }
+    // 3) Apply the ops in order over the on-disk bytes.
+    let mut bytes = on_disk.clone();
+    for op in &ops {
+        let out = match op {
+            FmOp::SetScalar { key, value } => kb_core::frontmatter::set_scalar(&bytes, key, value),
+            FmOp::Remove { key } => kb_core::frontmatter::remove_field(&bytes, key),
+            FmOp::AppendItem { key, value } => {
+                kb_core::frontmatter::append_list_item(&bytes, key, value)
+            }
+            FmOp::RemoveItem { key, value } => {
+                kb_core::frontmatter::remove_list_item(&bytes, key, value)
+            }
+        };
+        match out {
+            Ok(v) => bytes = v,
+            Err(err) => {
+                return Converted::Failed(format!(
+                    "convert: frontmatter op {:?} failed: {err} (file unchanged)",
+                    summarize_op(op)
+                ))
+            }
+        }
+    }
+    // 4) If the page is outside every root, add its containing folder as a
+    //    root (PLAN-GUI §6.15 step 2: "If the file is outside every root, the
+    //    primary action is Add containing folder as root & convert").
+    let roots = match roots_with_seq(&conn.db) {
+        Ok(r) => r,
+        Err(e) => return Converted::Failed(format!("convert: read roots: {e}")),
+    };
+    if kb_db::walk_snapshot::winning_root(&roots, abs_path).is_none() {
+        let parent = path
+            .parent()
+            .map(|p| p.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        if !parent.is_empty() {
+            if let Err(e) = conn.db.add_root(&parent, None, true) {
+                return Converted::Failed(format!("convert: add root {parent:?}: {e}"));
+            }
+        }
+    }
+    // 5) Atomic write.
+    if let Err(e) = atomic_write(path, &bytes) {
+        return Converted::Failed(format!("convert: write {abs_path} atomically: {e}"));
+    }
+    // 6) Single-page reindex (`build_page` + `upsert_page`).
+    match reindex_single(conn, abs_path) {
+        Ok(Some(id)) => Converted::Done { id },
+        Ok(None) => Converted::Failed(format!(
+            "convert: wrote {abs_path} but could not index (page not under any registered root)"
+        )),
+        Err(msg) => Converted::Failed(format!("convert: wrote {abs_path}; DB upsert: {msg}")),
+    }
+}
+
+/// The outcome of a `ConvertPage`.
+#[derive(Debug)]
+enum Converted {
+    Done { id: String },
+    Conflict,
+    Failed(String),
 }
 
 /// A short human form of an `FmOp` for the status-bar / warn line (keeps the
@@ -843,4 +1042,104 @@ fn atomic_write(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
     }
     std::fs::rename(&tmp, path)?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A self-contained end-to-end `convert_page` over a real temp dir + real
+    /// temp DB: takes a *pure-body* Markdown file (no frontmatter, the generic
+    /// case the banner's Convert flow is for), runs the full op pipeline, and
+    /// asserts the written file is a valid indexed `note` and the page row is
+    /// in the corpus. This is the deterministic stand-in for the X11 visual
+    /// check of the dialog's **Convert and save** button (PLAN-GUI §6.15).
+    #[test]
+    fn convert_a_pure_body_file_into_an_indexed_note() {
+        let dir = std::env::temp_dir().join(format!(
+            "kb-gui-conv-test-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("generic.md");
+        // No frontmatter at all — just a body with a leading H1.
+        let body = "# My generic doc\n\nJust **plain** prose, no frontmatter.\n";
+        std::fs::write(&file, body).unwrap();
+        let abs = canonical(&file);
+        let expected = std::fs::read(&file).unwrap();
+
+        let db_file = dir.join("conv.db");
+        let conn = DbGuard::open(&Some(db_file.clone())).unwrap();
+
+        let tags = vec!["alpha".to_string(), "beta".to_string()];
+        let res = convert_page(
+            &conn,
+            &abs,
+            &expected,
+            "note",
+            "Converted title",
+            &tags,
+            &[],
+        );
+
+        let written = std::fs::read(&file).unwrap();
+
+        let id = match res {
+            Converted::Done { id } => id,
+            other => panic!("expected Done, got {other:?}"),
+        };
+        assert!(
+            id.starts_with("note:"),
+            "id carries the note: prefix, got {id}"
+        );
+
+        // The written file now carries a valid frontmatter frame with
+        // type:note, the title, and both tags — §6.15 "add / set only".
+        let text = String::from_utf8(written).unwrap();
+        assert!(text.starts_with("---\n"), "starts with frontmatter frame");
+        assert!(text.contains("type: note"), "type set to note: {text}");
+        assert!(text.contains("title: Converted title"), "title set: {text}");
+        assert!(
+            text.contains("alpha") && text.contains("beta"),
+            "both tags appended: {text}"
+        );
+        assert!(
+            text.contains("# My generic doc"),
+            "body preserved verbatim: {text}"
+        );
+        // Round-trips to a valid, indexable note.
+        let fm = kb_core::frontmatter::parse(&text);
+        assert!(fm.is_indexable());
+        assert!(fm.body.contains("# My generic doc"));
+
+        // And the page row is actually in the corpus under a real root.
+        let page_row = {
+            let stmt = conn
+                .db
+                .conn
+                .prepare("SELECT id, root FROM pages WHERE id = ?1")
+                .unwrap();
+            stmt.query_map([id.as_str()], |r| {
+                Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
+            })
+            .unwrap()
+            .next()
+        };
+        let _ = std::fs::remove_dir_all(&dir);
+        assert!(
+            page_row.is_some(),
+            "page row {id} should be in the corpus after conversion"
+        );
+    }
+
+    fn canonical(p: &Path) -> String {
+        std::fs::canonicalize(p)
+            .unwrap()
+            .to_string_lossy()
+            .into_owned()
+    }
 }

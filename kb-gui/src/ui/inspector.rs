@@ -80,6 +80,26 @@ fn paint_panel(ui: &mut egui::Ui, app: &mut App, page: bool) {
         return;
     }
 
+    // §6.15: the structured inspector is read-only for non-`kb` documents
+    // (generic markdown) — conversion owns `type` / `title` / tags. Raw YAML
+    // editing in the raw view still works. Detect by the open page's
+    // `DocumentKind`: only `KbPage` (full features) and `UnindexedMarkdown`
+    // (valid `type:`, just not indexed yet) have full feature parity.
+    let full_kb_features = matches!(
+        app.state().open_page.as_ref().map(|p| p.kind),
+        Some(crate::state::DocumentKind::KbPage)
+            | Some(crate::state::DocumentKind::UnindexedMarkdown)
+    );
+    if !full_kb_features {
+        ui.colored_label(
+            egui::Color32::from_rgb(200, 160, 60),
+            "Inspector is read-only until this document is converted to a
+             valid `kb` page (use the Convert banner above).",
+        );
+        ui.separator();
+        ui.add_space(6.0);
+    }
+
     let saving = app.state().inspector.saving;
 
     // The stable-widget-id for each §6.9 field (so Tab / Shift+Tab can move
@@ -231,14 +251,14 @@ fn paint_panel(ui: &mut egui::Ui, app: &mut App, page: bool) {
     ui.add_space(4.0);
     ui.horizontal(|ui| {
         if ui
-            .add_enabled(!saving, egui::Button::new("Revert"))
+            .add_enabled(!saving && full_kb_features, egui::Button::new("Revert"))
             .clicked()
         {
             app.revert_inspector();
         }
         if ui
             .add_enabled(
-                !saving && pending.is_some(),
+                !saving && pending.is_some() && full_kb_features,
                 egui::Button::new("Commit (Ctrl+Enter)"),
             )
             .clicked()

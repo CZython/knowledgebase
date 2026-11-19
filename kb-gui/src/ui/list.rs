@@ -69,7 +69,11 @@ fn matches_filter(p: &PageRow, app: &App) -> bool {
 /// grouping + filter. Returns on a non-`Ready` phase with the loading
 /// placeholder.
 pub fn paint(ui: &mut egui::Ui, app: &mut App) {
+    // Fixed-width browse column: the preview/editor pane (the main reading
+    // area) takes the remaining width. Capping the max stops this full-width
+    // row from starving the preview (PLAN-GUI §6.5 layout).
     ui.set_min_width(300.0);
+    ui.set_max_width(380.0);
     // The rail and list together claim all the width left after the rail;
     // the list's own `ScrollArea` then scrolls its rows vertically.
     ui.vertical(|ui| {

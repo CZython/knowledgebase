@@ -245,6 +245,15 @@ pub struct OpenPageState {
     /// for the `Cmd::Save` conflict guard, PLAN-GUI §3.3). `None` until the
     /// body has actually loaded.
     pub baseline: Option<Vec<u8>>,
+    /// The document kind (PLAN-GUI §2 / §6.15), recomputed in the `Evt::Page`
+    /// fold from the loaded body + corpus membership. `GenericMarkdown` while
+    /// the body is still `None` (the banner appears once it classifies).
+    pub kind: DocumentKind,
+    /// `true` once the user dismissed the conversion/add-root banner for the
+    /// session (PLAN-GUI §6.15 rule 6: "Dismiss hides the banner for the
+    /// session"; the action remains in the `⋯` menu / Settings so dismissal is
+    /// not permanent). Reset to `false` on a fresh load / page switch.
+    pub banner_dismissed: bool,
 }
 
 /// The frontmatter inspector's working state (PLAN-GUI §6.9). Holds the
@@ -324,6 +333,51 @@ impl InspectorField {
     }
 }
 
+/// The document kind of the *open* page (PLAN-GUI §2 / §6.15, lines 162–182).
+///
+/// A property of the open document, not the file format. It decides which
+/// `kb` features are enabled and whether the conversion banner shows.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DocumentKind {
+    /// Valid `type:` *and* indexed in the corpus (`kb browse` row present).
+    /// Full `kb` features; no banner.
+    KbPage,
+    /// Valid `type:` but outside every registered root / not yet in the
+    /// corpus. Full editing; search/links/collections disabled until indexed.
+    /// Gets the “Not indexed — add the containing folder as a root?” banner.
+    UnindexedMarkdown,
+    /// Missing or unknown `type:` (or unparseable frontmatter). `kb`
+    /// features disabled; the conversion banner (“Would you like to convert
+    /// this markdown file into a valid page?”) is shown.
+    GenericMarkdown,
+}
+
+impl DocumentKind {
+    /// `true` when the document is a full `kb` page (no banner, features on).
+    pub fn is_kb_page(&self) -> bool {
+        matches!(self, Self::KbPage)
+    }
+}
+
+/// Classify a loaded page body (PLAN-GUI §162–182, §727–749).
+///
+/// `GenericMarkdown` when `frontmatter::parse` yields no known `type:`
+/// (missing, unknown, or unparseable). Otherwise the page has a *valid*
+/// `type:`: if it is indexed in the corpus it is a `KbPage`, else an
+/// `UnindexedMarkdown` (valid type, but outside every root / not in `pages`).
+///
+/// Pure and cheap enough to run on the UI thread in the `Evt::Page` fold.
+pub fn classify(body: &str, indexed: bool) -> DocumentKind {
+    let fm = kb_core::frontmatter::parse(body);
+    if !fm.is_indexable() {
+        DocumentKind::GenericMarkdown
+    } else if indexed {
+        DocumentKind::KbPage
+    } else {
+        DocumentKind::UnindexedMarkdown
+    }
+}
+
 /// Which body the open document shows (PLAN-GUI §6.2 top-bar toggle,
 /// `Cmd/Ctrl+E`). G1 renders both read-only.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -381,6 +435,17 @@ pub struct AppState {
     pub create_title: String,
     /// The new-note form's type input (`wiki` / `note` / `label`).
     pub create_type: String,
+    /// The "convert to page" dialog is shown (G3; PLAN-GUI §6.15 "Convert
+    /// flow"). Seeded from the open document's frontmatter on open.
+    pub convert_open: bool,
+    /// The conversion dialog's `type:` input (default `note`, §6.15 step 1).
+    pub convert_type: String,
+    /// The conversion dialog's `title:` input (prefilled from H1/filename).
+    pub convert_title: String,
+    /// The conversion dialog's free-form tags (optional, §6.15 step 1).
+    pub convert_tags: Vec<String>,
+    /// The conversion dialog's free-form collection terms (optional).
+    pub convert_collections: Vec<String>,
     /// Formatted vs Raw body (the top-bar toggle, `Cmd/Ctrl+E`).
     pub view_mode: ViewMode,
     /// The `Cmd+K` overlay's results + query + scope. Kept across close/open
@@ -419,10 +484,73 @@ impl AppState {
             create_open: false,
             create_title: String::new(),
             create_type: "wiki".to_string(),
+            convert_open: false,
+            convert_type: "note".to_string(),
+            convert_title: String::new(),
+            convert_tags: Vec::new(),
+            convert_collections: Vec::new(),
             view_mode: ViewMode::default(),
             search: SearchView::default(),
             save_status: crate::data::SaveStatus::default(),
             inspector: InspectorState::default(),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn generic_when_no_frontmatter() {
+        // No `---` frontmatter at all ⇒ no `type:` ⇒ GenericMarkdown
+        // regardless of corpus membership.
+        assert_eq!(
+            classify("# Hello\n\nbody", true),
+            DocumentKind::GenericMarkdown
+        );
+        assert_eq!(
+            classify("# Hello\n\nbody", false),
+            DocumentKind::GenericMarkdown
+        );
+    }
+
+    #[test]
+    fn generic_when_type_missing() {
+        // Frontmatter present but `type:` absent ⇒ not indexable ⇒ Generic.
+        let body = "---\ntitle: untitled\ntags:\n  - x\n---\n\n# T\n";
+        assert_eq!(classify(body, true), DocumentKind::GenericMarkdown);
+        assert_eq!(classify(body, false), DocumentKind::GenericMarkdown);
+    }
+
+    #[test]
+    fn generic_when_type_unknown() {
+        // `type:` present but not one of wiki/note/label ⇒ not indexable.
+        let body = "---\ntype: memo\n---\n\n# T\n";
+        assert_eq!(classify(body, true), DocumentKind::GenericMarkdown);
+        assert_eq!(classify(body, false), DocumentKind::GenericMarkdown);
+    }
+
+    #[test]
+    fn kb_page_when_valid_type_and_indexed() {
+        let body = "---\ntype: note\ntitle: T\n---\n\n# T\n";
+        assert_eq!(classify(body, true), DocumentKind::KbPage);
+    }
+
+    #[test]
+    fn unindexed_when_valid_type_but_not_indexed() {
+        // Valid `type:` but the page is not in the corpus (outside every
+        // root) ⇒ UnindexedMarkdown (the "add folder as root" banner).
+        let body = "---\ntype: wiki\ntitle: T\n---\n\n# T\n";
+        assert_eq!(classify(body, false), DocumentKind::UnindexedMarkdown);
+    }
+
+    #[test]
+    fn body_is_whole_file_not_just_markdown() {
+        // Classification runs on the *whole* file (frontmatter + markdown);
+        // a known `type:` + body parses to an indexable frontmatter.
+        let body = "---\ntype: label\n---\n\ntext\n";
+        assert!(kb_core::frontmatter::parse(body).is_indexable());
+        assert_eq!(classify(body, true), DocumentKind::KbPage);
     }
 }
