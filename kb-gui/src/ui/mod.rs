@@ -5,8 +5,10 @@
 //!
 //! - `Panel::top` → `chrome::top_bar`
 //! - `Panel::bottom` → `chrome::status_bar`
-//! - `Panel::left("kb.rail")` → `rail::paint` (only in browse/page)
-//! - `Panel::left("kb.list")` → `list::paint` (only in browse/page)
+//! - `Panel::left("kb.left")` → a *single* tabbed panel hosting either the
+//!   collections rail (`rail::paint`) or the note list (`list::paint`),
+//!   switched via a two-tab bar; only the active tab is visible
+//!   (only in browse/page)
 //! - `Panel::right("kb.outline")` → `outline::paint` (only when a page is open)
 //! - `CentralPanel` → Welcome / Home / `preview::paint` / `editor::paint`
 //!
@@ -49,6 +51,40 @@ fn browseable(app: &App) -> bool {
     app.state().selected_page.is_some() || app.state().roots_known
 }
 
+/// The single consolidated left pane: a two-tab bar (`Collections` /
+/// `Notes`) above whichever panel is active. Clicking the inactive tab
+/// switches it. This replaces the earlier side-by-side rail + list panels.
+///
+/// The active pane claims the remainder of the panel's height: `list::paint`
+/// wraps its rows in its own `ScrollArea` (header stays pinned, rows scroll)
+/// while `rail::paint` is a short plain stack — so we do *not* add a second,
+/// enclosing scroll area here (that would nest scrollbars and pin the list
+/// header away from the panel top).
+fn left_pane(app: &mut App, ui: &mut egui::Ui) {
+    let active = app.state().active_left_pane;
+    ui.horizontal(|ui| {
+        if ui
+            .selectable_label(active == crate::state::LeftPaneKind::Rail, "Collections")
+            .clicked()
+            && active != crate::state::LeftPaneKind::Rail
+        {
+            app.state_mut().active_left_pane = crate::state::LeftPaneKind::Rail;
+        }
+        if ui
+            .selectable_label(active == crate::state::LeftPaneKind::List, "Notes")
+            .clicked()
+            && active != crate::state::LeftPaneKind::List
+        {
+            app.state_mut().active_left_pane = crate::state::LeftPaneKind::List;
+        }
+    });
+    ui.separator();
+    match active {
+        crate::state::LeftPaneKind::Rail => rail::paint(ui, app),
+        crate::state::LeftPaneKind::List => list::paint(ui, app),
+    }
+}
+
 /// The main paint entry point (called from `App::ui` each frame).
 pub fn paint(app: &mut App, ui: &mut egui::Ui) {
     let phase = app.state().phase.clone();
@@ -73,19 +109,19 @@ pub fn paint(app: &mut App, ui: &mut egui::Ui) {
             // Welcome/Home/browse states).
             Panel::top("kb.top").show(ui, |ui| chrome::top_bar(ui, app));
 
-            // Browse panes (rail + list) — skip in Welcome/Home: those two
+            // Browse pane — a single tabbed left panel (collections rail OR
+            // note list, switched via a small tab bar). The two panels used
+            // to paint side-by-side and consumed too much width; now only
+            // the active tab is visible. Skipped in Welcome/Home: those two
             // states need the full central rect for their layout.
             if browse {
-                Panel::left("kb.rail")
-                    .default_size(220.0)
-                    .min_size(160.0)
-                    .max_size(340.0)
-                    .show(ui, |ui| rail::paint(ui, app));
-                Panel::left("kb.list")
-                    .default_size(340.0)
-                    .min_size(260.0)
-                    .max_size(500.0)
-                    .show(ui, |ui| list::paint(ui, app));
+                Panel::left("kb.left")
+                    .default_size(300.0)
+                    .min_size(200.0)
+                    .max_size(460.0)
+                    .show(ui, |ui| {
+                        left_pane(app, ui);
+                    });
                 // Outline: only meaningful once a page is open (a Welcome or
                 // unselected Home view has no body to outline).
                 if has_selection {

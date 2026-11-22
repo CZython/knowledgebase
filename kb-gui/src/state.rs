@@ -186,6 +186,20 @@ pub enum GroupBy {
     Visibility,
 }
 
+/// Which left-side panel is active. The rail (collections) and list (notes)
+/// previously painted as two *separate* left panels, consuming too much
+/// horizontal space; they are now consolidated into a single tabbed panel
+/// and only the active tab is visible at a time. `List` is the default —
+/// the note list is the primary browsing surface (PLAN-GUI §6.4).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum LeftPaneKind {
+    /// The collections rail (PLAN-GUI §6.3).
+    Rail,
+    /// The note list (PLAN-GUI §6.4) — the primary browse surface.
+    #[default]
+    List,
+}
+
 /// The search-results state (the `Cmd+K` overlay; PLAN-GUI §6.8). The overlay
 /// keeps its state when navigating into a page and back: the worker only
 /// refills the rows when a new query lands.
@@ -426,6 +440,9 @@ pub struct AppState {
     /// The list's selected row (by abs_path; `None` = nothing selected /
     /// nothing open yet). The G1 preview host keys off this.
     pub selected_page: Option<String>,
+    /// The active tab in the single consolidated left panel (rail vs list).
+    /// `List` by default (the note list is the primary browse surface).
+    pub active_left_pane: LeftPaneKind,
     /// The open document (PLAN-GUI §6.5) — the body + error; `None` when no
     /// page is open (Home/Welcome shows instead).
     pub open_page: Option<OpenPageState>,
@@ -485,6 +502,7 @@ impl AppState {
             group_by: GroupBy::None,
             list_filter: String::new(),
             selected_page: None,
+            active_left_pane: LeftPaneKind::default(),
             open_page: None,
             create_open: false,
             create_title: String::new(),
