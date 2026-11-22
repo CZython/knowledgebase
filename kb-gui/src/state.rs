@@ -460,6 +460,11 @@ pub struct AppState {
     /// `open = false` by default; `Cmd/Ctrl+Shift+F` or the Properties
     /// button toggles it.
     pub inspector: InspectorState,
+    /// WYSIWYG: the index (into `doc.root`) of the block currently in
+    /// edit mode, or `None` when reading. Clicking a block in read mode
+    /// switches it to edit mode; clicking a different block switches the
+    /// focus. Resets to `None` on page switch.
+    pub wysiwyg_editing: Option<usize>,
 }
 
 impl AppState {
@@ -493,6 +498,7 @@ impl AppState {
             search: SearchView::default(),
             save_status: crate::data::SaveStatus::default(),
             inspector: InspectorState::default(),
+            wysiwyg_editing: None,
         }
     }
 }

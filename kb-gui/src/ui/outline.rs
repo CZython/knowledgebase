@@ -16,9 +16,9 @@ fn sections(body: &str) -> Vec<kb_core::section::Section> {
 }
 
 /// Paint the outline for the open page (or a muted placeholder when there
-/// is no page, no body yet, or the body has no headings).
+/// is no page, no body yet, or the body has no headings). The panel width
+/// is claimed by the `SidePanel::right("kb.outline")` in `ui/mod.rs`.
 pub fn paint(ui: &mut egui::Ui, page: &Option<OpenPageState>, body: &Option<String>) {
-    ui.set_max_width(200.0);
     ui.vertical(|ui| {
         ui.strong("Outline");
         ui.add_space(4.0);

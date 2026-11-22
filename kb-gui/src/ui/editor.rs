@@ -23,9 +23,8 @@ use crate::data::SaveStatus;
 /// Paint the editor pane (replaces `preview::paint` when the view is `Raw`
 /// or when the user explicitly entered the editor).
 pub fn paint(app: &mut App, ui: &mut egui::Ui) {
-    ui.set_min_width(400.0);
-    ui.set_height(f32::INFINITY);
-
+    // Sizing is handled by the enclosing `CentralPanel` in `ui/mod.rs`; the
+    // content below just paints into the full remaining rect.
     // Header bar: save-state indicator + Save / Create buttons.
     let save_status = app.state().save_status;
     ui.horizontal(|ui| {

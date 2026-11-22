@@ -24,7 +24,7 @@ pub fn top_bar(ui: &mut egui::Ui, app: &mut App) {
     ui.set_min_height(40.0);
     ui.horizontal(|ui| {
         // Left: menu + app name + active-collection scope chip.
-        if ui.button("☰").clicked() {
+        if ui.button("menu").clicked() {
             // G1 wires the menu to `Add root` (the one action available
             // without a page open). G5/G6 adds the full App menu.
             let _ = crate::ui::welcome::picker_add_root(app);
@@ -60,16 +60,38 @@ pub fn top_bar(ui: &mut egui::Ui, app: &mut App) {
         // `no page open` so the chrome has a stable structure.
         ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
             ui.add_space(8.0);
-            let selected = app
-                .state()
-                .selected_page
-                .as_ref()
-                .and_then(|abs| app.state().pages.iter().find(|p| &p.abs_path == abs));
-            match selected {
-                Some(row) => {
-                    let title = row.title.clone().unwrap_or_else(|| row.abs_path.clone());
-                    ui.strong(title);
-                    ui.weak(format!(" — {}", row.rel_path));
+            match app.state().selected_page.as_ref() {
+                Some(abs) => {
+                    // The page is open (body loaded via worker) — even if it
+                    // is not in the corpus index (e.g. an un-indexed markdown
+                    // file opened from a generic path).
+                    if let Some(slot) = app.state().open_page.as_ref() {
+                        let title = slot
+                            .body
+                            .as_ref()
+                            .and_then(|b| kb_core::frontmatter::parse(b).title)
+                            .unwrap_or_else(|| {
+                                let name = std::path::Path::new(abs)
+                                    .file_stem()
+                                    .map(|s| s.to_string_lossy().to_string())
+                                    .unwrap_or_else(|| abs.clone());
+                                name
+                            });
+                        ui.strong(title);
+                        let rel = std::path::Path::new(abs)
+                            .file_name()
+                            .map(|s| s.to_string_lossy().to_string())
+                            .unwrap_or_else(|| abs.clone());
+                        ui.weak(format!(" — {rel}"));
+                    } else {
+                        // Selected but body not yet loaded (loading state).
+                        let name = std::path::Path::new(abs)
+                            .file_stem()
+                            .map(|s| s.to_string_lossy().to_string())
+                            .unwrap_or_else(|| abs.clone());
+                        ui.strong(name);
+                        ui.weak(" (loading…)");
+                    }
                 }
                 None => {
                     ui.weak("no page open");
@@ -85,9 +107,9 @@ pub fn top_bar(ui: &mut egui::Ui, app: &mut App) {
                 let pending =
                     app.state().inspector.open && app.inspector_pending_summary().is_some();
                 let label = if pending {
-                    "⚙ properties ●"
+                    "properties ●"
                 } else {
-                    "⚙ properties"
+                    "properties"
                 };
                 if ui.button(label).clicked() {
                     app.toggle_inspector();
@@ -108,7 +130,7 @@ pub fn top_bar(ui: &mut egui::Ui, app: &mut App) {
                 app.state_mut().view_mode = ViewMode::Raw;
             }
             ui.separator();
-            if ui.button("🔎 search").clicked() {
+            if ui.button("search").clicked() {
                 crate::app::open_search(app, None);
             }
         });

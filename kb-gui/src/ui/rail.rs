@@ -33,7 +33,6 @@ fn is_selected(current: &CollectionKey, candidate: &CollectionKey) -> bool {
 
 /// Paint the rail's contents (called from `ui/mod.rs`).
 pub fn paint(ui: &mut egui::Ui, app: &mut App) {
-    ui.set_max_width(220.0);
     ui.vertical(|ui| {
         ui.strong("Collections");
         ui.add_space(4.0);
@@ -77,22 +76,23 @@ pub fn paint(ui: &mut egui::Ui, app: &mut App) {
         for (gate, count) in &collections {
             let key = CollectionKey::Term(gate.clone());
             if ui
-                .selectable_label(is_selected(&current, &key), format!("◆ {gate} · {count}"))
+                .selectable_label(is_selected(&current, &key), format!("• {gate} · {count}"))
                 .clicked()
             {
                 select(app, key);
             }
         }
 
-        // Bottom-of-rail shortcuts (PLAN-GUI §6.3).
-        ui.add_space(8.0);
-        ui.with_layout(egui::Layout::bottom_up(egui::Align::Min), |ui| {
-            if ui.button("+ Add root").clicked() {
-                let _ = crate::ui::welcome::picker_add_root(app);
-            }
-            if ui.weak("Manage collections").clicked() {
-                let _ = app; // reserved for G5.
-            }
-        });
+        // Bottom-of-rail shortcuts (PLAN-GUI §6.3). A plain stack below the
+        // tiles (egui's `bottom_up` scope does not position correctly inside
+        // an infinite-height panel, and the tiles already claim all the
+        // height they need).
+        ui.separator();
+        if ui.button("+ Add root").clicked() {
+            let _ = crate::ui::welcome::picker_add_root(app);
+        }
+        if ui.weak("Manage collections").clicked() {
+            let _ = app; // reserved for G5.
+        }
     });
 }

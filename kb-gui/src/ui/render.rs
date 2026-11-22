@@ -36,6 +36,13 @@ pub fn paint_doc(ui: &mut egui::Ui, doc: &Doc) {
     }
 }
 
+/// Paint a single arena block (and recurse into containers). Exposed for the
+/// WYSIWYG pass (G4), which paints splicable blocks as editable widgets and
+/// falls back to this for the non-splicable ones (list / quote / table / …).
+pub fn paint_single(ui: &mut egui::Ui, doc: &Doc, idx: usize) {
+    paint_block(ui, doc, idx);
+}
+
 /// Paint a single arena block (and recurse into containers).
 fn paint_block(ui: &mut egui::Ui, doc: &Doc, idx: usize) {
     let Some(block) = doc.blocks.get(idx) else {
@@ -219,7 +226,7 @@ fn append_inlines(job: &mut LayoutJob, inlines: &[Inline], ink: &Ink, wr: Wrap) 
             Inline::Image { alt, .. } => {
                 let mut f = egui::TextFormat::simple(ink.base_font.clone(), ink.weak);
                 apply(&mut f, ink, wr);
-                job.append(&format!(" 🖼 {alt} "), 0.0, f);
+                job.append(&format!(" [img: {alt}] "), 0.0, f);
             }
             Inline::Strong(inner) => append_inlines(job, inner, ink, with(wr, true, false, false)),
             Inline::Emphasis(inner) => {
