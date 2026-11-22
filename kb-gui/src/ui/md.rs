@@ -151,6 +151,175 @@ fn flatten_into(inlines: &[Inline], out: &mut String) {
 
 use pulldown_cmark::{Alignment, CodeBlockKind, Event, Options, Parser, Tag, TagEnd};
 
+impl Block {
+    /// Resolve this block's byte range in `body` (a frontmatter-less body) —
+    /// the WYSIWYG span-splice target (PLAN-GUI §8.2 / §8.6). The block is
+    /// anchored to its own source line(s) by its verbatim content, which is
+    /// unambiguous for the splicible kinds (Heading / Paragraph / Code).
+    ///
+    /// Returns `None` if the anchor is not found (a degenerate document); the
+    /// caller falls back to the read-only rendering for that block.
+    pub fn range(&self, body: &str) -> Option<std::ops::Range<usize>> {
+        let lines = lines_of(body);
+        match self {
+            Block::Heading { level, inlines } => {
+                let text = ws_strip(&flat_text(inlines));
+                let hashes = "#".repeat(*level as usize);
+                let idx = lines.iter().position(|(_, line)| {
+                    let rest = line.get(hashes.len()..).unwrap_or("");
+                    rest.starts_with([' ', '\t']) && ws_strip(&plain_in(&rest[1..])) == text
+                })?;
+                Some(lines[idx].0..end_of(&lines, idx))
+            }
+            Block::Paragraph { inlines } => {
+                let text = ws_strip(&flat_text(inlines));
+                for i in 0..lines.len() {
+                    if lines[i].1.trim().is_empty() {
+                        continue;
+                    }
+                    let j_max = run_end_index(&lines, i);
+                    for j in i..=j_max {
+                        let run = lines[i..=j]
+                            .iter()
+                            .map(|(_, l)| *l)
+                            .collect::<Vec<_>>()
+                            .join("\n");
+                        if ws_strip(&plain_in(&run)) == text {
+                            return Some(lines[i].0..end_of(&lines, j));
+                        }
+                    }
+                }
+                None
+            }
+            Block::Code { text, lang } => {
+                let idx = find_code_start(&lines, text, lang.as_deref())?;
+                let end = if lang.is_some() {
+                    let close = lines
+                        .iter()
+                        .enumerate()
+                        .skip(idx + 1)
+                        .find(|(_, (_, l))| {
+                            let t = l.trim_start();
+                            t.starts_with("```") || t.starts_with("~~~")
+                        })
+                        .map(|p| p.0)
+                        .unwrap_or(lines.len() - 1);
+                    end_of(&lines, close)
+                } else {
+                    let indent = text
+                        .lines()
+                        .next()
+                        .map(|l| l.chars().take_while(|c| *c == ' ').count())
+                        .unwrap_or(0);
+                    let pad = " ".repeat(indent);
+                    let mut j = idx;
+                    while j + 1 < lines.len() {
+                        let l = lines[j + 1].1;
+                        if l.starts_with(&pad) && !l.trim().is_empty() {
+                            j += 1;
+                        } else {
+                            break;
+                        }
+                    }
+                    end_of(&lines, j)
+                };
+                Some(lines[idx].0..end)
+            }
+            _ => None,
+        }
+    }
+}
+
+/// Each line of `body` as `(byte_offset_of_line_start, &str)`, where the
+/// offset is *exclusive* of the terminating `\n` (i.e. the start of the
+/// content). This is the unit the span resolver works in.
+fn lines_of(body: &str) -> Vec<(usize, &str)> {
+    let mut out = Vec::new();
+    let mut off = 0usize;
+    for line in body.lines() {
+        out.push((off, line));
+        off += line.len() + 1;
+    }
+    out
+}
+
+/// End offset (exclusive) of the line at index `i` into `lines`: past its
+/// terminating `\n` if present, else the start of *next* line. Total.
+fn end_of(lines: &[(usize, &str)], i: usize) -> usize {
+    let (start, line) = lines[i];
+    if i + 1 < lines.len() {
+        lines[i + 1].0
+    } else {
+        start + line.len()
+    }
+}
+
+/// Index of the last consecutive non-blank line starting at `i` (the run
+/// boundary for a paragraph). If `i` is blank, returns `i`.
+fn run_end_index(lines: &[(usize, &str)], i: usize) -> usize {
+    let mut j = i;
+    while j + 1 < lines.len() && !lines[j + 1].1.trim().is_empty() {
+        j += 1;
+    }
+    j
+}
+
+/// Line-index of the first line of a `Code` block by content anchor: the
+/// opening fence carrying the language tag (fenced), or the first source line
+/// whose trimmed content equals the block's first line (indented).
+fn find_code_start(lines: &[(usize, &str)], text: &str, lang: Option<&str>) -> Option<usize> {
+    let first = ws_strip(text.lines().next().unwrap_or(""));
+    if lang.is_some() {
+        let want = lang.unwrap_or("");
+        lines.iter().position(|(_, l)| {
+            let t = l.trim_start();
+            t.starts_with("```") && t["```".len()..].trim() == want
+        })
+    } else {
+        lines
+            .iter()
+            .position(|(_, l)| ws_strip(l.trim_end()) == first)
+    }
+}
+
+/// Flatten pulldown events in `text` to plain content (markers removed) —
+/// so IR plain text (which already drops markers) matches an anchor line that
+/// *carries* the markers (inline code, emphasis, links). Collects `Text` and
+/// `Code` leaves inline; emits a space for `HardBreak` / `SoftBreak` so
+/// adjacent inline fragments on the source side line up with the IR side.
+fn plain_in(text: &str) -> String {
+    let mut out = String::new();
+    for ev in Parser::new_ext(
+        text,
+        Options::ENABLE_TABLES | Options::ENABLE_STRIKETHROUGH | Options::ENABLE_TASKLISTS,
+    ) {
+        match ev {
+            Event::Text(t) => out.push_str(&t),
+            Event::Code(c) => out.push_str(&c),
+            Event::HardBreak | Event::SoftBreak => out.push(' '),
+            _ => {}
+        }
+    }
+    out
+}
+
+/// Collapse internal whitespace runs to a single space and trim — used to
+/// normalize IR plain text against a source anchor (which may carry differing
+/// indentation, hard-break spacing, or trailing punctuation noise).
+fn ws_strip(s: &str) -> String {
+    let mut out = String::new();
+    for c in s.chars() {
+        if c.is_whitespace() {
+            if !out.ends_with(' ') {
+                out.push(' ');
+            }
+        } else {
+            out.push(c);
+        }
+    }
+    out.trim().to_string()
+}
+
 /// Parse a Markdown string into a `Doc` (the G3 renderer's input).
 ///
 /// Enables GFM extras (tables, strikethrough, task lists). CommonMark is
@@ -650,5 +819,143 @@ mod tests {
             Inline::Text(" c".into()),
         ];
         assert_eq!(flat_text(&v), "a b c");
+    }
+
+    // ======================================================================
+    // Span resolution tests (G4 §8.2)
+    // ======================================================================
+
+    /// Convention: when a non-last line is the end of a block, the span
+    /// **consumes** its trailing `\n` (so a single-line replacement keeps the
+    /// following blank-line / section separator in place).
+    #[test]
+    fn span_h1_resolves_its_own_line() {
+        let body = "# Top heading\n\ntext below";
+        let d = parse(body);
+        let h1 = &d.blocks[d.root[0]];
+        let r = h1.range(body).expect("h1 span");
+        assert_eq!(&body[r.clone()], "# Top heading\n");
+    }
+
+    #[test]
+    fn span_h3_among_many() {
+        let body = "# A\npara one\n\n### C\n\n# D";
+        let d = parse(body);
+        let h3 = &d.blocks[d.root[2]];
+        let r = h3.range(body).expect("h3 span");
+        assert_eq!(&body[r.clone()], "### C\n");
+    }
+
+    #[test]
+    fn span_paragraph_single_line() {
+        let body = "# H\njust a line\n\n## H2";
+        let d = parse(body);
+        let para = &d.blocks[d.root[1]];
+        let r = para.range(body).expect("para span");
+        assert_eq!(&body[r.clone()], "just a line\n");
+    }
+
+    #[test]
+    fn span_paragraph_hard_break() {
+        let body = "# H\nline one  \nline two\n\n# next";
+        let d = parse(body);
+        let para = &d.blocks[d.root[1]];
+        let r = para.range(body).expect("para span");
+        assert_eq!(&body[r.clone()], "line one  \nline two\n");
+    }
+
+    #[test]
+    fn span_para_does_not_gobble_headings() {
+        let body = "first\n# H\nsecond";
+        let d = parse(body);
+        let first = &d.blocks[d.root[0]];
+        let r = first.range(body).expect("span");
+        assert_eq!(&body[r.clone()], "first\n");
+        // H itself gets its own line
+        let h = &d.blocks[d.root[1]];
+        let r2 = h.range(body).expect("span");
+        assert_eq!(&body[r2.clone()], "# H\n");
+    }
+
+    #[test]
+    fn span_para_ignoring_trivially_identical_headings() {
+        // A H1 "Para" and a Paragraph "Para": they cannot be distinguished by
+        // content alone. The H1 should resolve to the # line, the Paragraph to
+        // its own line. If a user's paragraph is literally "# Para" with a
+        // leading space, it still resolves to the plain line (the `starts_with`
+        // + space check rejects the # line for the paragraph because the #
+        // line's "rest" begins with the second #, not a space).
+        let body = "# Para\n# Para\n\nPlain Para body";
+        let d = parse(body);
+        let h1_first = &d.blocks[d.root[0]];
+        let r1 = h1_first.range(body).expect("h1 span");
+        assert_eq!(&body[r1.clone()], "# Para\n");
+        let h1_second = &d.blocks[d.root[1]];
+        let r2 = h1_second.range(body).expect("h1b span");
+        assert_eq!(&body[r2.clone()], "# Para\n");
+        // The third block is a paragraph whose content is "Plain Para body".
+        let para = &d.blocks[d.root[2]];
+        let r3 = para.range(body).expect("para span");
+        assert_eq!(&body[r3.clone()], "Plain Para body");
+    }
+
+    #[test]
+    fn span_fenced_code_block_resolves_full_fence_plus_body() {
+        let body = "# H\n```rust\nfn main() {\n    let x = 1;\n}\n```\n# H2";
+        let d = parse(body);
+        let code = &d.blocks[d.root[1]];
+        let r = code.range(body).expect("code span");
+        assert_eq!(
+            &body[r.clone()],
+            "```rust\nfn main() {\n    let x = 1;\n}\n```\n"
+        );
+    }
+
+    #[test]
+    fn span_fenced_code_block_ending_at_eof() {
+        let body = "```rust\nlet x = 1;\n```";
+        let d = parse(body);
+        let code = &d.blocks[d.root[0]];
+        let r = code.range(body).expect("code span");
+        assert_eq!(&body[r.clone()], "```rust\nlet x = 1;\n```");
+    }
+
+    #[test]
+    fn span_indented_code_block() {
+        let body = "para\n\n    indented line one\n    indented line two\n\nnext";
+        let d = parse(body);
+        let code = &d.blocks[d.root[1]];
+        let r = code.range(body).expect("code span");
+        assert_eq!(
+            &body[r.clone()],
+            "    indented line one\n    indented line two\n"
+        );
+    }
+
+    #[test]
+    fn span_non_splicible_blocks_return_none() {
+        let body = "para\n\n---\n\n> quote\n\n- item\n\n<table>\n  </table>";
+        let d = parse(body);
+        for &idx in &d.root {
+            match &d.blocks[idx] {
+                Block::Heading { .. } | Block::Paragraph { .. } | Block::Code { .. } => {}
+                // Rule, Quote, List, Table, Html all return None.
+                other => {
+                    assert!(
+                        other.range(body).is_none(),
+                        "{other:?} unexpectedly resolved a span"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn span_paragraph_with_inline_code() {
+        let body = "use `kb_core::frontmatter`;";
+        let d = parse(body);
+        let para = &d.blocks[d.root[0]];
+        let r = para.range(body).expect("span");
+        assert_eq!(&body[r.clone()], "use `kb_core::frontmatter`;");
     }
 }

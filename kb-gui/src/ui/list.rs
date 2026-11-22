@@ -69,33 +69,31 @@ fn matches_filter(p: &PageRow, app: &App) -> bool {
 /// grouping + filter. Returns on a non-`Ready` phase with the loading
 /// placeholder.
 pub fn paint(ui: &mut egui::Ui, app: &mut App) {
-    // Fixed-width browse column: the preview/editor pane (the main reading
-    // area) takes the remaining width. Capping the max stops this full-width
-    // row from starving the preview (PLAN-GUI §6.5 layout).
-    ui.set_min_width(300.0);
-    ui.set_max_width(380.0);
-    // The rail and list together claim all the width left after the rail;
-    // the list's own `ScrollArea` then scrolls its rows vertically.
+    // The list panel claims its own width from the window (the
+    // `ui/mod.rs` `SidePanel::left("kb.list")` does the sizing); the
+    // content below is a plain vertical stack + a `ScrollArea` over the
+    // rows.
     ui.vertical(|ui| {
-        // Header row (§6.4): + new / filter / group-by / sort. `+ new note`
-        // and the sort menu are reserved for G2/G5 — the layout is stable
-        // now so later milestones only fill the slots.
-        ui.horizontal(|ui| {
-            let resp = ui.button("+ new");
-            if resp.clicked() {
+        // Header (§6.4): + new / filter / group-by / sort. `+ new note` and
+        // the sort menu are reserved for G2/G5 — the layout is stable now so
+        // later milestones only fill the slots. `horizontal_wrapped` keeps
+        // every control visible (the old fixed single-row layout clipped
+        // the sort label and collided with the filter field).
+        ui.horizontal_wrapped(|ui| {
+            if ui.button("+ new").clicked() {
                 let _ = app; // New-note dialog lands in G2.
             }
             ui.separator();
             // Inline filter (the "filter…" slot, now functional).
             let mut filter = app.state().list_filter.clone();
-            let resp = ui.add_sized(
-                egui::vec2(160.0, 24.0),
+            let resp = ui.add(
                 egui::TextEdit::singleline(&mut filter).hint_text("filter…"),
             );
             if resp.changed() {
                 app.state_mut().list_filter = filter;
             }
-            ui.separator();
+        });
+        ui.horizontal_wrapped(|ui| {
             // Group-by selector. `None · Collection · Visibility`. The
             // selection is `CollectionKey`-independent: it is the
             // *arrangement* of the rows (PLAN-GUI §6.4), not the
@@ -138,7 +136,7 @@ pub fn paint(ui: &mut egui::Ui, app: &mut App) {
                 crate::state::Phase::Loading => "loading corpus…",
                 crate::state::Phase::Ready => {
                     if app.state().pages.is_empty() {
-                        "no pages (no roots registered? use ☰ → Add root)"
+                        "no pages (no roots registered? use menu → Add root)"
                     } else if app.state().list_filter.trim().is_empty() {
                         "no pages in this collection"
                     } else {
@@ -228,11 +226,12 @@ fn paint_row(ui: &mut egui::Ui, app: &mut App, page: &PageRow) {
         app.open_page(&page.abs_path);
     }
 
-    // The muted meta line: gated marker + type + rel_path + updated_at
-    // + collection chips.
-    ui.horizontal(|ui| {
+    // The muted meta line (a `horizontal_wrapped` keeps the row readable
+    // even in a narrow column): gated marker + type + updated_at + gate
+    // chips + rel_path, wrapping to a second line as needed.
+    ui.horizontal_wrapped(|ui| {
         if page.gated() {
-            ui.colored_label(egui::Color32::from_rgb(120, 170, 220), "◆");
+            ui.colored_label(egui::Color32::from_rgb(120, 170, 220), "•");
         }
         ui.weak(&page.type_);
         ui.weak(" · ");

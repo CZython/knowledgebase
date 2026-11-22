@@ -145,6 +145,9 @@ impl App {
             ViewMode::Formatted => self.state.view_mode = ViewMode::Raw,
             ViewMode::Raw => self.state.view_mode = ViewMode::Formatted,
         }
+        // Switching modes invalidates the WYSIWYG edit focus (a Raw view
+        // has no splicable blocks to track).
+        self.state.wysiwyg_editing = None;
     }
 
     /// `true` when the page at `abs_path` has a corpus row (PLAN-GUI §162–182
@@ -171,6 +174,8 @@ impl App {
                 kind: DocumentKind::GenericMarkdown,
                 banner_dismissed: false,
             });
+            // A new page → all WYSIWYG edit-state is stale.
+            self.state.wysiwyg_editing = None;
         }
         if let Some(worker) = &self.worker {
             worker.send(data::Cmd::OpenPage(abs_path.to_string()));
@@ -183,6 +188,7 @@ impl App {
     pub fn close_page(&mut self) {
         self.state.selected_page = None;
         self.state.open_page = None;
+        self.state.wysiwyg_editing = None;
     }
 
     /// Dismiss the open document's conversion/add-root banner for the

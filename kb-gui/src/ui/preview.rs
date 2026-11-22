@@ -13,7 +13,6 @@ use std::path::Path;
 
 use eframe::egui;
 
-use super::{md, render};
 use crate::app::App;
 use crate::state::{DocumentKind, OpenPageState, ViewMode};
 
@@ -24,26 +23,21 @@ use crate::state::{DocumentKind, OpenPageState, ViewMode};
 /// the `App` (`dismiss_banner` / `add_root_for_open_page` /
 /// `open_conversion`), mirroring the way `editor::paint` takes `app`.
 pub fn paint(app: &mut App, ui: &mut egui::Ui) {
-    ui.set_min_width(400.0);
-    // The §6.15 banner (if this document is not a full `kb` page) is a
-    // non-blocking strip *above* the document — painted in the pane's outer
-    // (horizontal) context, then the scrollable body below it.
-    if let Some(slot) = app.state().open_page.as_ref() {
-        if slot.body.is_some() && !slot.banner_dismissed && !slot.kind.is_kb_page() {
-            paint_banner(app, ui, slot.kind);
-        }
-    }
+    // The central panel gives us a vertical `ui` (the egui CentralPanel is
+    // already a vertical container); we just paint our content directly.
+    // Scrollable body.
     let page = app.state().open_page.clone();
     let view_mode = app.state().view_mode;
-    // The pane lives inside a `horizontal_top` row (ui/mod.rs), so the
-    // surrounding `ui` is horizontal. The formatted renderer relies on a
-    // *vertical* layout (`ui.indent` for block quotes / nested lists panics
-    // otherwise), so wrap the scrollable content in an explicit vertical
-    // scope.
+    // The §6.15 banner (if this document is not a full `kb` page) is a
+    // non-blocking strip *above* the document.
+    if let Some(slot) = &page {
+        if slot.body.is_some() && !slot.banner_dismissed && !slot.kind.is_kb_page() {
+            paint_banner(app, ui, slot.kind);
+            ui.separator();
+        }
+    }
     egui::ScrollArea::vertical().show(ui, |ui| {
-        ui.vertical(|ui| {
-            paint_page(ui, &page, view_mode);
-        });
+        paint_page(app, ui, &page, view_mode);
     });
 }
 
@@ -56,15 +50,18 @@ fn paint_banner(app: &mut App, ui: &mut egui::Ui, kind: DocumentKind) {
     ui.horizontal_wrapped(|ui| {
         let (heading, color) = match kind {
             DocumentKind::GenericMarkdown => (
-                "⚠ This is generic Markdown (no valid `type:` frontmatter).",
+                "This is generic Markdown (no valid `type:` frontmatter).",
                 egui::Color32::from_rgb(200, 160, 60),
             ),
             DocumentKind::UnindexedMarkdown => (
-                "⚠ Valid `type:`, but this file is not indexed (outside every root).",
+                "Valid `type:`, but this file is not indexed (outside every root).",
                 egui::Color32::from_rgb(120, 160, 220),
             ),
             DocumentKind::KbPage => return, // no banner for a full kb page
         };
+        // A warning marker (text, not an emoji glyph — the default font set
+        // does not carry the `⚠` codepoint).
+        ui.colored_label(egui::Color32::from_rgb(200, 160, 60), "!");
         ui.colored_label(color, heading);
         ui.separator();
         match kind {
@@ -141,13 +138,13 @@ fn extract_h1(body: &str) -> String {
     String::new()
 }
 
-fn paint_page(ui: &mut egui::Ui, page: &Option<OpenPageState>, view_mode: ViewMode) {
+fn paint_page(app: &mut App, ui: &mut egui::Ui, page: &Option<OpenPageState>, view_mode: ViewMode) {
     let Some(page) = page else {
         ui.weak("no page open — pick a row in the note list");
         return;
     };
     if let Some(err) = &page.error {
-        ui.colored_label(egui::Color32::LIGHT_RED, format!("⚠ {err}"));
+        ui.colored_label(egui::Color32::LIGHT_RED, format!("! {err}"));
         return;
     }
     let Some(body) = &page.body else {
@@ -156,25 +153,13 @@ fn paint_page(ui: &mut egui::Ui, page: &Option<OpenPageState>, view_mode: ViewMo
     };
 
     match view_mode {
-        ViewMode::Formatted => render_formatted(ui, body),
+        // G4 WYSIWYG (PLAN-GUI §8): the Formatted view is now an editable *view
+        // over the source* — splicable blocks render as text fields that splice
+        // back into the Markdown; non-splicable blocks fall back to the read-only
+        // renderer.
+        ViewMode::Formatted => super::block_edit::paint(ui, app, page),
         ViewMode::Raw => {
             ui.add(egui::Label::new(body.to_string()).wrap());
         }
     }
-}
-
-/// `Formatted` mode: strip the frontmatter and paint the Markdown body as
-/// rich text. An empty body renders a muted placeholder.
-fn render_formatted(ui: &mut egui::Ui, body: &str) {
-    if body.trim().is_empty() {
-        ui.weak("(empty page)");
-        return;
-    }
-    let text = &kb_core::frontmatter::parse(body).body;
-    if text.trim().is_empty() {
-        ui.weak("(no body — frontmatter only)");
-        return;
-    }
-    let doc = md::parse(text);
-    render::paint_doc(ui, &doc);
 }

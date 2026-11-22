@@ -25,6 +25,7 @@ Spec: `PLAN-GUI.md`. Crate: new `kb-gui` in the workspace.
   - [x] Generic Markdown + conversion rules (§6.15) — e2e: pure-body file → indexed note
 - [ ] G4 — WYSIWYG block editing MVP
   - [ ] Block-span model, structural edits, inline formatting, round-trip guarantees (§8)
+  - [~] Fix layout of kb-gui Formatted view (TextEdit collapses to 1-char width inside ScrollArea in horizontal_top)
 - [ ] G5 — Settings and corpus management parity
   - [ ] Roots add/drop, refresh, tag aliases visible in UI (§6.12)
 - [ ] G6 — Polish: theming/custom themes (§11), keyboard shortcuts (§6.11), dialogs (§6.10)
