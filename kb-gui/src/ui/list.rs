@@ -86,9 +86,7 @@ pub fn paint(ui: &mut egui::Ui, app: &mut App) {
             ui.separator();
             // Inline filter (the "filter…" slot, now functional).
             let mut filter = app.state().list_filter.clone();
-            let resp = ui.add(
-                egui::TextEdit::singleline(&mut filter).hint_text("filter…"),
-            );
+            let resp = ui.add(egui::TextEdit::singleline(&mut filter).hint_text("filter…"));
             if resp.changed() {
                 app.state_mut().list_filter = filter;
             }

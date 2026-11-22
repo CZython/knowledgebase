@@ -26,11 +26,10 @@ Spec: `PLAN-GUI.md`. Crate: new `kb-gui` in the workspace.
 - [ ] G4 — WYSIWYG block editing MVP
   - [x] Block-span model + splice + round-trip guarantees (§8) — `ui/splice.rs`, 17 tests
   - [x] Read-wysiwyg / edit-plain toggle — `ui/block_edit.rs` (click block → TextEdit, Esc exits)
-  - [x] Shell rebuilt on egui `Panel` (left/right/top/bottom) + `CentralPanel` (`ui/mod.rs`)
-  - [~] **PENDING** banner wraps one-word-per-line — `preview::paint_banner` uses `horizontal_wrapped`;
-        switch to a vertical layout (heading on its own line, actions on a second line)
-  - [~] **PENDING** rail + list both open = too much width — consolidate into a single tabbed
-        `SidePanel` (collections | notes tabs), only the active tab visible; switch on click
+   - [x] Shell rebuilt on egui `Panel` (left/right/top/bottom) + `CentralPanel` (`ui/mod.rs`)
+   - [x] Banner as a vertical multi-line layout (heading / description / buttons) — `preview::paint_banner`
+   - [x] Single tabbed left panel (`Collections | Notes`, only active tab visible) — `LeftPaneKind` in
+         `state.rs`, consolidated `Panel::left("kb.left")` + `left_pane` tab bar in `ui/mod.rs`
 - [ ] G5 — Settings and corpus management parity
   - [ ] Roots add/drop, refresh, tag aliases visible in UI (§6.12)
 - [ ] G6 — Polish: theming/custom themes (§11), keyboard shortcuts (§6.11), dialogs (§6.10)

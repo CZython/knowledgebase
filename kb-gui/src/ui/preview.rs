@@ -46,36 +46,47 @@ pub fn paint(app: &mut App, ui: &mut egui::Ui) {
 ///   a valid page?" with **Convert** + **Dismiss**.
 /// * `UnindexedMarkdown` → "Not indexed — add the containing folder as a
 ///   root …?" with **Add root** + **Dismiss** (+ Convert as a secondary).
+///
+/// Laid out vertically: a heading line, an action-description line (full
+/// width, wraps naturally), then the action buttons on a third line. The old
+/// `horizontal_wrapped` single-row layout wrapped the label one word per line
+/// in a narrow central panel.
 fn paint_banner(app: &mut App, ui: &mut egui::Ui, kind: DocumentKind) {
-    ui.horizontal_wrapped(|ui| {
-        let (heading, color) = match kind {
-            DocumentKind::GenericMarkdown => (
-                "This is generic Markdown (no valid `type:` frontmatter).",
-                egui::Color32::from_rgb(200, 160, 60),
-            ),
-            DocumentKind::UnindexedMarkdown => (
-                "Valid `type:`, but this file is not indexed (outside every root).",
-                egui::Color32::from_rgb(120, 160, 220),
-            ),
-            DocumentKind::KbPage => return, // no banner for a full kb page
-        };
+    let (heading, color, action, action_desc) = match kind {
+        DocumentKind::GenericMarkdown => (
+            "This is generic Markdown (no valid `type:` frontmatter).",
+            egui::Color32::from_rgb(200, 160, 60),
+            BannerAction::Convert,
+            "Convert it into a valid page to enable search, links, and collections.",
+        ),
+        DocumentKind::UnindexedMarkdown => (
+            "Valid `type:`, but this file is not indexed (outside every root).",
+            egui::Color32::from_rgb(120, 160, 220),
+            BannerAction::AddRoot,
+            "Add the containing folder as a root to enable search, links, and collections.",
+        ),
+        DocumentKind::KbPage => return, // no banner for a full kb page
+    };
+
+    // Line 1: the warning marker + heading (full width, wraps naturally).
+    ui.horizontal(|ui| {
         // A warning marker (text, not an emoji glyph — the default font set
         // does not carry the `⚠` codepoint).
         ui.colored_label(egui::Color32::from_rgb(200, 160, 60), "!");
         ui.colored_label(color, heading);
-        ui.separator();
-        match kind {
-            DocumentKind::GenericMarkdown => {
-                ui.label("Convert it into a valid page to enable search, links, and collections:");
+    });
+    // Line 2: the action description (full width, wraps naturally).
+    ui.label(action_desc);
+    // Line 3: the action buttons (a small row that stays on one line).
+    ui.horizontal(|ui| {
+        match action {
+            BannerAction::Convert => {
                 if ui.button("Convert").clicked() {
                     seed_conversion(app);
                     app.open_conversion();
                 }
             }
-            _ => {
-                ui.label(
-                    "Add the containing folder as a root to enable search, links, and collections:",
-                );
+            BannerAction::AddRoot => {
                 if ui.button("Add root").clicked() {
                     app.add_root_for_open_page();
                 }
@@ -86,6 +97,15 @@ fn paint_banner(app: &mut App, ui: &mut egui::Ui, kind: DocumentKind) {
         }
     });
     ui.separator();
+}
+
+/// The single primary action a §6.15 banner offers.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum BannerAction {
+    /// `Convert` dispatches the generic-markdown → page flow.
+    Convert,
+    /// `Add root` registers the open file's folder as a corpus root.
+    AddRoot,
 }
 
 /// Seed the conversion dialog's fields from the open document (PLAN-GUI
