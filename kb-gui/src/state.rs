@@ -219,6 +219,12 @@ pub struct SearchView {
     pub open: bool,
     /// Keyboard-cursor row inside `rows` (for `↑`/`↓` + `Enter`).
     pub cursor: usize,
+    /// One-shot: on the next overlay paint, give the input widget focus.
+    /// Set when the overlay opens; consumed (cleared) on first paint. Doing
+    /// *only* this (not re-requesting focus every frame) is what lets
+    /// `lost_focus` fire on the Enter-press frame — re-requesting focus after
+    /// the TextEdit's own `surrender_focus` re-asserts it and masks the loss.
+    pub focus_next: bool,
 }
 
 /// One search result (PLAN-GUI §6.8 — same columns as `kb search --json`).
