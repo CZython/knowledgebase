@@ -232,6 +232,132 @@ impl App {
         }
     }
 
+    /// Open (or re-open) the Settings modal (PLAN-GUI §6.12). `tab` is the
+    /// tab to land on (`Roots` when `None` — corpus administration is the
+    /// primary reason a user opens Settings). Re-fetch the admin tables on
+    /// every open (the §6.12 rule "any admin action … reflected without
+    /// restart" applies to *what's already shown*, which means the table is
+    /// as fresh as the DB, not as fresh as a previous `Open` call).
+    pub fn open_settings(&mut self, tab: Option<crate::state::SettingsTab>) {
+        self.state.settings_open = true;
+        if let Some(t) = tab {
+            self.state.settings_tab = t;
+        }
+        // Re-fetch: a previous open's table is *not* a guarantee of today's
+        // (a `kb add <dir>` / `kb drop-root <dir>` on the CLI side could
+        // have happened since the last time this modal was open).
+        self.refresh_settings_tables();
+    }
+
+    /// Close the Settings modal (Escape, `×`, `Cmd/Ctrl+.` on the window).
+    pub fn close_settings(&mut self) {
+        self.state.settings_open = false;
+        // A stale "I confirmed the full rebuild" must not carry over to a
+        // later open (the §6.12 rule "destructive actions show a dry-run
+        // summary first" only holds when every open starts *unconfirmed*
+        // — otherwise a one-off checkbox tick enables an unintended wipe).
+        self.state.settings_confirm_rebuild = false;
+    }
+
+    /// Switch the active tab in the Settings modal. The tab strip reads
+    /// `self.state.settings_tab` to style the active one.
+    pub fn set_settings_tab(&mut self, tab: crate::state::SettingsTab) {
+        self.state.settings_tab = tab;
+    }
+
+    /// Re-fetch the Roots / Aliases / Data tables (the §6.12 modal's
+    /// admin views). Called on `open_settings` and on any mutation
+    /// event that invalidates them (`RebuildDone`, `RootDropped`, …).
+    /// Cheap: three `COUNT(*)` + two small `SELECT…ORDER BY` per
+    /// round-trip; the worker does it off the UI thread.
+    pub(crate) fn refresh_settings_tables(&mut self) {
+        if let Some(worker) = &self.worker {
+            worker.send(data::Cmd::ListRoots);
+            worker.send(data::Cmd::ListAliases);
+            worker.send(data::Cmd::Stats);
+        }
+    }
+
+    /// The §6.12 Roots tab: register the picked folder as a root +
+    /// re-index + reload the corpus (the *same* flow as the `Add root`
+    /// button on the Welcome screen — this is the one the *tab* uses).
+    pub fn add_root_settings(&mut self) {
+        let Some(worker) = self.worker() else {
+            return;
+        };
+        let folder = rfd::FileDialog::new()
+            .set_title("Choose a folder to add as a root")
+            .pick_folder();
+        if let Some(path) = folder {
+            worker.send(data::Cmd::AddRoot(path));
+            // The AddRoot dispatch reloads the corpus (the worker does
+            // that), but *our* tabs need the table re-fetch too — the
+            // new row is in `roots` and the per-root page count is
+            // what we want to show immediately.
+            self.refresh_settings_tables();
+        }
+    }
+
+    /// The §6.12 Roots tab: unregister the picked row (the §6.12
+    /// "confirm; files untouched" rule). `abs` is the *root's* path,
+    /// as listed in the Roots table (a `RootInfo.path`).
+    pub fn drop_root_settings(&mut self, abs: &str) {
+        if let Some(worker) = self.worker() {
+            worker.send(data::Cmd::DropRoot(std::path::PathBuf::from(abs)));
+            // The DropRoot dispatch reloads the corpus (the worker does
+            // that) *and* runs the GC sweep the §6.12 rule calls out
+            // ("the DB rows disappear on the next refresh"). Re-fetch
+            // the tabs on the `RootDropped` event.
+            self.refresh_settings_tables();
+        }
+    }
+
+    /// The §6.12 Data tab: an incremental `refresh` (the `kb refresh`
+    /// command). The worker runs `kb_db::refresh::refresh` + reloads
+    /// the corpus + emits `RebuildDone`.
+    pub fn run_refresh(&mut self) {
+        if let Some(worker) = self.worker() {
+            worker.send(data::Cmd::Refresh);
+        }
+    }
+
+    /// The §6.12 Data tab: the *full* rebuild (`kb refresh --full`).
+    /// The §6.12 rule "destructive actions show a dry-run summary first"
+    /// is handled by the UI layer (a typed "rebuild" confirmation) — the
+    /// worker itself does not gate, because the dry-run summary is
+    /// *what this button does* (a wipe + re-walk from scratch, the full
+    /// `kb_db::refresh::full_rebuild`).
+    pub fn run_full_rebuild(&mut self) {
+        if let Some(worker) = self.worker() {
+            worker.send(data::Cmd::FullRebuild);
+        }
+    }
+
+    /// The §6.12 "Tag aliases" tab: add or upsert an `alias → canonical`
+    /// row. The §6.12 rule "alias ≠ canonical, canonical must exist or be
+    /// explicitly allowed" is enforced in the *worker's `AddAlias`
+    /// dispatch* (the "alias ≠ canonical" semantic check + the
+    /// non-empty check), so a UI typo is a `Warn`, not a no-op add.
+    pub fn add_alias(&mut self, alias: &str, canonical: &str) {
+        if let Some(worker) = self.worker() {
+            worker.send(data::Cmd::AddAlias {
+                alias: alias.to_string(),
+                canonical: canonical.to_string(),
+            });
+            // The `AliasChanged` event re-fetches the table (we trust
+            // the worker's post-commit view) — no extra fetch here.
+        }
+    }
+
+    /// The §6.12 "Tag aliases" tab: remove the picked `alias`.
+    pub fn remove_alias(&mut self, alias: &str) {
+        if let Some(worker) = self.worker() {
+            worker.send(data::Cmd::RemoveAlias {
+                alias: alias.to_string(),
+            });
+        }
+    }
+
     /// Apply the one-shot launch route (`kb-gui <file>` /
     /// `kb-gui <file>#Section`) against the now-loaded corpus: resolve the
     /// abs path, select the page, and switch to the editable raw view. The
@@ -767,6 +893,19 @@ fn handle_g1_shortcuts(app: &mut App, ui: &egui::Ui, ctx: &egui::Context) {
     {
         app.commit_inspector();
     }
+    // `Ctrl+,` / `Cmd+,` — open/cycle the Settings modal (PLAN-GUI §6.12:
+    // "an in-app modal/sheet with a left tab list … Cmd/Ctrl+,"). `Key::Comma`
+    // is egui's token for the `,` key. Toggles open/closed (the
+    // `open_settings` is the open path; `close_settings` is the
+    // close path); a re-open lands on `Roots` (corpus admin is the
+    // default tab), so no tab state to preserve across a toggle.
+    if ctrl_or_cmd && !mods.shift && ui.input(|i| i.key_pressed(egui::Key::Comma)) {
+        if app.state().settings_open {
+            app.close_settings();
+        } else {
+            app.open_settings(None);
+        }
+    }
 }
 
 impl App {
@@ -965,6 +1104,94 @@ impl App {
                     if let Some(worker) = &self.worker {
                         worker.send(data::Cmd::OpenPage(abs_path));
                     }
+                }
+            }
+            data::Evt::RebuildDone(summary) => {
+                // A refresh / full-rebuild finished (the §6.12 "long
+                // operations show progress" rule). Store the last result in
+                // the Settings → Data tab state (it is read there on each
+                // open), clear the stale last-warn, and *re-fetch* the
+                // roots / stats tables so the corpus is current (the
+                // `RebuildDone` event is only the *number* change; the
+                // root/alias tables must be re-read against the fresh DB).
+                self.last_warn = None;
+                self.state.settings_last_rebuild = Some(summary);
+                // The worker has already reloaded the corpus (every
+                // mutation path calls `load_corpus_evt`), so this is just
+                // the *refresh of the admin views* (the §6.12 rule that
+                // "any admin action … reflected without restart" applies to
+                // the Roots / Data tabs, not just the rail + list).
+                if self.state.settings_open {
+                    self.refresh_settings_tables();
+                }
+            }
+            data::Evt::Roots(rows) => {
+                self.state.settings_roots = Some(rows);
+            }
+            data::Evt::Aliases(rows) => {
+                // The alias table landed. *Invalidate* the add-row draft if
+                // it would have collided with a row that *just* appeared
+                // (a concurrent add in another pane should not be silently
+                // hidden by a stale draft here).
+                self.state.settings_aliases = Some(rows.clone());
+                let alias_d = self.state.settings_alias_new.0.clone();
+                if !alias_d.is_empty() && rows.iter().any(|r| r.alias == alias_d) {
+                    self.state.settings_alias_new = (String::new(), String::new());
+                }
+            }
+            data::Evt::Stats(snapshot) => {
+                self.state.settings_stats = Some(snapshot);
+            }
+            data::Evt::RootDropped { removed, summary } => {
+                // A root was unregistered (the §6.12 "removing a root is
+                // confirmed and explains that the DB rows disappear on the
+                // next refresh" rule). Reflect the last result + the
+                // dropped-row count the CLI reports; re-fetch the tables
+                // (the root is gone, the per-root page count is gone, and
+                // the corpus was GC'd by the worker's post-drop refresh).
+                self.last_warn = Some(format!(
+                    "dropped {removed} root(s); {} (the rows under the dropped
+                     root were GC'd by the post-drop refresh)",
+                    summary.note
+                ));
+                self.state.settings_last_rebuild = Some(summary);
+                if self.state.settings_open {
+                    self.refresh_settings_tables();
+                }
+            }
+            data::Evt::AliasChanged {
+                alias,
+                canonical,
+                added,
+            } => {
+                // An alias was added-upserted or removed (the §6.12
+                // "add row with tag autocomplete; delete; validation"
+                // loop). Update the local table *in place* without a
+                // round-trip `ListAliases` (the §6.12 rule that
+                // "any admin action … reflected without restart" applies
+                // to the alias table too). Clear the add-row draft
+                // if it just committed.
+                let current = self.state.settings_aliases.clone().unwrap_or_default();
+                let mut next = current;
+                if added {
+                    if let Some(c) = &canonical {
+                        if let Some(slot) = next.iter_mut().find(|r| r.alias == alias) {
+                            slot.canonical = c.clone();
+                        } else {
+                            next.push(data::AliasRow {
+                                alias: alias.clone(),
+                                canonical: c.clone(),
+                            });
+                        }
+                        next.sort_by(|a, b| a.alias.cmp(&b.alias));
+                    }
+                } else {
+                    next.retain(|r| r.alias != alias);
+                }
+                self.state.settings_aliases = Some(next);
+                // The draft *just committed* (it equals the alias we sent).
+                if self.state.settings_alias_new.0 == alias {
+                    self.state.settings_alias_new = (String::new(), String::new());
                 }
             }
             data::Evt::Warn(msg) => {

@@ -14,6 +14,7 @@
 //! starts here (PLAN-GUI §3.1: duplication is accepted for now, guarded by
 //! parity tests later).
 
+pub mod admin;
 pub mod corpus;
 pub mod search;
 
@@ -34,15 +35,41 @@ pub enum Cmd {
         launch: LaunchRoute,
         db: Option<PathBuf>,
     },
-    /// Re-walk the registered roots and re-index. Reserved (G5).
-    #[allow(dead_code)] // reserved for G5; constructed once the UI wires the action
+    /// Re-walk the registered roots and re-index. Wired in G5 (the
+    /// Settings → Data **Refresh** action).
     Refresh,
+    /// Wipe the index and re-walk every registered root from scratch
+    /// (`kb refresh --full` / `kb_db::refresh::full_rebuild`). Wired in G5
+    /// (the Settings → Data **Full rebuild** action; a *full* rebuild is
+    /// what the §6.12 table distinguishes from an incremental refresh).
+    FullRebuild,
     /// Register a root directory + (optionally) re-index + reload the
     /// corpus. Wired in G1.
     AddRoot(PathBuf),
-    /// Unregister a root directory. Reserved (G5).
-    #[allow(dead_code)] // reserved for G5
+    /// Unregister a root directory + re-index (so the GC can drop the
+    /// pages that were under the dropped root only — pages under another
+    /// root survive). Wired in G5 (the Settings → Roots **Remove**
+    /// row; PLAN-GUI §6.12 rule: "removing a root is confirmed and
+    /// explains that the DB rows disappear on the next refresh").
     DropRoot(PathBuf),
+    /// Fetch the registered roots (in *presentation* order,
+    /// `seq DESC`, with the walk options) + the per-root page counts.
+    /// Wired in G5 (the Settings → Roots table).
+    ListRoots,
+    /// Add / update a `tag_aliases` row: `(alias, canonical)`. Same
+    /// upsert SQL the CLI `kb tag-alias --add` uses (a conflicting
+    /// `alias` is *updated*, not rejected). Wired in G5 (Settings →
+    /// Tag aliases **add** row).
+    AddAlias { alias: String, canonical: String },
+    /// Remove a `tag_aliases` row by `alias` (0 or 1 row). Wired in G5
+    /// (Settings → Tag aliases **remove** row).
+    RemoveAlias { alias: String },
+    /// Fetch the full `tag_aliases` table, sorted by `alias`. Wired in
+    /// G5 (the Settings → Tag aliases table).
+    ListAliases,
+    /// Fetch the corpus stats snapshot (page counts, link count, DB
+    /// size, …). Wired in G5 (the Settings → Data tab).
+    Stats,
     /// Open a single page's body. Reserved (G2).
     #[allow(dead_code)] // reserved for G2
     OpenPage(String),
@@ -127,6 +154,84 @@ pub enum FmOp {
     RemoveItem { key: String, value: String },
 }
 
+/// The outcome of a refresh / full rebuild, in *display* terms
+/// (PLAN-GUI §6.12 "Data" tab). The DB worker carries this across the
+/// channel; the UI renders the `note` + the numeric columns. `Clone` so
+/// a single event can update the status bar *and* the Settings table.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct RebuildSummary {
+    pub indexed: usize,
+    pub skipped_no_type: usize,
+    pub skipped_missing_slug: usize,
+    pub gc: usize,
+    pub roots_walked: usize,
+    pub gc_skipped: bool,
+    /// The human-readable one-line summary from `kb_db::refresh` (the
+    /// CLI shows this verbatim, so parity is one `note: String` field).
+    pub note: String,
+    /// `true` for `FullRebuild` (the UI's "Full rebuild" button), `false`
+    /// for the incremental `Refresh`. The UI keeps both columns distinct
+    /// in the §6.12 table.
+    pub full: bool,
+}
+
+impl From<kb_db::refresh::RefreshSummary> for RebuildSummary {
+    fn from(s: kb_db::refresh::RefreshSummary) -> Self {
+        // The `full` flag is set by the dispatch arm based on which cmd
+        // ran (the summary itself doesn't carry it), so `false` here and
+        // the FullRebuild arm overwrites.
+        RebuildSummary {
+            indexed: s.indexed,
+            skipped_no_type: s.skipped_no_type,
+            skipped_missing_slug: s.skipped_missing_slug,
+            gc: s.gc,
+            roots_walked: s.roots_walked,
+            gc_skipped: s.gc_skipped,
+            note: s.note,
+            full: false,
+        }
+    }
+}
+
+/// A registered root row in the §6.12 settings table. The `added_at`
+/// column is the ISO timestamp `kb_db` wrote (the CLI surfaces this as
+/// "added: <ts>"); `extra_extensions` is the newline-joined `extra_exts`
+/// field split back into a `Vec` (the `kb roots` JSON shape).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RootInfo {
+    pub path: String,
+    pub added_at: Option<String>,
+    pub extra_extensions: Vec<String>,
+    pub include_hidden: bool,
+    /// The number of *indexed* pages under this root (computed in the
+    /// worker as `SELECT COUNT(*) FROM pages WHERE root = ?1`; the CLI
+    /// `kb info` reports the same column).
+    pub page_count: usize,
+}
+
+/// A `tag_aliases` row (`alias`, `canonical`) — the §6.12 "tag aliases"
+/// table. `Clone` so the UI can keep a fresh copy after each mutation.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AliasRow {
+    pub alias: String,
+    pub canonical: String,
+}
+
+/// The corpus stats snapshot (the §6.12 "Data" tab). All counts are
+/// `usize` (a `COUNT(*)` never goes negative); the DB *size* is `Bytes`
+/// via `.size()` on the on-disk file (or zero when the DB is `:memory:`
+/// in a test — the worker returns 0 in that case).
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct StatsSnapshot {
+    pub page_count: usize,
+    pub distinct_tag_count: usize,
+    pub link_count: usize,
+    pub root_count: usize,
+    pub alias_count: usize,
+    pub db_path: String,
+    pub db_size: u64,
+}
+
 /// An event from the DB worker to the UI thread (PLAN-GUI §3.2).
 pub enum Evt {
     /// Corpus rows arrived; the note list can render. Carries:
@@ -192,6 +297,44 @@ pub enum Evt {
         /// The page's new id (`type:slug`), for navigation / deep links.
         #[allow(dead_code)]
         id: String,
+    },
+    /// Result of a refresh or full rebuild (`kb refresh` / `kb refresh
+    /// --full` / `kb_db::refresh::full_rebuild`). Carries the `RefreshSummary`
+    /// verbatim (the `note` field is the human-readable one-liner the
+    /// CLI shows). The UI displays it next to the action that fired (the
+    /// Settings → Data tab) and in the status bar.
+    RebuildDone(RebuildSummary),
+    /// Result of a `Cmd::ListRoots` — the registered roots in
+    /// presentation order (`seq DESC`) with their walk options and the
+    /// per-root page count (the §6.12 table needs both the option
+    /// columns *and* the "page count" column).
+    Roots(Vec<RootInfo>),
+    /// Result of a `Cmd::ListAliases` — the full `tag_aliases` table
+    /// as `(alias, canonical)` pairs, sorted by `alias` (the CLI's
+    /// `kb tag-alias --list` order). The UI renders it as a two-column
+    /// table.
+    Aliases(Vec<AliasRow>),
+    /// Result of a `Cmd::Stats` — the corpus stats snapshot (the
+    /// §6.12 "Data" tab). The DB path + size are resolved here in the
+    /// worker so the UI never has to know where the DB lives.
+    Stats(StatsSnapshot),
+    /// Result of a `Cmd::DropRoot` — the number of roots removed and the
+    /// `RefreshSummary` of the GC sweep that ran right after (dropping
+    /// a root orphans its pages; the GC sweep on the next `refresh()` is
+    /// what actually deletes the rows, but the page count change shows
+    /// up in the corpus reload).
+    RootDropped {
+        removed: usize,
+        summary: RebuildSummary,
+    },
+    /// Result of a `Cmd::AddAlias` / `Cmd::RemoveAlias` — the affected
+    /// `(alias, canonical)` pair, so the UI can update its local table
+    /// state without a round-trip `ListAliases`.
+    AliasChanged {
+        alias: String,
+        canonical: Option<String>,
+        /// `true` when one was added/updated, `false` when one was removed.
+        added: bool,
     },
     /// A non-fatal error in a worker operation (the corpus remains usable).
     Warn(String),
@@ -349,8 +492,170 @@ pub fn spawn_worker() -> WorkerHandle {
                             }
                         }
                     }
-                    Cmd::DropRoot(_) => {
-                        let _ = evt_tx.send(Evt::Warn("reserved for G5".into()));
+                    Cmd::FullRebuild => {
+                        let Some(conn) = db.as_ref() else {
+                            let _ = evt_tx.send(Evt::Fatal("db not open".into()));
+                            break;
+                        };
+                        match kb_db::refresh::full_rebuild(&conn.db) {
+                            Ok(summary) => {
+                                let mut s: RebuildSummary = summary.into();
+                                s.full = true;
+                                let _ = evt_tx.send(Evt::RebuildDone(s));
+                                let _ = load_corpus_evt(&evt_tx, conn);
+                            }
+                            Err(msg) => {
+                                let _ = evt_tx.send(Evt::Warn(msg.to_string()));
+                            }
+                        }
+                    }
+                    Cmd::DropRoot(path) => {
+                        let Some(conn) = db.as_ref() else {
+                            let _ = evt_tx.send(Evt::Fatal("db not open".into()));
+                            break;
+                        };
+                        let path_str = path.to_string_lossy().into_owned();
+                        // Match the CLI's canonicalize-then-fallback flow
+                        // (`kb/cli/roots.rs::cmd_drop_root`): if the
+                        // directory is still on disk, canonicalize it to
+                        // the form `add` stored; if it's gone, look up a
+                        // registered root that matches the literal (case-
+                        // insensitive, trailing-slash-trimmed) form. The
+                        // fallback is what lets a user unregister a root
+                        // whose folder has been deleted.
+                        let target = match std::fs::canonicalize(&path_str) {
+                            Ok(c) => c.to_string_lossy().into_owned(),
+                            Err(_) => match admin::literal_root_match(&conn.db, &path_str) {
+                                Some(found) => found,
+                                None => {
+                                    let _ = evt_tx.send(Evt::Warn(format!(
+                                        "{path_str}: no registered root matches it (and the
+                                         directory is no longer on disk)"
+                                    )));
+                                    continue;
+                                }
+                            },
+                        };
+                        match conn.db.drop_root(&target) {
+                            Ok(removed) => {
+                                // Same GC-sweep-after-drop-then-reload as
+                                // the CLI's `cmd_drop_root` — the orphan
+                                // pages (under this root only) are the
+                                // ones the next `refresh()` will GC.
+                                let summary = kb_db::refresh::refresh(&conn.db).map_or_else(
+                                    |e| RebuildSummary {
+                                        note: format!("drop OK but post-drop refresh failed: {e}"),
+                                        ..Default::default()
+                                    },
+                                    Into::into,
+                                );
+                                let _ = evt_tx.send(Evt::RootDropped { removed, summary });
+                                let _ = load_corpus_evt(&evt_tx, conn);
+                            }
+                            Err(msg) => {
+                                let _ = evt_tx.send(Evt::Warn(format!("drop root: {msg}")));
+                            }
+                        }
+                    }
+                    Cmd::ListRoots => {
+                        let Some(conn) = db.as_ref() else {
+                            let _ = evt_tx.send(Evt::Fatal("db not open".into()));
+                            break;
+                        };
+                        match admin::list_roots_full(&conn.db) {
+                            Ok(rows) => {
+                                let _ = evt_tx.send(Evt::Roots(rows));
+                            }
+                            Err(msg) => {
+                                let _ = evt_tx.send(Evt::Warn(msg));
+                            }
+                        }
+                    }
+                    Cmd::AddAlias { alias, canonical } => {
+                        let Some(conn) = db.as_ref() else {
+                            let _ = evt_tx.send(Evt::Fatal("db not open".into()));
+                            break;
+                        };
+                        // Validation (PLAN-GUI §6.12 "Tag aliases" rule:
+                        // alias ≠ canonical). The DB accepts *anything*;
+                        // the worker is where the semantic check belongs,
+                        // so a UI typo can't silently round-trip through
+                        // the worker as a no-op "add".
+                        if alias.trim().is_empty() || canonical.trim().is_empty() {
+                            let _ = evt_tx.send(Evt::Warn(
+                                "tag alias: alias and canonical must both be non-empty".into(),
+                            ));
+                            continue;
+                        }
+                        if alias == canonical {
+                            let _ = evt_tx.send(Evt::Warn(format!(
+                                "tag alias: alias equals canonical ({alias}) — no-op"
+                            )));
+                            continue;
+                        }
+                        match admin::upsert_alias(&conn.db, &alias, &canonical) {
+                            Ok(()) => {
+                                let _ = evt_tx.send(Evt::AliasChanged {
+                                    alias: alias.clone(),
+                                    canonical: Some(canonical),
+                                    added: true,
+                                });
+                            }
+                            Err(msg) => {
+                                let _ = evt_tx.send(Evt::Warn(msg));
+                            }
+                        }
+                    }
+                    Cmd::RemoveAlias { alias } => {
+                        let Some(conn) = db.as_ref() else {
+                            let _ = evt_tx.send(Evt::Fatal("db not open".into()));
+                            break;
+                        };
+                        match admin::remove_alias(&conn.db, &alias) {
+                            Ok(n) if n > 0 => {
+                                let _ = evt_tx.send(Evt::AliasChanged {
+                                    alias: alias.clone(),
+                                    canonical: None,
+                                    added: false,
+                                });
+                            }
+                            Ok(_) => {
+                                let _ = evt_tx.send(Evt::Warn(format!(
+                                    "tag alias: no alias {alias:?} found — nothing removed"
+                                )));
+                            }
+                            Err(msg) => {
+                                let _ = evt_tx.send(Evt::Warn(msg));
+                            }
+                        }
+                    }
+                    Cmd::ListAliases => {
+                        let Some(conn) = db.as_ref() else {
+                            let _ = evt_tx.send(Evt::Fatal("db not open".into()));
+                            break;
+                        };
+                        match admin::list_aliases(&conn.db) {
+                            Ok(rows) => {
+                                let _ = evt_tx.send(Evt::Aliases(rows));
+                            }
+                            Err(msg) => {
+                                let _ = evt_tx.send(Evt::Warn(msg));
+                            }
+                        }
+                    }
+                    Cmd::Stats => {
+                        let Some(conn) = db.as_ref() else {
+                            let _ = evt_tx.send(Evt::Fatal("db not open".into()));
+                            break;
+                        };
+                        match admin::stats_snapshot(&conn.db, conn.db.path()) {
+                            Ok(snap) => {
+                                let _ = evt_tx.send(Evt::Stats(snap));
+                            }
+                            Err(msg) => {
+                                let _ = evt_tx.send(Evt::Warn(msg));
+                            }
+                        }
                     }
                     Cmd::Search { query, scope } => {
                         let Some(conn) = db.as_ref() else {

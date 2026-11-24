@@ -35,6 +35,7 @@ pub(crate) mod preview;
 pub(crate) mod rail;
 pub(crate) mod render;
 pub(crate) mod search;
+pub(crate) mod settings;
 pub(crate) mod splice;
 pub(crate) mod welcome;
 
@@ -161,6 +162,11 @@ pub fn paint(app: &mut App, ui: &mut egui::Ui) {
             search::paint_if_open(app, ui);
             inspector::paint_if_open(app, ui);
             convert::paint_if_open(app, ui);
+            // The Settings modal (PLAN-GUI §6.12) — last in the paint
+            // order so it sits above every other overlay (search,
+            // inspector, convert). Its `paint_if_open` is a no-op when
+            // the modal is closed.
+            settings::paint_if_open(app, ui);
         }
 
         Phase::Error(msg) => {

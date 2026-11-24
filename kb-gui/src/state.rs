@@ -201,6 +201,38 @@ pub enum LeftPaneKind {
     List,
 }
 
+/// The active tab in the Settings modal (PLAN-GUI §6.12). G5 ships the
+/// corpus-management tabs in full: **Roots** (add/drop/refresh, walk
+/// options visible), **Tag aliases** (list/add/remove with the §6.12
+/// validation rules), and **Data** (DB path + size, corpus counts,
+/// refresh / full-rebuild / cron line). `Roots` is the default (corpus
+/// administration is the primary reason a user opens Settings; the
+/// §6.12 rule "any admin action … reflected without restart" is the
+/// acceptance criterion here).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum SettingsTab {
+    #[default]
+    Roots,
+    Aliases,
+    Data,
+}
+
+impl SettingsTab {
+    /// The tab's title, for the §6.12 left tab strip.
+    pub fn label(self) -> &'static str {
+        match self {
+            SettingsTab::Roots => "Roots",
+            SettingsTab::Aliases => "Tag aliases",
+            SettingsTab::Data => "Data",
+        }
+    }
+
+    /// Every tab, in display order (the tab strip iterates this).
+    pub fn all() -> [SettingsTab; 3] {
+        [SettingsTab::Roots, SettingsTab::Aliases, SettingsTab::Data]
+    }
+}
+
 /// The search-results state (the `Cmd+K` overlay; PLAN-GUI §6.8). The overlay
 /// keeps its state when navigating into a page and back: the worker only
 /// refills the rows when a new query lands.
@@ -492,6 +524,41 @@ pub struct AppState {
     /// switches it to edit mode; clicking a different block switches the
     /// focus. Resets to `None` on page switch.
     pub wysiwyg_editing: Option<usize>,
+    /// The Settings modal (PLAN-GUI §6.12) is open. Toggled via the ☰
+    /// menu, the `Manage collections` rail action, or `Cmd/Ctrl+,`.
+    pub settings_open: bool,
+    /// The active Settings tab (the §6.12 left tab list). `Roots` by
+    /// default (corpus administration is the primary use of the Settings
+    /// surface).
+    pub settings_tab: SettingsTab,
+    /// The Settings → Roots table rows (fetched on each `OpenSettings` —
+    /// the worker reloads them so the table is always current). `None`
+    /// until the first fetch lands.
+    pub settings_roots: Option<Vec<crate::data::RootInfo>>,
+    /// The Settings → Tag aliases table rows (fetched the same way as the
+    /// roots table). `None` until the first fetch lands.
+    pub settings_aliases: Option<Vec<crate::data::AliasRow>>,
+    /// The Settings → Data stats snapshot (the §6.12 "Data" tab). `None`
+    /// until the first fetch lands; the fetch is re-run every time the
+    /// Settings modal is opened (so the counts are fresh, not stale).
+    pub settings_stats: Option<crate::data::StatsSnapshot>,
+    /// The Settings → Data tab's last refresh / full-rebuild result (the
+    /// §6.12 "long operations show progress" — the `RebuildDone` event is
+    /// stored here *and* surfaced in the status bar). `None` when no
+    /// rebuild has run this session.
+    pub settings_last_rebuild: Option<crate::data::RebuildSummary>,
+    /// The Settings → Tag aliases add-row draft (`alias`, `canonical`).
+    /// Held on `AppState` (not in the UI layer) so the draft survives a
+    /// tab switch while the modal is open — the user can fill in `alias`,
+    /// switch to check the roots table, come back, and the draft is still
+    /// there (PLAN-GUI §6.12: "settings state in a shared service").
+    pub settings_alias_new: (String, String),
+    /// The Settings → Data tab's **Full rebuild** confirmation
+    /// (PLAN-GUI §6.12 rules: "destructive actions … show a dry-run
+    /// summary first"). Checked = the user has acknowledged the wipe +
+    /// re-walk, which enables the button. `false` by default; the modal
+    /// resets it on close so a stale "confirmed" can't carry over.
+    pub settings_confirm_rebuild: bool,
 }
 
 impl AppState {
@@ -528,6 +595,14 @@ impl AppState {
             save_status: crate::data::SaveStatus::default(),
             inspector: InspectorState::default(),
             wysiwyg_editing: None,
+            settings_open: false,
+            settings_tab: SettingsTab::default(),
+            settings_roots: None,
+            settings_aliases: None,
+            settings_stats: None,
+            settings_last_rebuild: None,
+            settings_alias_new: (String::new(), String::new()),
+            settings_confirm_rebuild: false,
         }
     }
 }
