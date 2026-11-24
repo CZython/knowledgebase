@@ -15,6 +15,7 @@
 //! uses, so the status bar / `Ctrl+S` semantics stay uniform).
 
 use eframe::egui;
+use eframe::egui::InnerResponse;
 
 use crate::app::App;
 use crate::state::InspectorField;
@@ -36,14 +37,23 @@ pub fn paint_if_open(app: &mut App, ui: &mut egui::Ui) {
         app.state_mut().inspector.open = false;
         return;
     }
-    egui::Window::new("Frontmatter")
+    // `paint_if_open` is only called when `inspector.open == true`; start
+    // from that and let the title-bar ✕ (egui `Window::open`) flip it back.
+    let mut is_open = true;
+    let show_res = egui::Window::new("Frontmatter")
         .collapsible(false)
         .resizable(true)
         .min_width(520.0)
         .max_width(760.0)
+        .open(&mut is_open)
         .show(ui.ctx(), |ui| {
             paint_panel(ui, app, page);
         });
+    // Destructure for ergonomics — we don't need `response` here.
+    let _ = show_res.map(|InnerResponse { response: _, inner }| inner);
+    if !is_open {
+        app.state_mut().inspector.open = false;
+    }
 }
 
 fn paint_panel(ui: &mut egui::Ui, app: &mut App, page: bool) {

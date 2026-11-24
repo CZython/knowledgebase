@@ -8,7 +8,7 @@
 //! - `Panel::left("kb.left")` → a *single* tabbed panel hosting either the
 //!   collections rail (`rail::paint`) or the note list (`list::paint`),
 //!   switched via a two-tab bar; only the active tab is visible
-//!   (only in browse/page)
+//!   (every Ready state — Welcome/Home show zero-count empty states)
 //! - `Panel::right("kb.outline")` → `outline::paint` (only when a page is open)
 //! - `CentralPanel` → Welcome / Home / `preview::paint` / `editor::paint`
 //!
@@ -43,13 +43,6 @@ use eframe::egui;
 use crate::app::App;
 use crate::state::Phase;
 use egui::containers::{CentralPanel, Panel};
-
-/// `true` when the shell should paint the browse panes (rail + list).
-/// Welcome has no roots and no selection — it owns the full central rect.
-/// Home (roots but no selection) and Browse (selection) both paint panes.
-fn browseable(app: &App) -> bool {
-    app.state().selected_page.is_some() || app.state().roots_known
-}
 
 /// The single consolidated left pane: a two-tab bar (`Collections` /
 /// `Notes`) above whichever panel is active. Clicking the inactive tab
@@ -102,37 +95,35 @@ pub fn paint(app: &mut App, ui: &mut egui::Ui) {
         }
 
         Phase::Ready => {
-            let browse = browseable(app);
             let has_selection = app.state().selected_page.is_some();
 
             // Top bar always paints (the app's identity is stable across
             // Welcome/Home/browse states).
             Panel::top("kb.top").show(ui, |ui| chrome::top_bar(ui, app));
 
-            // Browse pane — a single tabbed left panel (collections rail OR
-            // note list, switched via a small tab bar). The two panels used
-            // to paint side-by-side and consumed too much width; now only
-            // the active tab is visible. Skipped in Welcome/Home: those two
-            // states need the full central rect for their layout.
-            if browse {
-                Panel::left("kb.left")
-                    .default_size(300.0)
-                    .min_size(200.0)
-                    .max_size(460.0)
-                    .show(ui, |ui| {
-                        left_pane(app, ui);
-                    });
-                // Outline: only meaningful once a page is open (a Welcome or
-                // unselected Home view has no body to outline).
-                if has_selection {
-                    let page = app.state().open_page.clone();
-                    let body = page.as_ref().and_then(|p| p.body.clone());
-                    Panel::right("kb.outline")
-                        .default_size(220.0)
-                        .min_size(140.0)
-                        .max_size(340.0)
-                        .show(ui, |ui| outline::paint(ui, &page, &body));
-                }
+            // Side panels — a single tabbed left panel (collections rail OR
+            // note list, switched via a small tab bar). Painted for every
+            // Ready state; in Welcome/Home both tabs show empty-state
+            // content (no roots / no pages yet). Only the active tab is
+            // visible (the two panels used to paint side-by-side and
+            // consumed too much width).
+            Panel::left("kb.left")
+                .default_size(300.0)
+                .min_size(200.0)
+                .max_size(460.0)
+                .show(ui, |ui| {
+                    left_pane(app, ui);
+                });
+            // Outline: only meaningful once a page is open (a Welcome or
+            // unselected Home view has no body to outline).
+            if has_selection {
+                let page = app.state().open_page.clone();
+                let body = page.as_ref().and_then(|p| p.body.clone());
+                Panel::right("kb.outline")
+                    .default_size(220.0)
+                    .min_size(140.0)
+                    .max_size(340.0)
+                    .show(ui, |ui| outline::paint(ui, &page, &body));
             }
 
             // Bottom status bar paints for every Ready state (the app's
