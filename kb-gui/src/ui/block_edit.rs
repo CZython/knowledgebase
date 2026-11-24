@@ -130,17 +130,28 @@ pub fn paint(ui: &mut egui::Ui, app: &mut App, page: &OpenPageState) {
                 app.state_mut().wysiwyg_editing = None;
             }
         } else {
-            // READ MODE: rich-rendered block, wrapped in a click target so the
-            // user can enter edit mode by clicking.
-            let resp = ui.scope(|ui| {
-                render::paint_single(ui, &doc, idx);
-            });
-            // `resp.response` is the scope's background rect (a synthetic
-            // Response covering the rect claimed by the rendered block).
-            // Labels inside the scope do not themselves sense clicks, so we
-            // explicitly `.interact(Sense::click())` to enable click
-            // detection on this rect.
-            let clickable = resp.response.interact(egui::Sense::click());
+            // READ MODE: rich-rendered block with a click target overlaid on
+            // exactly the block's rect so the user can enter edit mode by
+            // clicking it.
+            //
+            // `ui.scope` allocates a child rect for the block; the scope's
+            // background is registered with `Sense::hover` (egui default), and
+            // the inner labels inherit `Sense::hover` too. egui's hit-test
+            // tie-breaks same-rect widgets by "last painted = topmost", so the
+            // `labels` beat the scope background for hit-testing. `.interact()`
+            // on the scope background adds `Sense::click` but keeps the background
+            // behind in z-order → it loses the tie-break to the labels.
+            //
+            // The fix: after painting the block, register a *fresh* widget at
+            // the block's rect with `Sense::click` via `Ui::interact`. Because
+            // it is registered last, it wins the hit-test tie-break and the
+            // click is routed to **it** (not to the labels, which don't sense
+            // click at all). This is the same mechanism `Button` uses (its
+            // `id` is registered with `Sense::click` at button-paint time).
+            let inner = ui.scope(|ui| render::paint_single(ui, &doc, idx));
+            let block_rect = inner.response.rect;
+            let click_id = ui.make_persistent_id(("block_edit_read", idx));
+            let clickable = ui.interact(block_rect, click_id, egui::Sense::click());
             if clickable.hovered() {
                 ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
             }
@@ -158,7 +169,10 @@ fn split_frontmatter(body: &str) -> (String, String) {
         return (String::new(), body.to_string());
     };
     let lines: Vec<String> = body.split_inclusive('\n').map(|l| l.to_string()).collect();
-    let body_start = lines.iter().skip(fm.close_line + 1).map(|l| l.len()).sum();
+    let body_start = lines[..=fm.close_line]
+        .iter()
+        .map(|l| l.len())
+        .sum::<usize>();
     (
         body[..body_start].to_string(),
         body[body_start..].to_string(),
@@ -280,6 +294,43 @@ mod tests {
                 paint(ui, &mut app, &page);
             });
         });
+    }
+
+    /// `split_frontmatter` must return (frame, body) where the *frame* covers
+    /// every byte up to and including the closing `---\n`, and the *body* is
+    /// the remaining slice. The regression caught live (G4 smoke): the old
+    /// `split` summed line lengths *after* the close marker and used that
+    /// sum as a byte offset — so for a 4-line frame the prefix swallowed the
+    /// H1 + first paragraph + part of the first bullet, and the body began
+    /// mid-word with `"ullet\n…"` in the G4 fixture.
+    #[test]
+    fn split_frontmatter_splits_frame_from_body() {
+        let body = "---\ntype: note\ntitle: T\n---\n\n# H\n\npara.\n";
+        let (frame, rest) = split_frontmatter(body);
+        assert_eq!(frame, "---\ntype: note\ntitle: T\n---\n");
+        assert_eq!(rest, "\n# H\n\npara.\n");
+        // The frame and body must reconstruct the source byte-for-byte.
+        assert_eq!(format!("{frame}{rest}"), body);
+    }
+
+    /// No frontmatter → empty prefix, whole file becomes the body.
+    #[test]
+    fn split_frontmatter_without_frame_returns_whole_file() {
+        let body = "# H\n\npara.\n";
+        let (frame, rest) = split_frontmatter(body);
+        assert_eq!(frame, "");
+        assert_eq!(rest, body);
+    }
+
+    /// A body immediately after the closing `---` (no blank separator) —
+    /// the frame must end exactly on the closing marker and the body must
+    /// begin at the first content byte.
+    #[test]
+    fn split_frontmatter_body_starts_immediately_after_close() {
+        let body = "---\nkey: value\n---\n# first heading\n";
+        let (frame, rest) = split_frontmatter(body);
+        assert_eq!(frame, "---\nkey: value\n---\n");
+        assert_eq!(rest, "# first heading\n");
     }
 
     /// Typing into a heading widget commits a span-isolated splice: the heading
