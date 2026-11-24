@@ -134,6 +134,11 @@ impl App {
         // Reflect the scope back into the shared query state so the overlay
         // chip + the status bar stay consistent with what we fire.
         self.state.search.scope = scope.clone();
+        // Blank the previous result set so a stale cursor can't index into
+        // the arriving rows (the arriving event still resets cursor to 0).
+        self.state.search.rows.clear();
+        self.state.search.cursor = 0;
+        self.state.search.missing_tag = None;
         if let Some(worker) = &self.worker {
             worker.send(data::Cmd::Search { query, scope });
         }

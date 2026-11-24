@@ -27,7 +27,11 @@ pub fn paint(ui: &mut egui::Ui, app: &mut App) {
                 .hint_text("type a query, page title, tag, or uuid…")
                 .desired_width(ui.available_width()),
         );
-        if resp.lost_focus() && ui.input(|i| i.key_released(egui::Key::Enter)) {
+        // Canonical egui pattern: a focused single-line field surrenders
+        // focus on Enter-*press*, so detect the run on `key_pressed`
+        // (a `key_released` check misses the release frame after the
+        // surrender and fires the open too late).
+        if resp.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
             app.state_mut().search.query = query;
             run_top(app);
             return;
