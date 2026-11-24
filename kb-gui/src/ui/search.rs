@@ -60,10 +60,14 @@ fn paint_box(ui: &mut egui::Ui, app: &mut App) {
         ui.weak(format!("  (scoping: in {gate})"));
     }
 
-    // Enter runs the search. Guard: only when the field has focus, so the
-    // results-list `Enter` (open top hit) is not also triggered here.
-    let input_active = resp.has_focus();
-    if resp.lost_focus() && ui.input(|i| i.key_released(egui::Key::Enter)) && input_active {
+    // Enter runs the search. Use egui's canonical pattern (see the `TextEdit`
+    // doc comment): a focused *single-line* field surrenders focus on
+    // Enter-press, so the run is detected on `lost_focus && key_pressed(Enter)`.
+    // The prior `key_released && has_focus` guard never fired, because by the
+    // release frame `has_focus` had already read `false` after the surrender.
+    // The early `return` also keeps the results-list `Enter` below from firing
+    // on the same frame.
+    if resp.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
         app.run_search();
         return;
     }
@@ -75,7 +79,11 @@ fn paint_box(ui: &mut egui::Ui, app: &mut App) {
     ui.add_space(8.0);
 
     if rows.is_empty() {
-        ui.weak("type a query and press Enter…");
+        if app.state().search.query.trim().is_empty() {
+            ui.weak("type a query and press Enter…");
+        } else {
+            ui.weak("no matching pages");
+        }
         return;
     }
 
@@ -116,8 +124,12 @@ fn paint_box(ui: &mut egui::Ui, app: &mut App) {
     } else if ui.input(|i| i.key_pressed(egui::Key::ArrowUp)) && cursor > 0 {
         app.state_mut().search.cursor = cursor - 1;
     }
-    // Enter on the list (field not focused) opens the cursor row.
-    if !input_active && ui.input(|i| i.key_released(egui::Key::Enter)) {
+    // Enter on the list (field not focused) opens the cursor row. The field
+    // is genuinely unfocused here, so no focus-surrender timing to contend
+    // with. Using `key_pressed` (not `key_released`) keeps a slow Enter tap
+    // (release in the frame after the search fired) from immediately opening
+    // the top row.
+    if !resp.has_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
         if let Some(hit) = rows.get(cursor) {
             open_hit(app, hit);
         }
