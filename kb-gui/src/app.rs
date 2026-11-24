@@ -91,6 +91,9 @@ impl App {
             return;
         }
         s.open = true;
+        // Hand the input focus on first paint (one-shot) so the user can type
+        // immediately after Ctrl+K. See `SearchView::focus_next`.
+        s.focus_next = true;
         if let Some(q) = initial_query {
             s.query = q;
             // Opening with a fresh query resets the scope chip to the

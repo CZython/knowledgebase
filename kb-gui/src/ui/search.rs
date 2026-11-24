@@ -51,6 +51,19 @@ fn paint_box(ui: &mut egui::Ui, app: &mut App) {
             .hint_text("query, tag:, or uuid — Enter to search")
             .desired_width(ui.available_width()),
     );
+    // Hand the input focus on the first paint after opening (one-shot). egui
+    // does not auto-focus the first widget of a freshly opened Window, so
+    // without this the user would have to click the field before typing.
+    // One-shot (not every frame): re-requesting focus *after* the TextEdit's
+    // own `surrender_focus(Enter)` re-asserts it and masks `lost_focus`, so
+    // the Enter-run guard below could never fire.
+    {
+        let search = &mut app.state_mut().search;
+        if search.focus_next {
+            search.focus_next = false;
+            resp.request_focus();
+        }
+    }
     if resp.changed() {
         app.state_mut().search.query = query.clone();
     }
