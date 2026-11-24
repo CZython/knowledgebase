@@ -132,6 +132,12 @@ pub fn main() {
         "kb",
         options,
         Box::new(move |cc| {
+            // Zero-cost when `EGUI_INSPECTION` is unset; `EGUI_INSPECTION=1`
+            // enables the TCP wire server on 127.0.0.1:5719 for dev
+            // (tree read / event injection / screenshots — see
+            // ~/egui-inspection-instructions.md).
+            let _ =
+                egui_inspection::attach_from_env(&cc.egui_ctx, Some(env!("CARGO_PKG_NAME").into()));
             app::apply_theme(cc, theme);
             let mut app = app::App::new(args.db.clone(), launch.clone(), theme);
             app.set_max_frames(max_frames);

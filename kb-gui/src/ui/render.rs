@@ -394,15 +394,19 @@ fn align_cell(ui: &mut egui::Ui, aligns: &[Align], ci: usize, cell: &[Inline], h
     } else {
         egui::RichText::new(flat).color(visuals.text_color())
     };
+    // No `.wrap()`: inside the Grid, wrapping makes each label's min-width
+    // tiny, so the grid's first sizing pass remembers a narrow column width
+    // (stored in `prev_state`) and every subsequent frame wraps mid-word.
+    // Let the cell expand to content width instead.
     match aligns.get(ci).copied().unwrap_or(Align::None) {
         Align::None | Align::Left => {
-            ui.add(egui::Label::new(rt).wrap());
+            ui.add(egui::Label::new(rt));
         }
         Align::Center => {
-            ui.add(egui::Label::new(rt).wrap());
+            ui.add(egui::Label::new(rt).halign(egui::Align::Center));
         }
         Align::Right => {
-            ui.add(egui::Label::new(rt).wrap());
+            ui.add(egui::Label::new(rt).halign(egui::Align::Max));
         }
     }
 }

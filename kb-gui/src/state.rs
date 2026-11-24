@@ -189,14 +189,15 @@ pub enum GroupBy {
 /// Which left-side panel is active. The rail (collections) and list (notes)
 /// previously painted as two *separate* left panels, consuming too much
 /// horizontal space; they are now consolidated into a single tabbed panel
-/// and only the active tab is visible at a time. `List` is the default —
-/// the note list is the primary browsing surface (PLAN-GUI §6.4).
+/// and only the active tab is visible at a time. `Rail` (Collections) is
+/// the default at launch — collections are the browse entry point; the note
+/// list (PLAN-GUI §6.4) remains the primary per-collection surface.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum LeftPaneKind {
-    /// The collections rail (PLAN-GUI §6.3).
-    Rail,
-    /// The note list (PLAN-GUI §6.4) — the primary browse surface.
+    /// The collections rail (PLAN-GUI §6.3) — active at launch.
     #[default]
+    Rail,
+    /// The note list (PLAN-GUI §6.4) — the per-collection browse surface.
     List,
 }
 
@@ -452,6 +453,9 @@ pub struct AppState {
     pub create_title: String,
     /// The new-note form's type input (`wiki` / `note` / `label`).
     pub create_type: String,
+    /// The Raw editor shows a line-number gutter (G4 "LineNumberedEditor").
+    /// Toggleable at runtime via the header checkbox; persisted to disk.
+    pub show_line_numbers: bool,
     /// The "convert to page" dialog is shown (G3; PLAN-GUI §6.15 "Convert
     /// flow"). Seeded from the open document's frontmatter on open.
     pub convert_open: bool,
@@ -507,6 +511,7 @@ impl AppState {
             create_open: false,
             create_title: String::new(),
             create_type: "wiki".to_string(),
+            show_line_numbers: true,
             convert_open: false,
             convert_type: "note".to_string(),
             convert_title: String::new(),
