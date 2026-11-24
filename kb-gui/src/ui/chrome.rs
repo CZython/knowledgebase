@@ -23,12 +23,51 @@ use crate::state::{Phase, ViewMode};
 pub fn top_bar(ui: &mut egui::Ui, app: &mut App) {
     ui.set_min_height(40.0);
     ui.horizontal(|ui| {
-        // Left: menu + app name + active-collection scope chip.
-        if ui.button("menu").clicked() {
-            // G1 wires the menu to `Add root` (the one action available
-            // without a page open). G5/G6 adds the full App menu.
-            let _ = crate::ui::welcome::picker_add_root(app);
-        }
+        // Left: app menu (`☰`) + app name + active-collection scope chip.
+        // G5 wires the full App menu (PLAN-GUI §11 / §6.12): Add root,
+        // Refresh, Full rebuild, Settings, Quit. Each item dispatches
+        // straight to the App action (which talks to the worker, off the
+        // UI thread). `ui.close()` closes the menu after a pick (egui 0.37
+        // `menu_button` contract).
+        ui.menu_button("☰", |ui| {
+            if ui.button("＋ Add root…").clicked() {
+                crate::ui::welcome::picker_add_root(app);
+                ui.close();
+            }
+            if ui
+                .button("Refresh")
+                .on_hover_text("re-walk the roots + re-index (kb refresh)")
+                .clicked()
+            {
+                app.run_refresh();
+                ui.close();
+            }
+            if ui
+                .button("Full rebuild…")
+                .on_hover_text(
+                    "wipe the index + re-walk from scratch (kb refresh --full);\n\
+                     opens Settings → Data, gated behind a confirm checkbox",
+                )
+                .clicked()
+            {
+                app.open_settings(Some(crate::state::SettingsTab::Data));
+                ui.close();
+            }
+            ui.separator();
+            if ui
+                .button("Settings…  Ctrl+,")
+                .on_hover_text("Roots / Tag aliases / Data corpus management")
+                .clicked()
+            {
+                app.open_settings(None);
+                ui.close();
+            }
+            ui.separator();
+            if ui.button("Quit").clicked() {
+                ui.ctx().send_viewport_cmd(egui::ViewportCommand::Close);
+                ui.close();
+            }
+        });
         ui.strong("kb");
 
         // Back button: visible only when a page is open; returns the shell
