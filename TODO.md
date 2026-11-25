@@ -35,12 +35,18 @@ Spec: `PLAN-GUI.md`. Crate: new `kb-gui` in the workspace.
    - [x] Roots add/drop, refresh, tag aliases visible in UI (§6.12) — `kb-gui-g5`,
      Settings modal (`ui/settings.rs`) + `data/admin.rs`, `☰` app menu, `Cmd/Ctrl+,`,
      Roots / Tag-aliases / Data tabs + 6 unit tests
-- [~] G6 — Polish: theming/custom themes (§11), keyboard shortcuts (§6.11), dialogs (§6.10)
+- [x] G6 — Polish: theming/custom themes (§11), keyboard shortcuts (§6.11), dialogs (§6.10)
   - [x] G6-1 — Theming core (§11) + preferences persistence — `kb-gui-g6`
     - [x] Semantic token model `theme.rs`: `Color` (hex serde), `ColorTokens`/`MarkdownTokens`/`Metrics`/`Fonts` (all `#[serde(default)]`, `deny_unknown_fields`), built-ins `marknote-dark` / `marknote-light` / `high-contrast` (pass WCAG AA `contrast_audit`), `to_visuals()` + `apply()`, custom-TOML loader `from_toml_path()` (≤64 KB) — 16 unit tests
     - [x] `preferences.rs`: §11.3 schema persisted to `<config>/kb-gui/prefs.toml` (load/save non-fatal) — 5 unit tests
     - [x] Settings **Appearance** tab (built-in + custom-TOML picker, live switch, WCAG contrast audit view) and **General** tab (restore-last-page / privacy / editor view / autosave) — `ui/settings.rs`
     - [x] Frame-1 and steady-state theme agree (single `App::theme_for` resolver; `--theme` CLI > prefs > default)
+  - [x] G6-2 — Keyboard shortcuts (§6.11) + New-note modal (§6.10) + conflict diff — `kb-gui-g6`
+    - [x] §6.11 shortcuts wired: `Ctrl+N` new note, `Ctrl+O` open file, `Ctrl+R` refresh corpus (`handle_g1_shortcuts`)
+    - [x] §6.10 New-note: `ui/create.rs` egui::Window (type combo, title, tags/collections chip editors; drafts persist) — dir resolved open-page root → first indexed root → cwd
+    - [x] Conflict resolution: `ui/diff.rs` side-by-side (unsaved buffer vs frozen on-disk snapshot) with **Reload / Keep-mine / Show-diff** banner actions
+    - [x] Fixed latent "Keep mine" bug: `Cmd::Save` gains `force: bool` (skips the conflict guard); both Keep-mine call sites dispatch `save_page_force()`
+    - [x] Tests: `save_page` force/noop/missing (3); new-note open+drafts, conflict-diff snapshot open/close, `resolve_directory` preference (4)
 - [ ] G7 — Packaging and release (shares infrastructure with T5)
 - [ ] Testing: unit, integration, manual matrix, startup measurement, CI gates (§13)
 
