@@ -23,9 +23,10 @@ Spec: `PLAN-GUI.md`. Crate: new `kb-gui` in the workspace.
 - [x] G3 — Formatted read view + generic Markdown (IR+parser `ui/md.rs`, renderer `ui/render.rs`, `DocumentKind`+classify, §6.15 banner + Convert dialog `ui/convert.rs`, `Cmd::ConvertPage` worker, inspector gating)
   - [x] Read-only rendered view, no embedded browser (§7)
   - [x] Generic Markdown + conversion rules (§6.15) — e2e: pure-body file → indexed note
- - [x] G4 — WYSIWYG block editing MVP
-   - [x] Block-span model + splice + round-trip guarantees (§8) — `ui/splice.rs`, 17 tests
-   - [x] Read-wysiwyg / edit-plain toggle — `ui/block_edit.rs` (click block → TextEdit, Esc exits)
+  - [x] G4 — WYSIWYG block editing MVP
+    - [x] Block-span model + splice + round-trip guarantees (§8) — `ui/splice.rs`, 28 tests
+    - [x] Read-wysiwyg / edit-plain toggle — `ui/block_edit.rs` (click block → TextEdit, Esc exits)
+    - [x] WYSIWYG editing of *simple tight* lists (§8) — whole list = one splicable unit, multiline TextEdit; Enter inserts an item, Up/Down navigate lines; complex lists (task/loose/nested) fall back read-only — `splice.rs` (`BlockKind::List` + `tight_list_span_for`), `md.rs` (`list_item_text_from_line`), 11 new tests
    - [x] Shell rebuilt on egui `Panel` (left/right/top/bottom) + `CentralPanel` (`ui/mod.rs`)
    - [x] Banner as a vertical multi-line layout (heading / description / buttons) — `preview::paint_banner`
    - [x] Single tabbed left panel (`Collections | Notes`, only active tab visible) — `LeftPaneKind` in
