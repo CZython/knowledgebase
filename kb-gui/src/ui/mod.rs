@@ -25,6 +25,8 @@
 pub(crate) mod block_edit;
 pub(crate) mod chrome;
 pub(crate) mod convert;
+pub(crate) mod create;
+pub(crate) mod diff;
 pub(crate) mod editor;
 pub(crate) mod home;
 pub(crate) mod inspector;
@@ -162,6 +164,10 @@ pub fn paint(app: &mut App, ui: &mut egui::Ui) {
             search::paint_if_open(app, ui);
             inspector::paint_if_open(app, ui);
             convert::paint_if_open(app, ui);
+            create::paint_if_open(app, ui);
+            // The conflict diff view (PLAN-GUI §6.10) sits above the convert
+            // dialog, below Settings (the last-painted window is topmost).
+            diff::paint_if_open(app, ui);
             // The Settings modal (PLAN-GUI §6.12) — last in the paint
             // order so it sits above every other overlay (search,
             // inspector, convert). Its `paint_if_open` is a no-op when

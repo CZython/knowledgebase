@@ -497,12 +497,27 @@ pub struct AppState {
     /// The open document (PLAN-GUI §6.5) — the body + error; `None` when no
     /// page is open (Home/Welcome shows instead).
     pub open_page: Option<OpenPageState>,
-    /// The inline "new note" form is shown (G2; PLAN-GUI §6.5).
+    /// The inline "new note" form is shown (G2; PLAN-GUI §6.5). Now an
+    /// egui::Window (the G6 dialog); the flag still gates whether to paint.
     pub create_open: bool,
     /// The new-note form's title input (local to the form; not persisted).
     pub create_title: String,
     /// The new-note form's type input (`wiki` / `note` / `label`).
     pub create_type: String,
+    /// The new-note dialog's `tags:` draft (optional; §6.10 "New note").
+    pub create_tags: Vec<String>,
+    /// The new-note dialog's `search_required_phrase:` (collections) draft.
+    pub create_collections: Vec<String>,
+    /// The conflict *diff* view is open (a side-by-side of the editor body
+    /// vs a snapshot of the file's *current on-disk* content). The snapshot
+    /// is captured once, when the user clicks "Show diff" (so the diff is
+    /// stable even if a third external write lands while the diff is open);
+    /// it is `None` until then.
+    pub conflict_diff_open: bool,
+    /// The disk-side snapshot for the diff view. `None` = not captured yet
+    /// (the diff window would show a "no snapshot" placeholder); `Some(s)`
+    /// = the exact bytes that were on disk when "Show diff" was pressed.
+    pub conflict_diff_snapshot: Option<String>,
     /// The Raw editor shows a line-number gutter (G4 "LineNumberedEditor").
     /// Toggleable at runtime via the header checkbox; persisted to disk.
     pub show_line_numbers: bool,
@@ -596,6 +611,10 @@ impl AppState {
             create_open: false,
             create_title: String::new(),
             create_type: "wiki".to_string(),
+            create_tags: Vec::new(),
+            create_collections: Vec::new(),
+            conflict_diff_open: false,
+            conflict_diff_snapshot: None,
             show_line_numbers: true,
             convert_open: false,
             convert_type: "note".to_string(),

@@ -52,7 +52,7 @@ pub fn paint(ui: &mut egui::Ui, app: &mut App) {
             }
             ui.add_space(8.0);
             if ui.button("Create new page…").clicked() {
-                let _ = app; // New-note dialog lands in G2.
+                app.open_create_note();
             }
             ui.add_space(8.0);
             if ui.button("Open Markdown file…").clicked() {
