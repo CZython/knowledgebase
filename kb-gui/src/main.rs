@@ -12,7 +12,9 @@ use clap::Parser;
 
 mod app;
 mod data;
+mod preferences;
 mod state;
+mod theme;
 mod ui;
 
 /// The time of process entry — the anchor for the first-frame budget
@@ -128,6 +130,10 @@ pub fn main() {
 
     let launch = route_from_arg(args.page);
     let max_frames = args.max_frames;
+    // Resolve the theme *once* so frame 1 and the steady-state app agree
+    // (PLAN-GUI §11.3: no theme flicker between the `CreationContext` and
+    // the first `update`).
+    let resolved_theme = app::App::theme_for(theme);
     let result = eframe::run_native(
         "kb",
         options,
@@ -138,7 +144,7 @@ pub fn main() {
             // ~/egui-inspection-instructions.md).
             let _ =
                 egui_inspection::attach_from_env(&cc.egui_ctx, Some(env!("CARGO_PKG_NAME").into()));
-            app::apply_theme(cc, theme);
+            crate::theme::apply(&cc.egui_ctx, &resolved_theme);
             let mut app = app::App::new(args.db.clone(), launch.clone(), theme);
             app.set_max_frames(max_frames);
             Ok(Box::new(app))

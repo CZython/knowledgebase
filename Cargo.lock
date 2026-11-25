@@ -2633,6 +2633,7 @@ name = "kb-gui"
 version = "0.1.0"
 dependencies = [
  "clap",
+ "dirs",
  "eframe",
  "egui",
  "egui_inspection",
@@ -2640,6 +2641,8 @@ dependencies = [
  "kb-db",
  "pulldown-cmark",
  "rfd",
+ "serde",
+ "toml",
 ]
 
 [[package]]

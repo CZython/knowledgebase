@@ -205,9 +205,11 @@ pub enum LeftPaneKind {
 /// corpus-management tabs in full: **Roots** (add/drop/refresh, walk
 /// options visible), **Tag aliases** (list/add/remove with the §6.12
 /// validation rules), and **Data** (DB path + size, corpus counts,
-/// refresh / full-rebuild / cron line). `Roots` is the default (corpus
-/// administration is the primary reason a user opens Settings; the
-/// §6.12 rule "any admin action … reflected without restart" is the
+/// refresh / full-rebuild / cron line). G6 adds the preference tabs:
+/// **Appearance** (built-in + custom theme picker, PLAN-GUI §11) and
+/// **General** (the §11.3 persisted preferences). `Roots` is the default
+/// (corpus administration is the primary reason a user opens Settings;
+/// the §6.12 rule "any admin action … reflected without restart" is the
 /// acceptance criterion here).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum SettingsTab {
@@ -215,6 +217,8 @@ pub enum SettingsTab {
     Roots,
     Aliases,
     Data,
+    Appearance,
+    General,
 }
 
 impl SettingsTab {
@@ -224,12 +228,20 @@ impl SettingsTab {
             SettingsTab::Roots => "Roots",
             SettingsTab::Aliases => "Tag aliases",
             SettingsTab::Data => "Data",
+            SettingsTab::Appearance => "Appearance",
+            SettingsTab::General => "General",
         }
     }
 
     /// Every tab, in display order (the tab strip iterates this).
-    pub fn all() -> [SettingsTab; 3] {
-        [SettingsTab::Roots, SettingsTab::Aliases, SettingsTab::Data]
+    pub fn all() -> [SettingsTab; 5] {
+        [
+            SettingsTab::Roots,
+            SettingsTab::Aliases,
+            SettingsTab::Data,
+            SettingsTab::Appearance,
+            SettingsTab::General,
+        ]
     }
 }
 
