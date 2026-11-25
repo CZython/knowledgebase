@@ -30,10 +30,9 @@ const MIN_GUTTER_ROWS: usize = 1;
 pub fn paint(app: &mut App, ui: &mut egui::Ui) {
     paint_header(app, ui);
     paint_conflict_banner(app, ui);
-    if app.state().create_open {
-        paint_create_form(app, ui);
-        ui.separator();
-    }
+    // The New-note G2 inline form was superseded by the `create::paint_if_open`
+    // G6 modal (a `Window` over the shell); the `create_open` flag is still
+    // shared (the modal reads it), so we no longer paint an inline form here.
 
     let Some(body) = app.state().open_page.as_ref().and_then(|p| p.body.clone()) else {
         ui.weak("no page open yet — or the body is still loading");
@@ -197,8 +196,8 @@ fn paint_header(app: &mut App, ui: &mut egui::Ui) {
 
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
             ui.add_space(8.0);
-            if ui.button("Create").clicked() {
-                app.state_mut().create_open = true;
+            if ui.button("New note  (Ctrl+N)").clicked() {
+                app.open_create_note();
             }
             if ui.button("Save  (Ctrl+S)").clicked() && save_status == SaveStatus::Unsaved {
                 app.save_page();
@@ -231,60 +230,26 @@ fn paint_conflict_banner(app: &mut App, ui: &mut egui::Ui) {
             if let Some(abs) = app.state().selected_page.clone() {
                 app.open_page(&abs);
             }
+            app.close_conflict_diff();
         }
         if ui.button("Keep mine (write anyway)").clicked() {
             app.state_mut().save_status = SaveStatus::Unsaved;
-            app.save_page();
+            app.save_page_force();
+            app.close_conflict_diff();
+        }
+        ui.separator();
+        let diff_open = app.state().conflict_diff_open;
+        if ui
+            .selectable_label(diff_open, "Show diff")
+            .on_hover_text("Side-by-side: my uncommitted edits vs the file on disk now")
+            .clicked()
+        {
+            if diff_open {
+                app.close_conflict_diff();
+            } else {
+                app.show_conflict_diff();
+            }
         }
     });
     ui.separator();
-}
-
-/// A compact inline form for creating a new note (PLAN-GUI §6.5 "New note
-/// dialog"; G2 keeps it inline rather than a modal window to avoid the
-/// extra eframe viewport plumbing). Title + type. On Create it dispatches
-/// `Cmd::CreatePage` via `App::create_page` and closes the form.
-pub fn paint_create_form(app: &mut App, ui: &mut egui::Ui) {
-    ui.strong("New note");
-    ui.horizontal(|ui| {
-        ui.label("title:");
-        let mut title = app.state().create_title.clone();
-        ui.add(
-            egui::TextEdit::singleline(&mut title)
-                .hint_text("e.g. Energy in electronics")
-                .desired_width(320.0),
-        );
-        app.state_mut().create_title = title;
-
-        ui.label("type:");
-        let mut page_type = app.state().create_type.clone();
-        egui::ComboBox::from_id_salt("create-type")
-            .selected_text(page_type.clone())
-            .show_ui(ui, |ui| {
-                for candidate in ["wiki", "note", "label"] {
-                    if ui
-                        .selectable_label(page_type == candidate, candidate)
-                        .clicked()
-                    {
-                        page_type = candidate.into();
-                    }
-                }
-            });
-        app.state_mut().create_type = page_type;
-
-        if ui.button("Create").clicked() && !app.state().create_title.trim().is_empty() {
-            let directory = app
-                .state()
-                .pages
-                .iter()
-                .find(|p| !p.root.is_empty())
-                .map(|p| p.root.clone())
-                .unwrap_or_else(|| ".".to_string());
-            let title = app.state().create_title.trim().to_string();
-            let page_type = app.state().create_type.clone();
-            app.create_page(directory, title, page_type, Vec::new(), Vec::new());
-            app.state_mut().create_open = false;
-            app.state_mut().create_title = String::new();
-        }
-    });
 }

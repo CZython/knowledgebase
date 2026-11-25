@@ -337,6 +337,59 @@ impl App {
         self.state.convert_open = true;
     }
 
+    /// Open the New-note dialog (PLAN-GUI §6.11 `Cmd/Ctrl+N`, §6.10).
+    /// Idempotent — a second call while it's already open is a no-op; the
+    /// drafts (title / type / tags / collections) are preserved across a
+    /// close→reopen so a cancelled attempt doesn't lose what was typed.
+    pub fn open_create_note(&mut self) {
+        self.state.create_open = true;
+    }
+
+    /// Open a Markdown file from disk (native picker → `open_page`). Mirrors
+    /// the Welcome/Home "Open Markdown file…" action (PLAN-GUI §6.11 `O`).
+    pub fn open_file_picker(&mut self) {
+        if !crate::ui::welcome::picker_open_file(self) {
+            // The picker was cancelled — nothing else to do.
+        }
+    }
+
+    /// Refresh the corpus (PLAN-GUI §6.11 `Cmd/Ctrl+R`) — the same path the
+    /// Settings → Data **Refresh** button and the rail "refresh" shortcut use.
+    pub fn refresh_corpus(&mut self) {
+        if let Some(worker) = &self.worker {
+            worker.send(data::Cmd::Refresh);
+        }
+    }
+
+    /// Open the conflict *Show diff* view: snapshot the file's current
+    /// on-disk bytes (a best-effort read; on failure the diff window shows a
+    /// placeholder) and flag the window. The editor's *current* buffer is the
+    /// other pane, so the diff is "my uncommitted edits" vs "what's on disk
+    /// now" — the §6.10 "Show diff" action.
+    pub fn show_conflict_diff(&mut self) {
+        let abs = match self.state.open_page.as_ref() {
+            Some(s) => s.abs_path.clone(),
+            None => return,
+        };
+        match std::fs::read_to_string(&abs) {
+            Ok(text) => {
+                self.state.conflict_diff_snapshot = Some(text);
+            }
+            Err(_) => {
+                // The file was deleted / unreadable — the diff pane stays
+                // empty (the window renders a "(disk content unavailable)"
+                // hint so the user still gets a decision point).
+                self.state.conflict_diff_snapshot = None;
+            }
+        }
+        self.state.conflict_diff_open = true;
+    }
+
+    /// Close the conflict diff view (Esc, the window, or a Resolve action).
+    pub fn close_conflict_diff(&mut self) {
+        self.state.conflict_diff_open = false;
+    }
+
     /// Add the open document's containing folder as a root, then re-index
     /// (PLAN-GUI §6.15 "UnindexedMarkdown" banner → **Add root**). The worker
     /// re-loads the corpus on success; the next `Evt::Page` re-fold
@@ -544,6 +597,17 @@ impl App {
     /// conflict guard → atomic write → single-page reindex and answers with
     /// `Saved` / `Conflict` / `Warn`.
     pub fn save_page(&mut self) {
+        self.save_page_with_force(false);
+    }
+
+    /// "Keep mine" resolve step (PLAN-GUI §6.10 Conflict): save the open
+    /// document *over* a mid-session external change. Dispatches a `Save`
+    /// with `force = true` (skips the conflict guard on the worker side).
+    pub fn save_page_force(&mut self) {
+        self.save_page_with_force(true);
+    }
+
+    fn save_page_with_force(&mut self, force: bool) {
         // Gather the save payload; skip the dispatch when the slot is not
         // ready to write (body missing or baseline uncaptured).
         let slot = match self.state.open_page.as_ref() {
@@ -560,6 +624,7 @@ impl App {
                 abs_path,
                 expected_disk: baseline,
                 new_bytes,
+                force,
             });
         } else {
             // No worker yet (first frame not sent). Fall back to clean rather
@@ -863,6 +928,8 @@ impl App {
         ins.draft_tags_input.clear();
         ins.draft_collections_input.clear();
         self.state.save_status = data::SaveStatus::Saved;
+        self.state.conflict_diff_open = false;
+        self.state.conflict_diff_snapshot = None;
     }
 
     /// Re-seed the inspector's baseline + drafts from the just-landed page
@@ -1039,6 +1106,22 @@ fn handle_g1_shortcuts(app: &mut App, ui: &egui::Ui, ctx: &egui::Context) {
         } else {
             app.open_settings(None);
         }
+    }
+    // `Ctrl+N` / `Cmd+N` — open the New-note dialog (PLAN-GUI §6.11).
+    // Shift-qualified keys below would shadow plain `N` on some layouts, but
+    // §6.11 lists `N` with no modifier, so we keep it unqualified here.
+    if ctrl_or_cmd && !mods.shift && ui.input(|i| i.key_pressed(egui::Key::N)) {
+        app.open_create_note();
+    }
+    // `Ctrl+O` / `Cmd+O` — open a Markdown file (native picker → open_page).
+    // The picker is modal, so no double-open risk (a cancelled picker is a no-op).
+    if ctrl_or_cmd && !mods.shift && ui.input(|i| i.key_pressed(egui::Key::O)) {
+        app.open_file_picker();
+    }
+    // `Ctrl+R` / `Cmd+R` — refresh the corpus (re-walk + reindex). No page
+    // has to be open; the worker re-loads the corpus on success.
+    if ctrl_or_cmd && !mods.shift && ui.input(|i| i.key_pressed(egui::Key::R)) {
+        app.refresh_corpus();
     }
 }
 
@@ -1335,5 +1418,209 @@ impl App {
                 self.state.phase = crate::state::Phase::Error(msg);
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod g6_2_tests {
+    use super::*;
+    use crate::ui::create;
+
+    /// `App` with a deterministic, worker-less start state (no DB, Home launch).
+    fn fresh() -> App {
+        App::new(None, LaunchRoute::Home, ThemeChoice::Light)
+    }
+
+    /// The New-note dialog's open flag is idempotent and preserves drafts
+    /// across a close→reopen (PLAN-GUI §6.10: a cancelled attempt doesn't
+    /// lose what was typed).
+    #[test]
+    fn open_create_note_sets_flag_and_preserves_drafts() {
+        let mut app = fresh();
+        assert!(!app.state().create_open, "starts closed");
+
+        // Simulate the user typing a draft before opening.
+        app.state_mut().create_title = String::from("My title");
+        app.state_mut().create_type = String::from("note");
+        app.state_mut().create_tags = vec!["alpha".to_string()];
+
+        app.open_create_note();
+        assert!(app.state().create_open, "open_create_note flips the flag");
+        // Idempotent: a second call (a repeat Ctrl+N) is a no-op and the
+        // drafts are untouched.
+        app.open_create_note();
+        assert!(app.state().create_open);
+        assert_eq!(app.state().create_title, "My title");
+        assert_eq!(app.state().create_tags, vec!["alpha".to_string()]);
+    }
+
+    /// The conflict-diff view: `show_conflict_diff` snapshots the *current*
+    /// on-disk bytes (a best-effort read), `close_conflict_diff` clears the
+    /// open flag but *keeps* the snapshot for the session (so a re-open is
+    /// cheap). A missing file leaves the snapshot `None` (the pane's
+    /// "(disk content unavailable)" hint).
+    #[test]
+    fn show_conflict_diff_snapshots_disk_and_close_preserves() {
+        let mut app = fresh();
+        assert!(!app.state().conflict_diff_open);
+        assert!(app.state().conflict_diff_snapshot.is_none());
+
+        // No page open ⇒ a no-op (the guard returns before reading disk).
+        app.show_conflict_diff();
+        assert!(
+            !app.state().conflict_diff_open,
+            "no open page ⇒ stays closed"
+        );
+
+        // Seed an open page with a real, readable file.
+        let dir = std::env::temp_dir().join(format!(
+            "kb-gui-diff-snap-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("page.md");
+        let disk_text = "# T\n\ncurrent disk bytes\n";
+        std::fs::write(&file, disk_text).unwrap();
+        let abs = file.canonicalize().unwrap().to_string_lossy().into_owned();
+
+        app.state_mut().open_page = Some(crate::state::OpenPageState {
+            abs_path: abs.clone(),
+            body: Some(String::from("# T\n\nmy unsaved edits")),
+            error: None,
+            baseline: None,
+            kind: crate::state::DocumentKind::KbPage,
+            banner_dismissed: false,
+        });
+
+        app.show_conflict_diff();
+        assert!(
+            app.state().conflict_diff_open,
+            "show_conflict_diff opens it"
+        );
+        assert_eq!(
+            app.state().conflict_diff_snapshot.as_deref(),
+            Some(disk_text),
+            "snapshot = current on-disk bytes (not the editor buffer)"
+        );
+
+        app.close_conflict_diff();
+        assert!(!app.state().conflict_diff_open, "close clears the flag");
+        assert!(
+            app.state().conflict_diff_snapshot.as_deref() == Some(disk_text),
+            "close keeps the snapshot (cheap re-open)"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// `show_conflict_diff` on a *missing* file leaves `None` (the diff pane
+    /// renders its "(disk content unavailable)" hint) but still opens.
+    #[test]
+    fn show_conflict_diff_missing_file_yields_none_snapshot() {
+        let mut app = fresh();
+        let dir = std::env::temp_dir().join(format!(
+            "kb-gui-diff-miss-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        // A path that canonicalises but then is removed, so the read fails.
+        let probe = dir.join("gone.md");
+        std::fs::write(&probe, b"x").unwrap();
+        let abs = probe.canonicalize().unwrap().to_string_lossy().into_owned();
+        std::fs::remove_file(&probe).unwrap();
+
+        app.state_mut().open_page = Some(crate::state::OpenPageState {
+            abs_path: abs.clone(),
+            body: Some(String::from("# T\n\nmine")),
+            error: None,
+            baseline: None,
+            kind: crate::state::DocumentKind::KbPage,
+            banner_dismissed: false,
+        });
+
+        app.show_conflict_diff();
+        assert!(
+            app.state().conflict_diff_open,
+            "opens even when disk is gone"
+        );
+        assert!(
+            app.state().conflict_diff_snapshot.is_none(),
+            "unreadable file ⇒ None snapshot"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The New-note destination directory prefers the open page's root, then
+    /// the first indexed root, then `.` (the `create::resolve_directory`
+    /// contract, PLAN-GUI §6.10).
+    #[test]
+    fn create_directory_prefers_open_page_root_then_first() {
+        // Empty corpus ⇒ the cwd fallback.
+        let mut app = fresh();
+        assert_eq!(
+            create::resolve_directory(&app),
+            ".",
+            "no indexed root ⇒ cwd"
+        );
+
+        // One indexed page carrying a non-empty root ⇒ that root.
+        app.state_mut().pages = vec![crate::state::PageRow {
+            abs_path: "/r0/note.md".into(),
+            id: "note:note".into(),
+            title: Some("t".into()),
+            type_: "note".into(),
+            rel_path: "note.md".into(),
+            root: String::from("/r0"),
+            gates: vec![],
+            tags: vec![],
+            uuid: String::new(),
+            updated_at: String::new(),
+        }];
+        assert_eq!(
+            create::resolve_directory(&app),
+            "/r0",
+            "first non-empty root wins"
+        );
+
+        // A leading empty root is skipped; the next non-empty root wins.
+        app.state_mut().pages = vec![
+            crate::state::PageRow {
+                abs_path: "/x/a.md".into(),
+                id: "wiki:a".into(),
+                title: None,
+                type_: "wiki".into(),
+                rel_path: "a.md".into(),
+                root: String::new(),
+                gates: vec![],
+                tags: vec![],
+                uuid: String::new(),
+                updated_at: String::new(),
+            },
+            crate::state::PageRow {
+                abs_path: "/r2/b.md".into(),
+                id: "wiki:b".into(),
+                title: None,
+                type_: "wiki".into(),
+                rel_path: "b.md".into(),
+                root: String::from("/r2"),
+                gates: vec![],
+                tags: vec![],
+                uuid: String::new(),
+                updated_at: String::new(),
+            },
+        ];
+        assert_eq!(
+            create::resolve_directory(&app),
+            "/r2",
+            "empty root skipped, next non-empty wins"
+        );
     }
 }

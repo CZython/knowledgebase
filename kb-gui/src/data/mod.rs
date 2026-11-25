@@ -81,10 +81,13 @@ pub enum Cmd {
         scope: Option<String>,
     },
     /// Save a page's body (conflict-check → atomic write → reindex). wired in G2.
+    /// `force = true` skips the conflict guard (a mid-session external edit is
+    /// overwritten rather than refused) — the §6.10 "Keep mine" resolve step.
     Save {
         abs_path: String,
         expected_disk: Vec<u8>,
         new_bytes: Vec<u8>,
+        force: bool,
     },
     /// Create a new note (scaffold frontmatter + body, write, upsert into index).
     /// `directory` is the parent dir (a registered root path). `title` is
@@ -698,12 +701,13 @@ pub fn spawn_worker() -> WorkerHandle {
                         abs_path,
                         expected_disk,
                         new_bytes,
+                        force,
                     } => {
                         let Some(conn) = db.as_ref() else {
                             let _ = evt_tx.send(Evt::Fatal("db not open".into()));
                             break;
                         };
-                        match save_page(conn, &abs_path, &expected_disk, &new_bytes) {
+                        match save_page(conn, &abs_path, &expected_disk, &new_bytes, force) {
                             PageWrite::Saved => {
                                 let _ = evt_tx.send(Evt::Saved { abs_path });
                                 // Re-load the corpus so the list/outline reflect
@@ -887,6 +891,7 @@ fn open_at(path: &Path) -> Result<kb_db::Db, String> {
 /// passed and the write + reindex landed; `Conflict` = the on-disk bytes no
 /// longer match the editor's baseline (the *write* was not attempted);
 /// `Failed` = a real I/O or index error (already formatted for the status bar).
+#[derive(Debug)]
 enum PageWrite {
     Saved,
     Conflict,
@@ -909,14 +914,22 @@ enum PageWrite {
 ///    reindex the single page with `build_page(_, include_language: true)` +
 ///    `upsert_page` (the `language:`-clobber fix: `true`, not the historical
 ///    `false` the TUI carried — see the TUI comment at the call site).
-fn save_page(conn: &DbGuard, abs_path: &str, expected_disk: &[u8], new_bytes: &[u8]) -> PageWrite {
+fn save_page(
+    conn: &DbGuard,
+    abs_path: &str,
+    expected_disk: &[u8],
+    new_bytes: &[u8],
+    force: bool,
+) -> PageWrite {
     let path = Path::new(abs_path);
     // 1) Conflict guard: re-read and compare against the editor's baseline.
+    //    `force = true` (the §6.10 "Keep mine" resolve step) skips this guard
+    //    so the user can overwrite a mid-session external change.
     let on_disk = match std::fs::read(path) {
         Ok(b) => b,
         Err(e) => return PageWrite::Failed(format!("re-read {abs_path} before write: {e}")),
     };
-    if on_disk != expected_disk {
+    if !force && on_disk != expected_disk {
         return PageWrite::Conflict;
     }
     // 2) No-op write: byte-identical ⇒ nothing to do (no write, no reindex).
@@ -1439,6 +1452,149 @@ mod tests {
             page_row.is_some(),
             "page row {id} should be in the corpus after conversion"
         );
+    }
+
+    /// Self-contained end-to-end `save_page` conflict-guard test (the §6.10
+    /// "Conflict" dialog's *Reload / Keep-mine* decision points):
+    ///
+    /// - first save (no external edit) writes cleanly;
+    /// - after an external edit, a non-forced save is refused (Conflict);
+    /// - a *forced* save ("Keep mine") overwrites and lands on disk.
+    ///
+    /// The reindex step is an `Ok(None)` no-op (the page isn't under any
+    /// registered root here) — the test focuses on the *write* guarantee.
+    #[test]
+    fn save_page_force_overrides_external_change_and_refuses_without_force() {
+        let dir = std::env::temp_dir().join(format!(
+            "kb-gui-save-test-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("page.md");
+        let init_body = "---\ntype: note\ntitle: T\n---\n\n# T\n\nv1 content.\n";
+        std::fs::write(&file, init_body).unwrap();
+        let abs = canonical(&file);
+        let init_bytes = std::fs::read(&file).unwrap();
+        let edited_bytes = b"---\ntype: note\ntitle: T\n---\n\n# T\n\nv2 (mine).\n";
+
+        let db_file = dir.join("save.db");
+        let conn = DbGuard::open(&Some(db_file)).unwrap();
+
+        // 1) First save: on_disk == expected_disk, so the guard passes and
+        //    the write lands cleanly.
+        let res1 = save_page(
+            &conn,
+            &abs,
+            &init_bytes,
+            edited_bytes,
+            /* force = */ false,
+        );
+        assert!(matches!(res1, PageWrite::Saved), "first save: {res1:?}");
+        assert_eq!(
+            std::fs::read(&file).unwrap(),
+            edited_bytes,
+            "first save wrote v2"
+        );
+
+        // 2) An *external* edit lands on disk between save attempts.
+        let external =
+            b"---\ntype: note\ntitle: T\n---\n\n# T\n\nv1 content.\n\n(external change)\n";
+        std::fs::write(&file, external).unwrap();
+
+        // 3) A non-forced save (the user's normal Ctrl+S) is now a Conflict —
+        //    the on-disk bytes no longer match the baseline captured at open.
+        let res2 = save_page(
+            &conn,
+            &abs,
+            &init_bytes,
+            edited_bytes,
+            /* force = */ false,
+        );
+        assert!(
+            matches!(res2, PageWrite::Conflict),
+            "external edit must be refused: {res2:?}"
+        );
+
+        // 4) "Keep mine" (§6.10 resolve step): a forced save skips the guard
+        //    and overwrites the external change.
+        let res3 = save_page(
+            &conn,
+            &abs,
+            &init_bytes,
+            edited_bytes,
+            /* force = */ true,
+        );
+        assert!(
+            matches!(res3, PageWrite::Saved),
+            "force save (Keep mine) must land: {res3:?}"
+        );
+        assert_eq!(
+            std::fs::read(&file).unwrap(),
+            edited_bytes,
+            "Keep mine wrote my buffer over the external change"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A no-op save (bytes unchanged) is reported as `Saved` *and* performs
+    /// no write artifact (the §3.3 "a save never rewrites bytes it did not
+    /// edit" rule): the mtime of an unchanged file is preserved.
+    #[test]
+    fn save_page_noop_preserves_file_bytes() {
+        let dir = std::env::temp_dir().join(format!(
+            "kb-gui-save-noop-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("noop.md");
+        let body = b"no frontmatter, just a body.\n";
+        std::fs::write(&file, body).unwrap();
+        let abs = canonical(&file);
+        let before = std::fs::read(&file).unwrap();
+        let db_file = dir.join("noop.db");
+        let conn = DbGuard::open(&Some(db_file)).unwrap();
+        let res = save_page(&conn, &abs, &before, &before, /* force = */ false);
+        assert!(matches!(res, PageWrite::Saved), "no-op save: {res:?}");
+        assert_eq!(std::fs::read(&file).unwrap(), before, "file unchanged");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// `save_page` refuses to save when the file is unreadable (a mid-session
+    /// delete) — the user sees a `Failed` warning, not a phantom `Saved`.
+    #[test]
+    fn save_page_missing_file_is_failed() {
+        let dir = std::env::temp_dir().join(format!(
+            "kb-gui-save-miss-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        // Create then remove the file so we have a canonical (existing) path
+        // that the save's re-read must fail on (NotFound).
+        let probe = dir.join("never-was.md");
+        std::fs::write(&probe, b"tmp").unwrap();
+        let nonexist = canonical(&probe);
+        std::fs::remove_file(&probe).unwrap();
+        let db_file = dir.join("miss.db");
+        let conn = DbGuard::open(&Some(db_file)).unwrap();
+        let res = save_page(&conn, &nonexist, &[], b"new body", /* force = */ false);
+        assert!(
+            matches!(res, PageWrite::Failed(_)),
+            "unreadable file: {res:?}"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     fn canonical(p: &Path) -> String {
