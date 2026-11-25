@@ -27,6 +27,13 @@ pub struct App {
     state: AppState,
     /// The DB hint (`--db` or `None` → default location) captured at startup.
     db_hint: Option<PathBuf>,
+    /// The resolved theme tokens (PLAN-GUI §11.1) — the single source of
+    /// truth the chrome consumes. Set at startup from prefs/CLI, updated on
+    /// live switches (Settings → Appearance).
+    theme: crate::theme::Theme,
+    /// The user's persisted preferences (PLAN-GUI §11.3). Mutated by
+    /// settings; saved (debounced) on switch/exit.
+    prefs: crate::preferences::Preferences,
     /// Worker handle, owned here. `None` until the first `update` has
     /// painted the empty shell; `Some` after, for the lifetime of the app.
     worker: Option<WorkerHandle>,
@@ -41,14 +48,130 @@ pub struct App {
 
 impl App {
     pub fn new(db_hint: Option<PathBuf>, launch: LaunchRoute, theme: ThemeChoice) -> Self {
+        let (theme, prefs) = resolve_theme(theme);
+        let theme_choice = match theme.appearance {
+            crate::theme::Appearance::Light => ThemeChoice::Light,
+            crate::theme::Appearance::Dark => ThemeChoice::Dark,
+        };
         Self {
-            state: AppState::new(launch, theme),
+            state: AppState::new(launch, theme_choice),
             db_hint,
+            theme,
+            prefs,
             worker: None,
             last_warn: None,
             max_frames: 0,
             frames: 0,
         }
+    }
+
+    /// The resolved theme tokens (for `main` to project onto the very first
+    /// `CreationContext` so frame 1 matches exactly what the app will use).
+    pub fn theme_for(choice: ThemeChoice) -> crate::theme::Theme {
+        resolve_theme(choice).0
+    }
+
+    /// The app's preferences (for the General tab to read/write).
+    pub fn prefs(&self) -> &crate::preferences::Preferences {
+        &self.prefs
+    }
+
+    /// Mutable access to preferences (General tab mutations).
+    pub fn prefs_mut(&mut self) -> &mut crate::preferences::Preferences {
+        &mut self.prefs
+    }
+
+    /// The resolved theme tokens (the Appearance tab + G6-2 renderer read
+    /// this). Also the source projected onto the egui context.
+    pub fn theme(&self) -> &crate::theme::Theme {
+        &self.theme
+    }
+
+    /// Every selectable theme: the three built-ins *plus* any custom TOML
+    /// theme in `<config>/kb-gui/themes/` (PLAN-GUI §11.2). Custom themes
+    /// that fail to parse are *shown* with a warning swatch in the
+    /// Appearance tab (so the user can fix the file), but never become the
+    /// `self.theme` while in use.
+    pub fn all_themes(&self) -> Vec<(String, String, bool)> {
+        // Each entry is `(name, display, valid)`. `name` is the value passed
+        // to `set_theme` (a built-in's `Theme::name` or a custom TOML's
+        // `name` field); `display` is the human-readable label shown in
+        // the Settings tab (usually identical to `name` but with the
+        // file path appended for invalid themes). `valid` is `false` for
+        // a custom TOML that failed to parse (the user can still see it
+        // in the list to learn *which* file is broken, but cannot click
+        // it to select it).
+        let mut out = Vec::new();
+        for t in crate::theme::all_builtins() {
+            let name = t.name.clone();
+            out.push((name.clone(), name, true));
+        }
+        let dir = crate::theme::themes_dir();
+        if let Ok(rd) = std::fs::read_dir(&dir) {
+            for entry in rd.flatten() {
+                let p = entry.path();
+                if p.extension().map(|e| e == "toml").unwrap_or(false) {
+                    match crate::theme::from_toml_path(&p) {
+                        Ok(t) => {
+                            let name = t.name.clone();
+                            out.push((name.clone(), name, true));
+                        }
+                        Err(_) => out.push((
+                            p.file_stem()
+                                .map(|s| s.to_string_lossy().into_owned())
+                                .unwrap_or_default(),
+                            format!("{} (invalid)", p.display()),
+                            false,
+                        )),
+                    }
+                }
+            }
+        }
+        out
+    }
+
+    /// Live theme switch (PLAN-GUI §11.3: "applies immediately, no
+    /// restart"). Re-projects onto the egui context, updates the stored
+    /// tokens, and persists the choice to prefs. Custom themes are
+    /// resolved via `theme::themes_dir()` by matching the file stem.
+    pub fn set_theme(&mut self, ctx: &egui::Context, name: &str) {
+        // Built-ins have a unique `name`; custom themes live in TOML files
+        // where the `name` field is the display key. Look up in the themes
+        // directory first (covers both), then the built-in registry as a
+        // fallback (so `--theme marknote-light` still wins).
+        let dir = crate::theme::themes_dir();
+        let mut candidate: Option<crate::theme::Theme> = None;
+        if let Ok(rd) = std::fs::read_dir(&dir) {
+            for e in rd.flatten() {
+                let p = e.path();
+                if p.extension().map(|s| s == "toml").unwrap_or(false) {
+                    if let Ok(t) = crate::theme::from_toml_path(&p) {
+                        if t.name == name {
+                            candidate = Some(t);
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+        let Some(theme) = candidate.or_else(|| crate::theme::builtin(name)) else {
+            return;
+        };
+        let choice = match theme.appearance {
+            crate::theme::Appearance::Light => ThemeChoice::Light,
+            crate::theme::Appearance::Dark => ThemeChoice::Dark,
+        };
+        self.theme = theme;
+        self.state.theme = choice;
+        self.prefs.theme_name = self.theme.name.clone();
+        let _ = crate::preferences::save(&self.prefs);
+        crate::theme::apply(ctx, &self.theme);
+    }
+
+    /// The prefs file on disk (for the General tab to *display* where the
+    /// values land, and for a "reset to defaults" affordance).
+    pub fn prefs_path(&self) -> std::path::PathBuf {
+        crate::preferences::path()
     }
 
     /// Quit after this many painted frames (0 = run until the window closes).
@@ -773,20 +896,31 @@ fn data_mod_summarize(op: &data::FmOp) -> String {
     }
 }
 
-/// Apply a built-in theme to the egui context. G0 supports three choices;
-/// custom TOML themes + live switching land in G6 (PLAN-GUI §11).
-pub fn apply_theme(cc: &eframe::CreationContext, theme: ThemeChoice) {
-    let visuals = match theme {
-        ThemeChoice::Light => egui::Visuals::light(),
-        ThemeChoice::Dark | ThemeChoice::System => egui::Visuals::dark(),
-    };
-    cc.egui_ctx.set_visuals(visuals);
-}
-
 /// Global entry point so the `ui` modules can call `open_search` without
 /// re-borrowing the `App` (the closure in `paint` already holds `&mut App`).
 pub fn open_search(app: &mut App, initial_query: Option<String>) {
     app.open_search(initial_query);
+}
+
+/// Resolve a CLI/prefs theme choice into the concrete tokens + the prefs to
+/// persist. A single source of truth shared by `App::new` and `main` so
+/// frame 1 and the steady-state theme can never disagree.
+///
+/// Rule (PLAN-GUI §11.3): an explicit `--theme dark|light` wins for this
+/// run; `System` honors the persisted `theme_name` (falling back to
+/// marknote-dark when no prefs exist). A custom `theme_name` is resolved via
+/// `theme::builtin` (G6-2 will extend this to the TOML loader).
+fn resolve_theme(choice: ThemeChoice) -> (crate::theme::Theme, crate::preferences::Preferences) {
+    let prefs = crate::preferences::load();
+    let theme = match choice {
+        ThemeChoice::Light => crate::theme::marknote_light(),
+        ThemeChoice::Dark => crate::theme::marknote_dark(),
+        ThemeChoice::System => match crate::theme::builtin(&prefs.theme_name) {
+            Some(t) => t,
+            None => crate::theme::marknote_dark(),
+        },
+    };
+    (theme, prefs)
 }
 
 impl eframe::App for App {

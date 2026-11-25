@@ -31,6 +31,10 @@ name = "kb-gui"
 path = "src/main.rs"
 
 [dependencies]
+# G6-1 (PLAN-GUI §11): theming + preferences persistence. `serde` / `toml` /
+# `dirs` are already workspace-pinned (used by kb-user / kb-hardened) —
+# reusing the same workspace versions keeps a single cargo cache and
+# avoids a duplicate crate in the final binary.
 clap    = { workspace = true }
 kb-core = { workspace = true }
 kb-db   = { workspace = true }
@@ -38,4 +42,7 @@ eframe  = { workspace = true }
 egui    = { workspace = true }
 rfd             = { workspace = true }
 pulldown-cmark  = { workspace = true }
+dirs            = { workspace = true }
+serde           = { workspace = true }
+toml            = { workspace = true }
 egui_inspection = { version = "0.37", features = ["png", "plugin"] }

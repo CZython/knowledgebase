@@ -23,16 +23,23 @@ Spec: `PLAN-GUI.md`. Crate: new `kb-gui` in the workspace.
 - [x] G3 — Formatted read view + generic Markdown (IR+parser `ui/md.rs`, renderer `ui/render.rs`, `DocumentKind`+classify, §6.15 banner + Convert dialog `ui/convert.rs`, `Cmd::ConvertPage` worker, inspector gating)
   - [x] Read-only rendered view, no embedded browser (§7)
   - [x] Generic Markdown + conversion rules (§6.15) — e2e: pure-body file → indexed note
-- [ ] G4 — WYSIWYG block editing MVP
-  - [x] Block-span model + splice + round-trip guarantees (§8) — `ui/splice.rs`, 17 tests
-  - [x] Read-wysiwyg / edit-plain toggle — `ui/block_edit.rs` (click block → TextEdit, Esc exits)
+ - [x] G4 — WYSIWYG block editing MVP
+   - [x] Block-span model + splice + round-trip guarantees (§8) — `ui/splice.rs`, 17 tests
+   - [x] Read-wysiwyg / edit-plain toggle — `ui/block_edit.rs` (click block → TextEdit, Esc exits)
    - [x] Shell rebuilt on egui `Panel` (left/right/top/bottom) + `CentralPanel` (`ui/mod.rs`)
    - [x] Banner as a vertical multi-line layout (heading / description / buttons) — `preview::paint_banner`
    - [x] Single tabbed left panel (`Collections | Notes`, only active tab visible) — `LeftPaneKind` in
-         `state.rs`, consolidated `Panel::left("kb.left")` + `left_pane` tab bar in `ui/mod.rs`
-- [ ] G5 — Settings and corpus management parity
-  - [ ] Roots add/drop, refresh, tag aliases visible in UI (§6.12)
-- [ ] G6 — Polish: theming/custom themes (§11), keyboard shortcuts (§6.11), dialogs (§6.10)
+     `state.rs`, consolidated `Panel::left("kb.left")` + `left_pane` tab bar in `ui/mod.rs`
+ - [x] G5 — Settings and corpus management parity
+   - [x] Roots add/drop, refresh, tag aliases visible in UI (§6.12) — `kb-gui-g5`,
+     Settings modal (`ui/settings.rs`) + `data/admin.rs`, `☰` app menu, `Cmd/Ctrl+,`,
+     Roots / Tag-aliases / Data tabs + 6 unit tests
+- [~] G6 — Polish: theming/custom themes (§11), keyboard shortcuts (§6.11), dialogs (§6.10)
+  - [x] G6-1 — Theming core (§11) + preferences persistence — `kb-gui-g6`
+    - [x] Semantic token model `theme.rs`: `Color` (hex serde), `ColorTokens`/`MarkdownTokens`/`Metrics`/`Fonts` (all `#[serde(default)]`, `deny_unknown_fields`), built-ins `marknote-dark` / `marknote-light` / `high-contrast` (pass WCAG AA `contrast_audit`), `to_visuals()` + `apply()`, custom-TOML loader `from_toml_path()` (≤64 KB) — 16 unit tests
+    - [x] `preferences.rs`: §11.3 schema persisted to `<config>/kb-gui/prefs.toml` (load/save non-fatal) — 5 unit tests
+    - [x] Settings **Appearance** tab (built-in + custom-TOML picker, live switch, WCAG contrast audit view) and **General** tab (restore-last-page / privacy / editor view / autosave) — `ui/settings.rs`
+    - [x] Frame-1 and steady-state theme agree (single `App::theme_for` resolver; `--theme` CLI > prefs > default)
 - [ ] G7 — Packaging and release (shares infrastructure with T5)
 - [ ] Testing: unit, integration, manual matrix, startup measurement, CI gates (§13)
 

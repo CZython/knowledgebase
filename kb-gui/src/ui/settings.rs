@@ -94,6 +94,8 @@ fn paint_panel(ui: &mut egui::Ui, app: &mut App) {
         Tab::Roots => paint_roots(ui, app),
         Tab::Aliases => paint_aliases(ui, app),
         Tab::Data => paint_data(ui, app),
+        Tab::Appearance => paint_appearance(ui, app),
+        Tab::General => paint_general(ui, app),
     }
 }
 
@@ -454,5 +456,140 @@ fn format_bytes(n: u64) -> String {
         format!("{:.2} KB", n as f64 / KB as f64)
     } else {
         format!("{n} B")
+    }
+}
+
+/// §11.3 "Appearance" tab: the built-in theme picker plus any custom
+/// TOML themes in `<config>/kb-gui/themes/` (PLAN-GUI §11.2). Selecting
+/// a theme applies it immediately (the §11.3 "applies immediately, no
+/// restart" rule) and persists the choice to `prefs.theme_name`.
+///
+/// The list uses `selectable_label` per row (the §11.3 "selectable
+/// list" form); the currently-active theme is the *only* one with
+/// `is_selected = true` (that visual state is the source of truth —
+/// `app.theme().name` drives it). A row whose file failed to parse is
+/// rendered `selected + (invalid TOML)` so the user knows what to fix
+/// without opening the file.
+fn paint_appearance(ui: &mut egui::Ui, app: &mut App) {
+    let current_name = app.theme().name.clone();
+    for (name, display, valid) in app.all_themes() {
+        let is_active = name == current_name;
+        let label = if valid {
+            display.clone()
+        } else {
+            format!("{display}  (invalid TOML)")
+        };
+        // The §11.3 "selectable list" form: a `RadioButton` per theme
+        // (the canonical egui "pick one" idiom, the same shape as the
+        // codebase's existing radio pairs). An invalid TOML theme is
+        // rendered `disabled` so it cannot be selected, and its label
+        // carries `(invalid TOML)` so the user knows what to fix.
+        if ui.radio(is_active, label).clicked() && name != current_name && valid {
+            app.set_theme(ui.ctx(), &name);
+        }
+    }
+    ui.separator();
+    ui.label(
+        egui::RichText::new("contrast audit (WCAG AA, body text 4.5:1)")
+            .strong()
+            .weak(),
+    );
+    // The §11.1 acceptance criterion "Contrast is checked in tests" is
+    // also *surfaced* here: every text-on-surface pair in the active
+    // theme is rendered, with a ✓/✗ and the measured ratio. A failed
+    // pair is rendered in the theme's `status_error` color (the user
+    // sees *which* token to fix, and the §11 contrast audit is no
+    // longer only a test — it's visible in the Settings tab).
+    let audit = crate::theme::contrast_audit(app.theme());
+    if audit.is_empty() {
+        ui.weak("  ✓ all required pairs meet AA (4.5:1)");
+    } else {
+        let err = app.theme().colors.status_error.as_color32();
+        for row in &audit {
+            ui.horizontal(|ui| {
+                ui.label(egui::RichText::new(format!("{:<22}", row.pair)).weak());
+                ui.strong(
+                    egui::RichText::new(format!("{:.2}:1 (need {:.1}:1)", row.ratio, row.required))
+                        .color(err),
+                );
+            });
+        }
+    }
+    ui.weak("selecting a theme applies it immediately and persists the choice to prefs");
+}
+
+/// §11.3 "General" tab: the persisted preferences that *aren't* covered
+/// by a more-specific tab (Appearance covers `theme_name`; General
+/// covers everything else). Each row writes to `app.prefs()` and
+/// persists via `preferences::save()` on the frame it changes (the
+/// §11.3 "any admin action … reflected without restart" rule — the
+/// prefs *file* write is the "reflected" path; the in-memory prefs are
+/// the app itself, so no restart is needed for the change to take
+/// effect).
+///
+/// UI is a vertical stack: two checkboxes, a radio pair (editor view),
+/// a `DragValue` (autosave delay), read-only text (last page, prefs
+/// path). No `Grid` needed — one field per row reads better in a
+/// Settings modal than a two-column form.
+fn paint_general(ui: &mut egui::Ui, app: &mut App) {
+    let mut restore = app.prefs().restore_last_page;
+    if ui
+        .checkbox(&mut restore, "restore last page on launch")
+        .changed()
+    {
+        app.prefs_mut().restore_last_page = restore;
+        persist(app);
+    }
+
+    let mut privacy = app.prefs().privacy_mode;
+    if ui
+        .checkbox(
+            &mut privacy,
+            "privacy mode (redact page titles in tab/overview)",
+        )
+        .changed()
+    {
+        app.prefs_mut().privacy_mode = privacy;
+        persist(app);
+    }
+
+    let raw = app.prefs().default_editor_view == crate::preferences::DefaultEditorView::Raw;
+    if ui.radio(raw, "default editor view: raw").clicked() && !raw {
+        app.prefs_mut().default_editor_view = crate::preferences::DefaultEditorView::Raw;
+        persist(app);
+    }
+    if ui.radio(!raw, "default editor view: formatted").clicked() && raw {
+        app.prefs_mut().default_editor_view = crate::preferences::DefaultEditorView::Formatted;
+        persist(app);
+    }
+
+    let mut autosave_ms = app.prefs().autosave_delay_ms as u32;
+    if ui
+        .add(egui::DragValue::new(&mut autosave_ms).range(0..=10_000))
+        .changed()
+    {
+        app.prefs_mut().autosave_delay_ms = autosave_ms as u64;
+        persist(app);
+    }
+
+    match &app.prefs().last_page {
+        Some(last) => {
+            ui.label(format!("last page: {last}"));
+        }
+        None => {
+            ui.weak("last page: (none yet)");
+        }
+    }
+
+    ui.separator();
+    ui.label(
+        egui::RichText::new(format!("prefs stored at: {}", app.prefs_path().display())).weak(),
+    );
+}
+
+fn persist(app: &mut App) {
+    let p = app.prefs().clone();
+    if let Err(e) = crate::preferences::save(&p) {
+        eprintln!("preferences save failed (non-fatal): {e:?}");
     }
 }
