@@ -230,10 +230,48 @@ impl Block {
     }
 }
 
+/// Extract the content of a single-line Markdown list item from a raw source
+/// line (`"- apple"`, `"1. apple"`, `"  - [ ] apple"`). Returns `None` if
+/// the line is not a top-level list item marker.
+pub fn list_item_text_from_line(line: &str) -> Option<String> {
+    let t = line.trim_start();
+    if let Some(r) = t.strip_prefix("- [ ] ") {
+        return Some(r.to_string());
+    }
+    if let Some(r) = t.strip_prefix("- [x] ") {
+        return Some(r.to_string());
+    }
+    if let Some(r) = t.strip_prefix("- [X] ") {
+        return Some(r.to_string());
+    }
+    if let Some(r) = t.strip_prefix("* [ ] ") {
+        return Some(r.to_string());
+    }
+    if let Some(r) = t.strip_prefix("* [x] ") {
+        return Some(r.to_string());
+    }
+    if let Some(r) = t.strip_prefix("- ") {
+        return Some(r.to_string());
+    }
+    if let Some(r) = t.strip_prefix("* ") {
+        return Some(r.to_string());
+    }
+    if let Some(r) = t.strip_prefix("+ ") {
+        return Some(r.to_string());
+    }
+    if let Some(pos) = t.find(". ") {
+        let prefix = &t[..pos];
+        if !prefix.is_empty() && prefix.bytes().all(|b| b.is_ascii_digit()) {
+            return Some(t[pos + 2..].to_string());
+        }
+    }
+    None
+}
+
 /// Each line of `body` as `(byte_offset_of_line_start, &str)`, where the
 /// offset is *exclusive* of the terminating `\n` (i.e. the start of the
 /// content). This is the unit the span resolver works in.
-fn lines_of(body: &str) -> Vec<(usize, &str)> {
+pub fn lines_of(body: &str) -> Vec<(usize, &str)> {
     let mut out = Vec::new();
     let mut off = 0usize;
     for line in body.lines() {
@@ -245,7 +283,7 @@ fn lines_of(body: &str) -> Vec<(usize, &str)> {
 
 /// End offset (exclusive) of the line at index `i` into `lines`: past its
 /// terminating `\n` if present, else the start of *next* line. Total.
-fn end_of(lines: &[(usize, &str)], i: usize) -> usize {
+pub fn end_of(lines: &[(usize, &str)], i: usize) -> usize {
     let (start, line) = lines[i];
     if i + 1 < lines.len() {
         lines[i + 1].0
@@ -256,7 +294,7 @@ fn end_of(lines: &[(usize, &str)], i: usize) -> usize {
 
 /// Index of the last consecutive non-blank line starting at `i` (the run
 /// boundary for a paragraph). If `i` is blank, returns `i`.
-fn run_end_index(lines: &[(usize, &str)], i: usize) -> usize {
+pub fn run_end_index(lines: &[(usize, &str)], i: usize) -> usize {
     let mut j = i;
     while j + 1 < lines.len() && !lines[j + 1].1.trim().is_empty() {
         j += 1;
@@ -287,7 +325,7 @@ fn find_code_start(lines: &[(usize, &str)], text: &str, lang: Option<&str>) -> O
 /// *carries* the markers (inline code, emphasis, links). Collects `Text` and
 /// `Code` leaves inline; emits a space for `HardBreak` / `SoftBreak` so
 /// adjacent inline fragments on the source side line up with the IR side.
-fn plain_in(text: &str) -> String {
+pub fn plain_in(text: &str) -> String {
     let mut out = String::new();
     for ev in Parser::new_ext(
         text,
@@ -306,7 +344,7 @@ fn plain_in(text: &str) -> String {
 /// Collapse internal whitespace runs to a single space and trim — used to
 /// normalize IR plain text against a source anchor (which may carry differing
 /// indentation, hard-break spacing, or trailing punctuation noise).
-fn ws_strip(s: &str) -> String {
+pub fn ws_strip(s: &str) -> String {
     let mut out = String::new();
     for c in s.chars() {
         if c.is_whitespace() {

@@ -14,7 +14,7 @@
 
 use std::ops::Range;
 
-use super::md::{flat_text, Block, Doc};
+use super::md::{end_of, flat_text, lines_of, list_item_text_from_line, ws_strip, Block, Doc};
 
 /// The structural kind of a splicable block, plus the serialization hints the
 /// renderer needs to rebuild its Markdown (heading level, code language/fence
@@ -30,6 +30,14 @@ pub enum BlockKind {
         lang: Option<String>,
         fenced: bool,
     },
+    /// A simple (tight, single-line, marker-only) list. `plain_text` is the
+    /// item texts joined by `\n`; re-serialization re-applies `marker` to
+    /// every line. `ordered` lists re-number from `start`.
+    List {
+        ordered: bool,
+        start: u64,
+        bullet_char: char,
+    },
 }
 
 /// A single editable block: its kind, its user-visible plain content (markers
@@ -43,36 +51,59 @@ pub struct BlockEdit {
 }
 
 /// Every splicable **root** block of `doc` that resolves a span in `body`, in
-/// document order. Non-splicable blocks (list / quote / table / rule / html)
-/// are skipped — they render, but are not yet individually editable.
+/// document order. Non-splicable blocks (quote / table / rule / html, and
+/// *complex* lists — loose, task, or nested) are skipped — they render, but
+/// are not yet individually editable. Simple tight lists *are* splicable
+/// (see `tight_list_span`).
 pub fn splicible_root_blocks(doc: &Doc, body: &str) -> Vec<BlockEdit> {
     let mut out = Vec::new();
     for &idx in &doc.root {
         let block = &doc.blocks[idx];
-        let Some(range) = block.range(body) else {
-            continue;
-        };
         match block {
-            Block::Heading { level, inlines } => out.push(BlockEdit {
-                kind: BlockKind::Heading(*level),
-                plain_text: flat_text(inlines),
-                body_range: range,
-            }),
-            Block::Paragraph { inlines } => out.push(BlockEdit {
-                kind: BlockKind::Paragraph,
-                plain_text: flat_text(inlines),
-                body_range: range,
-            }),
-            Block::Code { text, lang } => out.push(BlockEdit {
-                kind: BlockKind::Code {
-                    lang: lang.clone(),
-                    fenced: lang.is_some(),
-                },
-                plain_text: text.clone(),
-                body_range: range,
-            }),
-            Block::List { .. }
-            | Block::ListItem { .. }
+            Block::Heading { level, inlines } => {
+                let Some(range) = block.range(body) else {
+                    continue;
+                };
+                out.push(BlockEdit {
+                    kind: BlockKind::Heading(*level),
+                    plain_text: flat_text(inlines),
+                    body_range: range,
+                });
+            }
+            Block::Paragraph { inlines } => {
+                let Some(range) = block.range(body) else {
+                    continue;
+                };
+                out.push(BlockEdit {
+                    kind: BlockKind::Paragraph,
+                    plain_text: flat_text(inlines),
+                    body_range: range,
+                });
+            }
+            Block::Code { text, lang } => {
+                let Some(range) = block.range(body) else {
+                    continue;
+                };
+                out.push(BlockEdit {
+                    kind: BlockKind::Code {
+                        lang: lang.clone(),
+                        fenced: lang.is_some(),
+                    },
+                    plain_text: text.clone(),
+                    body_range: range,
+                });
+            }
+            // A simple tight list (single-line items, no tasks, no block
+            // children, contiguous) is splicable as one multi-line field: the
+            // plain text is the item texts joined by `\n` and the span is the
+            // contiguous item run (see `tight_list_span`). Complex lists (or
+            // any unresolvable span) render read-only instead.
+            Block::List { .. } => {
+                if let Some(b) = tight_list_span_for(doc, body, idx) {
+                    out.push(b);
+                }
+            }
+            Block::ListItem { .. }
             | Block::Quote { .. }
             | Block::Table { .. }
             | Block::Rule
@@ -80,6 +111,107 @@ pub fn splicible_root_blocks(doc: &Doc, body: &str) -> Vec<BlockEdit> {
         }
     }
     out
+}
+
+/// For a top-level `Block::List` at `list_idx` in `doc`, resolve the
+/// `(kind, plain_text, range)` needed to splice it back as one splicable
+/// multi-line block — but *only* when it is a **simple tight list**: every
+/// item is a single source line (no block children), no item is a task item,
+/// the items are a contiguous run, and all markers are the same kind (all
+/// bullet or all ordered).
+///
+/// Returns `None` (the caller renders the list read-only) otherwise. Loose
+/// (paragraph-per-item), task lists, lists with nested blocks or code blocks,
+/// and lists interleaved with other blocks are all out of scope for in-line
+/// WYSIWYG editing and remain in the read-only fallback.
+pub fn tight_list_span_for(doc: &Doc, body: &str, list_idx: usize) -> Option<BlockEdit> {
+    let (ordered, start, items) = match &doc.blocks[list_idx] {
+        Block::List {
+            ordered,
+            start,
+            items,
+        } => (*ordered, *start, items.clone()),
+        _ => return None,
+    };
+    if items.is_empty() {
+        return None;
+    }
+    // Constraint: each item is a single-line, non-task entry. Collect the
+    // item plain texts (already marker-stripped) for a content match against
+    // the source.
+    let mut texts: Vec<String> = Vec::with_capacity(items.len());
+    for &i in &items {
+        match &doc.blocks[i] {
+            Block::ListItem {
+                task: None,
+                inlines,
+                children,
+            } if children.is_empty() => texts.push(flat_text(inlines)),
+            _ => return None,
+        }
+    }
+    let n = items.len();
+    // Walk candidate start positions. The first line at position `i` must
+    // match item 0's text (via `plain_in`, which strips inline markers the
+    // same way `flat_text` strips them from the IR), and the following
+    // `n - 1` lines must match items 1..n-1 in order. Lines outside the run
+    // (blank, a heading, another list) are allowed — the *run* itself must be
+    // exactly `n` long.
+    let lines = lines_of(body);
+    for i in 0..lines.len() {
+        let Some(first) = list_item_text_from_line(lines[i].1) else {
+            continue;
+        };
+        if ws_strip(&first).is_empty()
+            || ws_strip(&super::md::plain_in(&first)) != ws_strip(&texts[0])
+        {
+            continue;
+        }
+        let mut ok = true;
+        for k in 1..n {
+            if i + k >= lines.len() {
+                ok = false;
+                break;
+            }
+            let next = match list_item_text_from_line(lines[i + k].1) {
+                Some(t) => t,
+                None => {
+                    ok = false;
+                    break;
+                }
+            };
+            if ws_strip(&super::md::plain_in(&next)) != ws_strip(&texts[k]) {
+                ok = false;
+                break;
+            }
+        }
+        if !ok {
+            continue;
+        }
+        // A match: the *kind* is recovered from the first source line. For
+        // an ordered list we re-emit starting at 1 (the original start is
+        // carried through for round-trip fidelity); for a bullet list we
+        // reuse the marker char.
+        let bullet = lines[i]
+            .1
+            .trim_start()
+            .chars()
+            .next()
+            .filter(|c| matches!(c, '-' | '*' | '+'))
+            .unwrap_or('-');
+        let plain = texts.join("\n");
+        let range = lines[i].0..end_of(&lines, i + n - 1);
+        return Some(BlockEdit {
+            kind: BlockKind::List {
+                ordered,
+                start,
+                bullet_char: bullet,
+            },
+            plain_text: plain,
+            body_range: range,
+        });
+    }
+    None
 }
 
 /// Rebuild a block's Markdown from its kind and plain content. The result ends
@@ -90,11 +222,11 @@ pub fn serialize_block(kind: &BlockKind, plain_text: &str) -> String {
     match kind {
         BlockKind::Heading(level) => format!("{} {}", "#".repeat(*level as usize), content),
         BlockKind::Paragraph => content.to_string(),
-        BlockKind::Code { lang, fenced } if *fenced => {
+        BlockKind::Code { lang, fenced } => {
             let tag = lang.as_deref().unwrap_or("");
-            format!("```{tag}\n{content}\n```")
-        }
-        BlockKind::Code { lang, fenced } if !*fenced => {
+            if *fenced {
+                return format!("```{tag}\n{content}\n```");
+            }
             if content.is_empty() {
                 return "    ".to_string();
             }
@@ -102,12 +234,40 @@ pub fn serialize_block(kind: &BlockKind, plain_text: &str) -> String {
             if let Some(tag) = lang {
                 // An indented block that still knows a language is unusual; keep
                 // it faithful to the fence we cannot express via indent only.
-                format!("```{tag}\n{}\n```", indented.join("\n"))
+                return format!("```{tag}\n{}\n```", indented.join("\n"));
+            }
+            indented.join("\n")
+        }
+        BlockKind::List {
+            ordered,
+            start,
+            bullet_char,
+        } => {
+            // Empty lines are *not* re-marked as empty list items (a user
+            // accidentally pressing Enter twice in the middle of a list would
+            // otherwise produce bullets for the blank line in the rendered
+            // output). The raw byte sequence is preserved so users who
+            // *want* blank lines between items can still express them.
+            let lines: Vec<&str> = content
+                .lines()
+                .map(|l| l.trim_end())
+                .filter(|l| !l.trim().is_empty())
+                .collect();
+            if *ordered {
+                lines
+                    .iter()
+                    .enumerate()
+                    .map(|(k, l)| format!("{}. {}", start + k as u64, l))
+                    .collect::<Vec<_>>()
+                    .join("\n")
             } else {
-                indented.join("\n")
+                lines
+                    .iter()
+                    .map(|l| format!("{bullet_char} {l}"))
+                    .collect::<Vec<_>>()
+                    .join("\n")
             }
         }
-        _ => content.to_string(),
     }
 }
 
@@ -327,12 +487,155 @@ mod tests {
         assert_eq!(splice(body, &edit), "## Renamed\ncontent here\n\n## Next");
     }
 
+    /// §8.6 identity round-trip: splicing a *simple tight list* back with its
+    /// own content reproduces the body byte-for-byte (a save with no effective
+    /// edit).
+    #[test]
+    fn identity_roundtrip_tight_bullet_list() {
+        let body = "- one\n- two\n- three";
+        let doc = parse(body);
+        let list = splicible_root_blocks(&doc, body)
+            .into_iter()
+            .find(|e| matches!(&e.kind, BlockKind::List { .. }))
+            .expect("a splicable list");
+        assert_eq!(list.plain_text, "one\ntwo\nthree");
+        assert_eq!(splice(body, &list), body);
+    }
+
+    /// §8.6 identity round-trip for an ordered list (re-numbering from the
+    /// original `start`).
+    #[test]
+    fn identity_roundtrip_tight_ordered_list() {
+        let body = "1. first\n2. second\n3. third";
+        let doc = parse(body);
+        let list = splicible_root_blocks(&doc, body)
+            .into_iter()
+            .find(|e| matches!(&e.kind, BlockKind::List { .. }))
+            .expect("a splicable list");
+        assert_eq!(splice(body, &list), body);
+    }
+
+    /// §8.6 span isolation: editing a list (changing an item and appending a
+    /// new line via Enter) leaves every byte outside the list span alone and
+    /// re-emits the whole list with the user's new plain content.
+    #[test]
+    fn list_edit_spans_isolated_and_appends_items() {
+        let body = "# T\n\n- one\n- two\n\nend";
+        let doc = parse(body);
+        let list = splicible_root_blocks(&doc, body)
+            .into_iter()
+            .find(|e| matches!(&e.kind, BlockKind::List { .. }))
+            .expect("a splicable list");
+        let r = list.body_range.clone();
+        let mut edit = list;
+        // The user tweaked "two" and hit Enter to start a new item.
+        edit.plain_text = "one\ntwo-tweaked\nthree-new".to_string();
+        let out = splice(body, &edit);
+        assert!(out.starts_with(&body[..r.start]), "prefix changed");
+        assert!(out.ends_with(&body[r.end..]), "suffix changed");
+        assert_eq!(out, "# T\n\n- one\n- two-tweaked\n- three-new\n\nend");
+    }
+
+    /// A list item carrying *inline markers* (e.g. a link) is still resolved:
+    /// the source line's marker-bearing text compares marker-stripped against
+    /// the IR's plain text (the same escape as in the paragraph case).
+    #[test]
+    fn list_with_marker_links_still_resolves() {
+        let body = "- [a link](https://x.y)\n- plain";
+        let doc = parse(body);
+        let list = splicible_root_blocks(&doc, body)
+            .into_iter()
+            .find(|e| matches!(&e.kind, BlockKind::List { .. }))
+            .expect("a splicable list");
+        assert_eq!(list.plain_text, "a link\nplain");
+    }
+
+    /// A *task* list is not simple (the `task` field is `Some` on the items):
+    /// the span resolver must leave it to the read-only fallback (no splicable
+    /// entry for the list, but the surrounding blocks can still splice).
+    #[test]
+    fn task_lists_are_not_splicable() {
+        let body = "# T\n\n- [ ] todo\n- [x] done";
+        let doc = parse(body);
+        let edits = splicible_root_blocks(&doc, body);
+        assert!(edits
+            .iter()
+            .all(|e| !matches!(&e.kind, BlockKind::List { .. })));
+        // The heading is still splicable.
+        assert!(edits
+            .iter()
+            .any(|e| matches!(&e.kind, BlockKind::Heading(1))));
+    }
+
+    /// A *loose* list (a paragraph per item, with a blank line between items)
+    /// is not simple — it stays in the read-only fallback.
+    #[test]
+    fn loose_lists_are_not_splicable() {
+        let body = "# T\n\n- one\n\n- two";
+        let doc = parse(body);
+        let edits = splicible_root_blocks(&doc, body);
+        assert!(edits
+            .iter()
+            .all(|e| !matches!(&e.kind, BlockKind::List { .. })));
+    }
+
+    /// Empty content in a list edit de-serializes to nothing (no phantom
+    /// empty bullets).
+    #[test]
+    fn list_edit_empty_text_serializes_to_empty() {
+        assert_eq!(
+            serialize_block(
+                &BlockKind::List {
+                    ordered: false,
+                    start: 1,
+                    bullet_char: '-',
+                },
+                "",
+            ),
+            ""
+        );
+        assert_eq!(
+            serialize_block(
+                &BlockKind::List {
+                    ordered: true,
+                    start: 2,
+                    bullet_char: ' ',
+                },
+                "",
+            ),
+            ""
+        );
+    }
+
+    /// §8.6 identity round-trip: a multi-item list where the *first* item
+    /// has no markers and the second carries a link survives a round trip.
+    /// This guards against a list being silently re-numbered or re-ordered.
+    #[test]
+    fn ordered_list_preserves_original_start() {
+        let body = "3. first\n4. second";
+        let doc = parse(body);
+        let list = splicible_root_blocks(&doc, body)
+            .into_iter()
+            .find(|e| {
+                matches!(
+                    &e.kind,
+                    BlockKind::List {
+                        ordered: true,
+                        start: 3,
+                        ..
+                    }
+                )
+            })
+            .expect("a splicable ordered list starting at 3");
+        assert_eq!(splice(body, &list), body);
+    }
+
     /// Toggle stability (§8.6): parsing → serializing → re-parsing a splicable
     /// block yields the same plain content, so Formated ⇄ Raw ⇄ Formatted with
     /// no edits is stable.
     #[test]
     fn reserialize_is_stable() {
-        let body = "# T\n\npara with **style**";
+        let body = "# T\n\npara with **style**\n\n- a\n- b";
         let doc = parse(body);
         for edit in splicible_root_blocks(&doc, body) {
             let re = serialize_block(&edit.kind, &edit.plain_text);

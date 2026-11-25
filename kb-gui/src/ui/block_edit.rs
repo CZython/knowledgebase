@@ -105,6 +105,9 @@ pub fn paint(ui: &mut egui::Ui, app: &mut App, page: &OpenPageState) {
             md::Block::Heading { .. } | md::Block::Paragraph { .. } | md::Block::Code { .. } => {
                 block.range(&md_body).is_some()
             }
+            md::Block::List { .. } => {
+                super::splice::tight_list_span_for(&doc, &md_body, idx).is_some()
+            }
             _ => false,
         };
         if !splicable {
@@ -220,6 +223,19 @@ fn paint_widget(ui: &mut egui::Ui, text: &mut String, edit: &BlockEdit) {
             );
             ui.add_space(10.0);
         }
+        super::splice::BlockKind::List { .. } => {
+            // A whole simple list is one multiline field: the marker-less item
+            // texts, one per line. Enter adds a new line (a new list item),
+            // ↑/↓ move the caret between lines — the plain-text field gives
+            // both for free (PLAN-GUI §8 WYSIWYG list editing).
+            ui.add(
+                egui::TextEdit::multiline(text)
+                    .hint_text("list item, one per line — Enter for a new item")
+                    .desired_width(f32::INFINITY)
+                    .desired_rows(1),
+            );
+            ui.add_space(8.0);
+        }
     }
 }
 
@@ -331,6 +347,44 @@ mod tests {
         let (frame, rest) = split_frontmatter(body);
         assert_eq!(frame, "---\nkey: value\n---\n");
         assert_eq!(rest, "# first heading\n");
+    }
+
+    /// A mixed document (splicable + a simple list) must paint without
+    /// panicking, with the simple list editable (in scope) and the block
+    /// interleaving preserved.
+    #[test]
+    fn paint_list_editable_in_mixed_doc() {
+        let (mut app, page) = app_page("# T\n\npara\n\n- a\n- b\n\n> q\n");
+        egui::__run_test_ui(|ui| {
+            ui.vertical(|ui| {
+                paint(ui, &mut app, &page);
+            });
+        });
+    }
+
+    /// Editing a list's plain text commits a span-isolated splice: the list
+    /// lines change, the surrounding blocks (heading, paragraph, quote) are
+    /// byte-identical, and the page is marked unsaved.
+    #[test]
+    fn list_edit_commits_span_isolated() {
+        let mut app = app_with_body("- one\n- two\n\ntail\n");
+        let (prefix, md_body) = split_frontmatter("- one\n- two\n\ntail\n");
+        let doc = md::parse(&md_body);
+        let edit = splicible_root_blocks(&doc, &md_body)
+            .into_iter()
+            .find(|e| matches!(e.kind, BlockKind::List { .. }))
+            .expect("a list");
+        // The Enter-new-line flow: a new (blank-at-commit) item was typed.
+        commit(&mut app, &prefix, &md_body, &edit, "one\nthree-new");
+        assert_eq!(
+            app.state()
+                .open_page
+                .as_ref()
+                .expect("page")
+                .body
+                .as_deref(),
+            Some("- one\n- three-new\n\ntail\n")
+        );
     }
 
     /// Typing into a heading widget commits a span-isolated splice: the heading
