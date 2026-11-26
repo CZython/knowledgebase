@@ -12,7 +12,7 @@ use crate::*;
 ///     "no page found" and "ambiguous (extend the prefix)", respectively.
 ///   * a relative / partial path — matched by exact or by `LIKE '%target'`
 ///     (trailing-fragment lookup, mirroring the old `OR abs_path LIKE` clause)
-fn resolve_target_path(
+pub(crate) fn resolve_target_path(
     db: &Db,
     target: &str,
 ) -> Result<Option<String>, (String, i32)> {

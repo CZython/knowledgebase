@@ -32,6 +32,12 @@ pub(crate) struct SearchRow {
     /// time with `uuid_short_for`. The *displayed* token in the human search
     /// output table; `uuid` itself stays the exact stored token in JSON.
     pub(crate) uuid_short:Option<String>,
+    /// True when the frontmatter carries `mcp_hidden: true` (MCP.md).
+    /// The CLI surface *ignores* this flag (the page shows up in
+    /// `kb search` / `kb browse` / `kb tags` as usual); the T2 MCP read
+    /// server drops rows where this is true so the agent can't learn
+    /// the page exists. Bound from `pages.mcp_hidden` (`'1'`/`NULL`).
+    pub(crate) mcp_hidden: bool,
 }
 
 
@@ -158,10 +164,14 @@ fn build_search_sql(
         Some(idx) => format!("fts_score({fts_cols}, ?{idx}) AS score"),
         None => "NULL AS score".to_string(),
     };
+    // `pages.mcp_hidden` is the T2 opt-out (MCP.md invariant 1). The CLI
+    // surface ignores it — the MCP server post-filters on it. We expose
+    // it through `SearchRow::mcp_hidden` so that the MCP `search` tool
+    // (Slice 5) can drop hidden rows without a second `SELECT` round-trip.
     let select_sql = format!(
         "SELECT pages.abs_path, pages.id, pages.type,\n\
           pages.title, pages.description, pages.root, pages.rel_path,\n\
-          pages.{gate}, {score_expr}, pages.uuid\n",
+          pages.{gate}, {score_expr}, pages.uuid, pages.mcp_hidden\n",
         gate = GATE_COL
     );
     let mut sql = String::new();
@@ -333,6 +343,10 @@ pub(crate) fn search_rows(
             let phrase  = r.get::<_, Option<String>>(7)?;
             let score   = r.get::<_, Option<f64>>(8)?;
             let uuid    = r.get::<_, Option<String>>(9)?.unwrap_or_default();
+            // `'1'` means hidden (NULL / other = not hidden). The `NULL`
+            // case (pre-migration DB row) defaults to not-hidden, matching
+            // the "new column, no data yet" contract.
+            let mcp_hidden = matches!(r.get::<_, Option<String>>(10)?, Some(ref v) if v == "1");
             let uuid_short = if uuid.is_empty() {
                 None
             } else {
@@ -350,6 +364,7 @@ pub(crate) fn search_rows(
                 root, rel_path: rel,
                 search_required_phrase: phrase, score,
                 uuid, uuid_short,
+                mcp_hidden,
             })
         })
         .map_err(|e| (format!("search query: {e}"), EXIT_ERR))?

@@ -50,6 +50,12 @@ pub struct PageRecord {
     /// Gate entries verbatim ('\n'-joined) — quotes **retained**; this is
     /// the display/FM view (PLAN §8 page.search_required_phrase).
     pub search_required_phrase_verbatim: Option<String>,
+    /// True when the frontmatter carries `mcp_hidden: true` (MCP.md — the
+    /// per-page opt-out for the T2 MCP server). The MCP read server drops
+    /// the row entirely; the CLI surface is unaffected. Stored in
+    /// `pages.mcp_hidden` as `'1'`/`NULL` (the schema convention for
+    /// optional `TEXT` columns; `NULL` is the "not hidden" case).
+    pub mcp_hidden: bool,
     pub frontmatter_text: Option<String>,
     pub body: String,
     pub mtime_ns: i64,
@@ -282,6 +288,7 @@ pub fn build_page(
         language,
         description,
         search_required_phrase_verbatim,
+        mcp_hidden: fm.mcp_hidden,
         frontmatter_text: if fm.frontmatter_text.is_empty() {
             None
         } else {
@@ -398,37 +405,39 @@ pub fn upsert_page(db: &Db, rec: &PageRecord) -> Result<usize> {
     //    /UPDATE) keeps `idx_pages_fts` in sync — we do not touch it directly.
     let now = now_iso8601();
     let gate = super::migrate::COL_SEARCH_REQUIRED_PHRASE;
+    let mcp_hidden = super::migrate::COL_MCP_HIDDEN;
     let res = tx.execute(
         format!(
             r#"
          INSERT INTO pages (
            abs_path, id, type, root, rel_path, title, language,
-            description, {gate}, frontmatter_text, body,
+            description, {gate}, {mcp_hidden}, frontmatter_text, body,
             mtime_ns, content_hash, uuid, created_at, updated_at
-          ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?15)
-          ON CONFLICT (abs_path) DO UPDATE SET
-            id = excluded.id,
-            type = excluded.type,
-            -- `root`/`rel_path` are the page's *ownership* (which registered
-            -- root it sits under), owned by `refresh`'s walk — not by
-            -- frontmatter. A caller that re-indexes a single page without
-            -- knowing its root/rel (the TUI `commit_edit` pass, which only
-            -- re-derives the frontmatter columns) passes `""` as a
-            -- "keep existing" sentinel; preserve the row's current value in
-            -- that case. `refresh`/`create` always pass non-empty values, so
-            -- they win as before.
-            root = COALESCE(NULLIF(excluded.root, ''), root),
-            rel_path = COALESCE(NULLIF(excluded.rel_path, ''), rel_path),
-           title = excluded.title,
-           language = excluded.language,
-           description = excluded.description,
-           {gate} = excluded.{gate},
-           frontmatter_text = excluded.frontmatter_text,
-           body = excluded.body,
-            mtime_ns = excluded.mtime_ns,
-            content_hash = excluded.content_hash,
-            uuid = excluded.uuid,
-            updated_at = excluded.updated_at
+         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?16)
+         ON CONFLICT (abs_path) DO UPDATE SET
+           id = excluded.id,
+           type = excluded.type,
+           -- `root`/`rel_path` are the page's *ownership* (which registered
+           -- root it sits under), owned by `refresh`'s walk — not by
+           -- frontmatter. A caller that re-indexes a single page without
+           -- knowing its root/rel (the TUI `commit_edit` pass, which only
+           -- re-derives the frontmatter columns) passes `""` as a
+           -- "keep existing" sentinel; preserve the row's current value in
+           -- that case. `refresh`/`create` always pass non-empty values, so
+           -- they win as before.
+           root = COALESCE(NULLIF(excluded.root, ''), root),
+           rel_path = COALESCE(NULLIF(excluded.rel_path, ''), rel_path),
+          title = excluded.title,
+          language = excluded.language,
+          description = excluded.description,
+          {gate} = excluded.{gate},
+          {mcp_hidden} = excluded.{mcp_hidden},
+          frontmatter_text = excluded.frontmatter_text,
+          body = excluded.body,
+           mtime_ns = excluded.mtime_ns,
+           content_hash = excluded.content_hash,
+           uuid = excluded.uuid,
+           updated_at = excluded.updated_at
          "#
         ),
         params![
@@ -441,6 +450,7 @@ pub fn upsert_page(db: &Db, rec: &PageRecord) -> Result<usize> {
             rec.language,
             rec.description,
             rec.search_required_phrase_verbatim,
+            rec.mcp_hidden.then_some("1"),
             rec.frontmatter_text,
             rec.body,
             { rec.mtime_ns },
