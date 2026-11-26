@@ -95,19 +95,19 @@ impl Frontmatter {
     /// A *no-frontmatter* page: nothing to index by frontmatter, `body`
     /// is the whole file, `page_type` is `None`.
     pub fn none(text: &str) -> Self {
-    Frontmatter {
-        page_type: None,
-        unknown_type_present: false,
-        type_raw: None,
-        title: None,
-        description: None,
-        description_too_long: false,
-        tags: Vec::new(),
-        search_required_phrase: Vec::new(),
-        mcp_hidden: false,
-        frontmatter_text: String::new(),
-        body: text.to_string(),
-    }
+        Frontmatter {
+            page_type: None,
+            unknown_type_present: false,
+            type_raw: None,
+            title: None,
+            description: None,
+            description_too_long: false,
+            tags: Vec::new(),
+            search_required_phrase: Vec::new(),
+            mcp_hidden: false,
+            frontmatter_text: String::new(),
+            body: text.to_string(),
+        }
     }
 
     /// A page is indexable **iff** its `type:` resolved to one of the three
