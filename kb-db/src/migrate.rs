@@ -27,6 +27,16 @@ pub const SCHEMA_VERSION: &str = "3";
 /// and this one const, and every query follows automatically. (The DDL in
 /// `SCHEMA_SQL` stays a literal: it is the definition site.)
 pub const COL_SEARCH_REQUIRED_PHRASE: &str = "search_required_phrase";
+/// The `pages.mcp_hidden` column: `NULL` when not hidden, `'1'` when
+/// `mcp_hidden: true` is set in the page's frontmatter. The MCP read
+/// server (T2) drops rows where this is set, so the agent cannot learn
+/// the page exists; the CLI surface is unaffected (the CLI does not
+/// read this column; `kb search` / `kb browse` / `kb show` etc. show
+/// the page exactly as before). Storing `'1'` (not `0`/`1` INTEGERs)
+/// follows the existing schema convention of optional `TEXT` columns
+/// (e.g. `search_required_phrase`), which the reconcile adds via
+/// `ALTER TABLE … ADD COLUMN {col} TEXT`.
+pub const COL_MCP_HIDDEN: &str = "mcp_hidden";
 
 /// The complete v0 schema (PLAN §8). Idempotent.
 const SCHEMA_SQL: &str = r#"
@@ -48,6 +58,7 @@ CREATE TABLE IF NOT EXISTS pages (
   language         TEXT,
   description      TEXT,
   search_required_phrase TEXT,
+  mcp_hidden TEXT,
   frontmatter_text TEXT,
   body             TEXT,
    mtime_ns         INTEGER NOT NULL,
@@ -182,6 +193,7 @@ const PAGES_COLUMNS: &[&str] = &[
     "language",
     "description",
     "search_required_phrase",
+    "mcp_hidden",
     "frontmatter_text",
     "body",
     "mtime_ns",

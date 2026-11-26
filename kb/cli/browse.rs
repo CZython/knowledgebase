@@ -1,16 +1,17 @@
 use crate::*;
 
-/// A `kb browse` row: the eight display columns of a `pages` row (the 8th is
-/// the stored `uuid`, optional for a not-yet-backfilled row). (Named so the
-/// local binding below stays readable without inlining the tuple type.)
-pub(crate) type BrowseRow = (String, String, String, Option<String>, String, String, Option<String>, Option<String>);
+/// A `kb browse` row: the nine display columns of a `pages` row. Position
+/// 7 (0-based) is the stored `uuid` (optional for a not-yet-backfilled row);
+/// position 8 is the T2 opt-out flag `mcp_hidden` (`'1'`/`NULL`; the CLI
+/// surface *ignores* it — the T2 read server drops the row; see `SearchRow::mcp_hidden`).
+pub(crate) type BrowseRow = (String, String, String, Option<String>, String, String, Option<String>, Option<String>, Option<String>);
 
 /// Fetch the pages a `kb browse` will display (A2 extraction from
 /// `cmd_browse`): optional `--path`-prefix filter (`LIKE 'prefix/%'` or exact
 /// match), ordered `abs_path` when a filter is present and by `root, rel_path`
 /// otherwise. Keeping the two `prepare` sites in one function makes the
 /// "only `pages`, ordered deterministically" contract greppable.
-fn fetch_browse_pages(
+pub(crate) fn fetch_browse_pages(
     db: &Db,
     filter_prefix: Option<&str>,
 ) -> Result<Vec<BrowseRow>, (String, i32)> {
@@ -24,13 +25,15 @@ fn fetch_browse_pages(
             r.get::<_, String>(5)?,
             r.get::<_, Option<String>>(6)?,
             r.get::<_, Option<String>>(7)?,
+            r.get::<_, Option<String>>(8)?,
         ))
     };
+    let mcp_hidden = HIDDEN_COL;
     Ok(match filter_prefix {
         Some(prefix) => {
             let like = format!("{prefix}/%");
             let browslike = format!(
-                "SELECT abs_path, id, type, title, root, rel_path, {gate}, uuid\n\
+                "SELECT abs_path, id, type, title, root, rel_path, {gate}, uuid, {mcp_hidden}\n\
                 FROM pages\n\
                 WHERE abs_path LIKE ?1 OR abs_path = ?2\n\
                 ORDER BY abs_path",
@@ -48,7 +51,7 @@ fn fetch_browse_pages(
         }
         None => {
             let browseall = format!(
-                "SELECT abs_path, id, type, title, root, rel_path, {gate}, uuid\n\
+                "SELECT abs_path, id, type, title, root, rel_path, {gate}, uuid, {mcp_hidden}\n\
                 FROM pages\n\
                 ORDER BY root, rel_path",
                 gate = GATE_COL
@@ -74,7 +77,7 @@ fn fetch_browse_pages(
 fn render_browse(db: &Db, pages: &[BrowseRow], json: bool) -> i32 {
     if json {
         let mut items = Vec::new();
-        for (abs_path, id, pt, title, _root, rel_path, search_required_phrase, uuid) in pages.iter() {
+        for (abs_path, id, pt, title, _root, rel_path, search_required_phrase, uuid, _mcp_hidden) in pages.iter() {
             let tags: Vec<String> = page_tags_str(db, abs_path).split(',')
                 .filter(|s| !s.trim().is_empty()).map(|s| s.trim().to_string()).collect();
             let refs = if pt == "label" { Some(label_expand(db, abs_path)) } else { None };
@@ -103,7 +106,7 @@ fn render_browse(db: &Db, pages: &[BrowseRow], json: bool) -> i32 {
         return EXIT_OK;
     }
 
-    for (i, (abs_path, id, pt, title, _root, rel_path, search_required_phrase, uuid)) in pages.iter().enumerate() {
+    for (i, (abs_path, id, pt, title, _root, rel_path, search_required_phrase, uuid, _mcp_hidden)) in pages.iter().enumerate() {
         let tags = page_tags_str(db, abs_path);
         let link_count = page_link_count(db, abs_path);
         let gate_str = search_required_phrase.as_deref().unwrap_or("");

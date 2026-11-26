@@ -51,12 +51,25 @@ use kb_db::Db;
 // D2: the gate-phrase column name now comes from one owner (kb-db), not a
 // hand-typed literal at each query site.
 use kb_db::migrate::COL_SEARCH_REQUIRED_PHRASE as GATE_COL;
+// Same pattern for the T2 opt-out column (MCP.md invariant 1): one owner
+// (kb-db), alias used in the read-verb SQL.
+use kb_db::migrate::COL_MCP_HIDDEN as HIDDEN_COL;
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 
 mod cli;
 use crate::cli::*;
 
+/// `kb mcp` — the MCP server surface (MCP.md). Gated on the `mcp` feature,
+/// which is **off by default** in `kb-hardened` and **absent** from
+/// `kb-user` (locked requirement #3: compile-time absent, not hidden).
+///
+/// The whole module is `#[cfg(feature = "mcp")]`-compiled out when the
+/// feature is off, so a default hardened build carries zero MCP code +
+/// zero `serde_json` link. `mcp-writes` (off by default) adds the
+/// write-tool surface on top of the read surface (MCP.md decision #2).
+#[cfg(feature = "mcp")]
+mod mcp;
 
 pub(crate) const EXIT_OK: i32 = 0;
 pub(crate) const EXIT_ERR: i32 = 1;
@@ -547,6 +560,29 @@ pub(crate) enum Cmd {
         #[arg(long)]
         list_palettes: bool,
     },
+    /// `kb mcp serve` — the stdio JSON-RPC MCP server (MCP.md).
+    ///
+    /// **Hidden surface** (locked requirement #4): `#[command(hide = true)]`
+    /// keeps it absent from `--help` and from `clap_complete`'s generated
+    /// script (which is built from this very command via `cli_command()`).
+    ///
+    /// **kb-hardened only** (locked requirement #3): the whole variant is
+    /// `#[cfg(feature = "mcp")]`-compiled out — the feature does not exist
+    /// in `kb-user/Cargo.toml`, so `kb-user` (the `kb` binary) has no
+    /// `mcp` subcommand at all, and a default hardened build (feature off)
+    /// reports `kb-hardened mcp` as `unrecognized subcommand` (clap exit 2),
+    /// mirroring the `tui` / `edit` gates above.
+    ///
+    /// `serve` is the only form: a local, single-process stdio server. The
+    /// DB path comes from the global `--db` flag (or `KB_DB`, or the
+    /// default data dir) — there is no per-call `db` arg on the wire.
+    #[cfg(feature = "mcp")]
+    #[command(hide = true)]
+    Mcp {
+        #[command(subcommand)]
+        op: McpOp,
+    },
+
     /// Generate a shell completion script for <shell> (`bash` | `zsh`).
     ///
     /// Self-contained: `kb complete <shell>` prints a completion script for
@@ -660,6 +696,24 @@ pub(crate) enum SectionOp {
     },
 }
 
+/// The `mcp` subcommand's operations. `serve` is the only one: a local,
+/// single-process stdio JSON-RPC server (MCP.md "Why MCP, why stdio").
+/// There is deliberately *no* `list-tools` / `dump` here — the tool list is
+/// exposed over the wire via `tools/list`, not as a CLI verb (locked
+/// requirement: the MCP surface is the agent's, not a second CLI namespace).
+///
+/// The DB path is the global `--db` value (`Option<&Path>` from
+/// `cli.db`), else `KB_DB`, else the default data dir — resolved in
+/// `mcp::serve` (not here), so the subcommand takes no positional args and
+/// stays hidden in `--help`.
+#[cfg(feature = "mcp")]
+#[derive(Subcommand)]
+pub(crate) enum McpOp {
+    /// Read JSON-RPC 2.0 frames from stdin and write responses to stdout.
+    /// Every log goes to stderr (stdout is sacred to the protocol).
+    Serve,
+}
+
 pub(crate) fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
     // Bare-string dispatch (PLAN §11). When exactly one non-flag argument is
@@ -695,6 +749,14 @@ pub(crate) fn main() {
         "tui",
         "create",
         "verify",
+        // `mcp` is the hidden server surface (MCP.md). It exists only when
+        // the `mcp` feature is on (kb-hardened with the feature enabled);
+        // listing it here unconditionally mirrors the `tui`/`edit`
+        // treatment: in the build where the variant is `cfg`-compiled out,
+        // clap rejects the subcommand itself (`unrecognized subcommand`,
+        // exit 2) rather than the bare-token shortcut falling through to a
+        // stray "0 results" search.
+        "mcp",
         // `complete` is only present when the `completions` feature is on
         // (ON by default in `kb-user`; OFF in `kb-hardened`). Listing it
         // unconditionally mirrors the `tui`/`edit` entries: in the hardened
@@ -899,6 +961,11 @@ pub(crate) fn run(cli: &Cli) -> i32 {
         #[allow(unused_variables)]
         #[cfg(feature = "completions")]
         Cmd::Complete { shell, file } => cmd_complete(shell, file.as_deref()),
+        // `kb mcp serve` (MCP.md) — the stdio JSON-RPC server. `hide = true`
+        // keeps it out of `--help`/completions; the `mcp` feature compiles
+        // this arm (and the whole `mcp` module) out of `kb-user`.
+        #[cfg(feature = "mcp")]
+        Cmd::Mcp { .. } => mcp::serve(cli.db.as_deref()),
         Cmd::Cron { json } => {
             let bin = std::env::current_exe()
                 .map(|p| p.display().to_string())

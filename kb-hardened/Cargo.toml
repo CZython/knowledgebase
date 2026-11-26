@@ -39,6 +39,19 @@ tui = ["dep:ratatui", "dep:crossterm", "dep:unicode-width", "dep:serde", "dep:to
 # (headless/agent builds don't complete shells); toggling it on pulls in
 # `clap_complete` and compiles the `Complete` verb.
 completions = ["dep:clap_complete"]
+# `kb mcp serve` (MCP.md). A stdio JSON-RPC server over the same DB / SQL as
+# every other verb, hidden from `--help` and completions. OFF by default
+# — the default hardened build is read-only and carries the mcp surface
+# only if the owner opts in. `serde_json` (and `serde` which it pulls in)
+# are pure-Rust, no socket: the no-network gate (gate.sh stage 7) asserts
+# the `NEEDED` + dynsym properties on every build, so enabling `mcp` can
+# never quietly drag a network stack into the binary.
+mcp = ["dep:serde_json"]
+# The write half of the MCP surface (create / section_* / replace / patch).
+# Off by default = the default hardened MCP server is read-only (MCP.md
+# decision #2 recommendation). Implies `mcp` so a build can never enable
+# writes without the read surface they ride on.
+mcp-writes = ["mcp"]
 
 [[bin]]
 name = "kb-hardened"
@@ -65,3 +78,8 @@ unicode-width = { workspace = true, optional = true }
 # hardened build never links them — mirrors `kb-user` exactly.
 serde = { workspace = true, optional = true }
 toml  = { workspace = true, optional = true }
+# MCP (see `mcp` / `mcp-writes` features above). `serde_json` is pure
+# Rust — the no-network gate (gate.sh) asserts it never grows a socket
+# family and that the hardened binary's NEEDED still lists only the
+# four core libs.
+serde_json = { workspace = true, optional = true }

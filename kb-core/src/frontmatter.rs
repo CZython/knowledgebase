@@ -73,6 +73,15 @@ pub struct Frontmatter {
     /// A page with one or more entries is *gated*: hidden from general
     /// search until a query's FTS text contains any one entry (M3 gate).
     pub search_required_phrase: Vec<String>,
+    /// True when the frontmatter carries `mcp_hidden: true` (a one-word
+    /// opt-out for a single MCP session — see MCP.md locked invariant 1).
+    /// The page is then hidden from every MCP read tool: search/browses/
+    /// show return it as if it never existed (indistinguishable from a
+    /// missing page). The CLI surface is unaffected — this is an
+    /// MCP-session flag, not a user-level field — so the page still shows
+    /// up in `kb search`, `kb browse`, `kb tags`, and every other CLI verb
+    /// exactly as before.
+    pub mcp_hidden: bool,
     /// The raw frontmatter block (between the two `---` delimiters), newlines
     /// preserved. Stored for the FTS `frontmatter_text` column (§8).
     pub frontmatter_text: String,
@@ -86,18 +95,19 @@ impl Frontmatter {
     /// A *no-frontmatter* page: nothing to index by frontmatter, `body`
     /// is the whole file, `page_type` is `None`.
     pub fn none(text: &str) -> Self {
-        Frontmatter {
-            page_type: None,
-            unknown_type_present: false,
-            type_raw: None,
-            title: None,
-            description: None,
-            description_too_long: false,
-            tags: Vec::new(),
-            search_required_phrase: Vec::new(),
-            frontmatter_text: String::new(),
-            body: text.to_string(),
-        }
+    Frontmatter {
+        page_type: None,
+        unknown_type_present: false,
+        type_raw: None,
+        title: None,
+        description: None,
+        description_too_long: false,
+        tags: Vec::new(),
+        search_required_phrase: Vec::new(),
+        mcp_hidden: false,
+        frontmatter_text: String::new(),
+        body: text.to_string(),
+    }
     }
 
     /// A page is indexable **iff** its `type:` resolved to one of the three
@@ -178,6 +188,7 @@ pub fn parse(text: &str) -> Frontmatter {
         description_too_long: false,
         tags: Vec::new(),
         search_required_phrase: Vec::new(),
+        mcp_hidden: false,
         // Filled in after we're done reading `fm_lines` (which borrows `raw`).
         frontmatter_text: String::new(),
         body,
@@ -324,6 +335,15 @@ fn apply_key(fm: &mut Frontmatter, key: &str, kind: KeyKind, items: Vec<String>)
                 }
             }
             fm.search_required_phrase = out;
+        }
+        ("mcp_hidden", KeyKind::Scalar) => {
+            // One-word opt-out for a single MCP session (MCP.md locked
+            // invariant 1). Accepts the common boolean spellings the YAML
+            // subset would carry: `true` / `1` / `yes` (case-insensitive).
+            // `false`, `0`, `no`, the empty string, or missing => not hidden.
+            let v = items.first().cloned().unwrap_or_default();
+            let v = v.trim().to_ascii_lowercase();
+            fm.mcp_hidden = matches!(v.as_str(), "true" | "1" | "yes");
         }
         _ => {
             // Unknown key — ignored. Lenient.
@@ -1153,6 +1173,33 @@ mod tests {
         assert!(p.description.is_some());
         assert!(p.is_indexable());
         assert_eq!(p.tags, vec!["llm", "attention"]);
+    }
+
+    // ---- mcp_hidden: one-word opt-out (MCP.md invariant 1) --------------
+    #[test]
+    fn mcp_hidden_true_variants() {
+        for v in ["true", "1", "yes", "True", "TRUE"] {
+            let fm_str = format!("type: wiki\nmcp_hidden: {v}");
+            let p = page(&fm_str, "body");
+            assert!(p.mcp_hidden, "mcp_hidden: {v:?} should be hidden");
+        }
+    }
+
+    #[test]
+    fn mcp_hidden_false_variants() {
+        for v in ["false", "0", "no", ""] {
+            let p = page("type: wiki\nmcp_hidden: {v}", "body");
+            assert!(!p.mcp_hidden, "mcp_hidden: {v:?} should NOT be hidden");
+        }
+    }
+
+    #[test]
+    fn mcp_hidden_absent_defaults_false() {
+        let p = page("type: wiki\nmcp_hidden: true", "body");
+        assert!(p.mcp_hidden);
+        // Absent (no key at all) must default to false — the common case.
+        let p = page("type: wiki", "body");
+        assert!(!p.mcp_hidden);
     }
 
     // ---- trailing comment: scalar values survive inline `#` -------------

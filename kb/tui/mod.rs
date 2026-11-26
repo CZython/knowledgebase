@@ -6922,6 +6922,7 @@ mod tests {
                 score: Some(1.5),
                 uuid: "aaaaaa0000000001".into(),
                 uuid_short: Some("aaaaa".into()),
+                mcp_hidden: false,
             },
             SearchRow {
                 abs_path: "/y.md".into(),
@@ -6935,6 +6936,7 @@ mod tests {
                 score: None,
                 uuid: "aaaaaa0000000002".into(),
                 uuid_short: Some("aaaaab".into()),
+                mcp_hidden: false,
             },
         ];
 

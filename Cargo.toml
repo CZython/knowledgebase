@@ -30,7 +30,12 @@ unsafe_code = "forbid"
 # warn about the unknown cfg otherwise. Mirrors the scaffold the Verus
 # toolchain generates (see `cargo verus new --lib out`). Required in the
 # workspace so kb-core's `[lints.rust]` can inherit it via `workspace = true`.
-unexpected_cfgs = { level = "warn", check-cfg = ['cfg(verus_only)'] }
+# `mcp` / `mcp-writes` are feature-gated in kb-hardened only (off by default);
+# listing them here so kb-user, kb-gui, and every other member compile the
+# shared body (`kb/main.rs`) cleanly — a member that does not enable the
+# feature still must not get an `unexpected_cfgs` warning for the `cfg`
+# literal it sees in the included source.
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(verus_only)', 'cfg(feature, values("mcp"))', 'cfg(feature, values("mcp-writes"))'] }
 
 [workspace.package]
 version = "0.1.0"
@@ -108,6 +113,11 @@ unicode-width = "0.2"
 # never pulls them into its dep tree.
 serde = { version = "1", features = ["derive"] }
 toml  = "0.8"
+# MCP (kb-hardened only, off by default): JSON value types for the
+# JSON-RPC loop. `serde_json` is pure Rust — it never links a socket
+# family (no `NEEDED libssl`/`libcurl`/`libresolv`, no `socket(2)` in
+# dynsym). The no-network gate in gate.sh re-proves this on every build.
+serde_json = "1"
 
 # --- GUI (kb-gui only) ---
 # eframe/egui desktop, native (no webview: PLAN-GUI §4). G0 pins the exact
