@@ -42,15 +42,20 @@ pass "cargo build -p kb-user   -> kb"
 cargo build -p kb-hardened
 pass "cargo build -p kb-hardened -> kb-hardened"
 
-# ---- (3) clippy: all targets, all members, -D warnings --------------------
-# Also clippy the `mcp` feature build (the MCP slice 1 surface only compiles
-# with `--features mcp`; default features gate it out, so the plain
-# `--workspace` pass above never sees that code).
-run "3/8 clippy --workspace --all-targets -- -D warnings"
+# ---- (3) fmt + clippy: all targets, all members, -D warnings --------------
+# `cargo fmt --all -- --check` mirrors the CI build-and-test stage 3a gate;
+# clippy the whole workspace AND the `mcp` feature build (the MCP slice 1
+# surface only compiles with `--features mcp`; default features gate it out,
+# so the plain `--workspace` pass never sees that code).
+run "3/8 fmt + clippy --workspace --all-targets -- -D warnings"
+cargo fmt --all -- --check
+pass "fmt (all targets, 0 diffs)"
 cargo clippy --workspace --all-targets -- -D warnings
 pass "clippy (0 warnings, 4/4 crates)"
 cargo clippy -p kb-hardened --features mcp --all-targets -- -D warnings
 pass "clippy -p kb-hardened --features mcp (0 warnings)"
+cargo clippy -p kb-hardened --features mcp,mcp-writes --all-targets -- -D warnings
+pass "clippy -p kb-hardened --features mcp,mcp-writes (0 warnings)"
 
 # ---- (4) tests: every suite, workspace-wide --------------------------------
 run "4/8 tests — cargo test --workspace"
