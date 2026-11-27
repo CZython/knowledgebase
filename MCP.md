@@ -267,6 +267,11 @@ gate.sh  (new stage)
 
 # It works
 ./kb-hardened mcp serve < mcp_fixture.json # serves; stderr-only logs
+# (in-process equivalent, no fixture file: the wire round-trip)
+cargo test -p kb-hardened e2e_initialize_list_create_and_read_back
+#   drives initialize → tools/list → tools/call kb_create (the write
+#   subprocess path) → kb_show read-back through dispatch, and asserts
+#   the create report carries a uuid and no structural path key.
 
 # No network
 cargo tree -p kb-hardened --features mcp \

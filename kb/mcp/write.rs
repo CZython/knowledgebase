@@ -445,4 +445,68 @@ mod tests {
             "alias mapping missing from list: {s}"
         );
     }
+
+    // ── slice 7: the wire-level e2e round-trip ─────────────────────────
+    // Existing tests call the handlers directly (t_section_set, …), which
+    // proves the handler logic but skips the JSON-RPC wire layer — the
+    // part that actually carries frames over stdio in production. This test
+    // drives real frames through `dispatch` (the function `serve` calls
+    // per line), exercising initialize → tools/list → tools/call (a write
+    // that lands via the subprocess verb path) → read-back, in one session.
+    // It is the closest in-process equivalent of `mcp serve < fixture.json`
+    // without the strace harness; the no-network gate (d) is the syscall
+    // proof, this is the *does-it-work* proof.
+
+    /// Send one frame through `dispatch` and parse the JSON-RPC response.
+    fn frame(db: &Db, payload: &str) -> Value {
+        let resp = crate::mcp::tools::dispatch(payload, db);
+        serde_json::from_str(&resp).expect("dispatch returned non-JSON")
+    }
+
+    #[test]
+    fn e2e_initialize_list_create_and_read_back_over_the_wire() {
+        let (fix, db) = Fixture::new("e2e");
+        // (1) initialize — handshake shape must be stable.
+        let init = frame(&db, r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"e2e","version":"0"}}}"#);
+        assert_eq!(init.get("result").and_then(|r| r.get("protocolVersion")).and_then(|x| x.as_str()), Some("2024-11-05"));
+        assert_eq!(init.get("result").and_then(|r| r.get("serverInfo")).and_then(|r| r.get("name")).and_then(|x| x.as_str()), Some("kb"));
+        // (2) tools/list — the write surface is advertised.
+        let list = frame(&db, r#"{"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}"#);
+        let names: Vec<&str> = list["result"]["tools"].as_array().unwrap()
+            .iter().map(|t| t["name"].as_str().unwrap()).collect();
+        assert!(names.contains(&"kb_create"), "kb_create missing from tools/list: {names:?}");
+        assert!(names.contains(&"kb_browse"), "kb_browse missing from tools/list: {names:?}");
+        // (3) tools/call kb_create — the write lands through the subprocess verb.
+        let call = frame(&db, &format!(
+            r#"{{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{{"name":"kb_create","arguments":{{"name":"e2e-page","type":"note","path":"{}"}}}}}}"#,
+            fix.root.display()
+        ));
+        assert_eq!(call.get("result").and_then(|r| r.get("created")).and_then(|x| x.as_bool()), Some(true),
+            "kb_create did not report success: {call}");
+        // (4) the page actually landed on disk under the target directory.
+        let created = fix.root.join("e2e-page.md");
+        assert!(created.exists(), "expected {created:?} on disk after kb_create over the wire");
+        let body = std::fs::read_to_string(&created).unwrap();
+        assert!(body.contains("e2e-page"), "created page should carry its slug; got {body:?}");
+        // (5) read it back through kb_show over the wire (the index picked
+        //     it up; the show path resolves it back to its canonical abs).
+        let back = frame(&db, &format!(
+            r#"{{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{{"name":"kb_show","arguments":{{"file":"{}"}}}}}}"#,
+            created.display()
+        ));
+        assert!(back.to_string().contains("e2e-page"),
+            "kb_show did not return the created page: {back}");
+        // (6) invariant 4 over the wire: the *identity* is the uuid token
+        //     (the one stable address), and the response must not carry a
+        //     structural `root`/`abs_path`/`rel_path`/`file` page-identity
+        //     key. (The `diff` content blob may embed a path — that is
+        //     content-the-agent-asked-for and is preserved by design; the
+        //     structural keys are the sanitizer's job, unit-tested in
+        //     sanitizer.rs.)
+        let rep = &call["result"]["report"];
+        assert!(rep.get("uuid").and_then(|x| x.as_str()).ok_or("no uuid in create report").is_ok());
+        for k in ["root", "abs_path", "rel_path", "file", "path"] {
+            assert!(rep.get(k).is_none(), "create report leaked a structural path key '{k}': {rep}");
+        }
+    }
 }
