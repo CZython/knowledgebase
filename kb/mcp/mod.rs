@@ -36,9 +36,11 @@ use std::path::Path;
 ///
 /// # Feature gating
 /// The `serve` body is `#[cfg(feature = "mcp")]`-compiled out entirely on
-/// the `kb-user` default build. `mcp-writes` (off by default) is the knob
-/// that adds the write-only tools to the `tools/list` surface; when off,
-/// the server is strictly read-only (MCP.md locked requirements).
+/// the `kb-user` build (the feature does not exist there). In `kb-hardened`
+/// `mcp-writes` (hence `mcp`) is **on by default** — the full read + write
+/// surface ships. Compiling `kb-hardened` with `--no-default-features` is
+/// the only way to get a read-only server: compile-time only, no runtime
+/// flag (MCP.md open decision #2, resolved 2026-11-27).
 #[cfg(feature = "mcp")]
 pub(crate) fn serve(dbpath: Option<&Path>) -> crate::cli::error::Kb {
     match tools::serve(dbpath) {

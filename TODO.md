@@ -56,14 +56,15 @@ Spec: `PLAN-GUI.md`. Crate: new `kb-gui` in the workspace.
 
 Spec: `MCP.md`. Home: `kb-hardened`, hidden `kb mcp` subcommand, stdio JSON-RPC.
 
-- [ ] JSON-RPC over stdio skeleton inside `kb-hardened` (hand-rolled or minimal dep, no network)
-- [ ] `initialize` / `tools/list` / `tools/call` for the curated tool surface (MCP §"Tool surface")
-- [ ] Sanitizer chokepoint: `kb/mcp/sanitizer.rs`, no-path-escape + no-network properties with tests (§"The sanitizer")
-- [ ] Identity: uuid in, path never out (§"Identity")
-- [ ] Per-page opt-out honored: `mcp_hidden: true` frontmatter (§"Per-page opt-out")
-- [ ] Hidden subcommand: not in `--help`, documented as hidden (verification checklist §"The surface is hidden")
-- [ ] Verification checklist green: works, no network, escape property tests, build gate (§"Verification checklist")
-- [ ] Resolve open decisions (MCP §"Open decisions (blocked on the user)")
+- [x] JSON-RPC over stdio skeleton inside `kb-hardened` (hand-rolled, no network)
+- [x] `initialize` / `tools/list` / `tools/call` for the curated tool surface (MCP §"Tool surface")
+- [x] Sanitizer chokepoint: `kb/mcp/sanitizer.rs`, no-path-escape + no-network properties with tests (§"The sanitizer")
+- [x] Identity: uuid in, path never out (§"Identity")
+- [x] Per-page opt-out honored: `mcp_hidden: true` frontmatter (§"Per-page opt-out")
+- [x] Hidden subcommand: not in `--help`, documented as hidden (verification checklist §"The surface is hidden")
+- [x] Verification checklist green: works, no network, escape property tests, build gate (§"Verification checklist")
+- [x] Resolve open decisions — all six resolved 2026-11-27: scope 11 read + 7 write; writes ON by default in the hardened build; one-word `mcp_hidden` rule; `kb_roots` = count-only; `kb_resolve` = candidate list (agent picks); `mcp_hidden` as its own column on `pages` (cleaner for querying than reusing `page_gates`)
+  - Hiddenness decoupled from presence as its **own** feature (`mcp-hidden`, implies `mcp`): the surface always works in hardened builds; the flag only flips `hide` for `--help`/completions. `default = ["mcp-writes", "mcp-hidden"]` keeps today's posture (full surface, invisible in `--help`). A `--no-default-features --features mcp,mcp-writes` build is the same working surface, just *visible* in `--help` — the "I want to advertise it" case.
 
 ---
 

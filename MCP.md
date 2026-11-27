@@ -23,8 +23,11 @@ The hard invariants, in priority order:
 3. **No metadata escape.** Filesystem paths (root / rel_path / abs_path)
    and the owner's username do not reach the agent, *unless they are
    literally the page content the agent asked for.*
-4. **Hidden surface.** Absent from `--help` and completions; documented
-   only here (and one pointer line in the README).
+4. **Hidden by default.** The default hardened build leaves `mcp` absent
+   from `--help` and completions; documented only here (and one pointer
+   line in the README). Hiddenness is a *separate compile feature* from
+   presence (`mcp-hidden`) — the command works in every hardened build;
+   this invariant only fixes the default.
 
 ## Why MCP, why stdio, why now
 
@@ -55,10 +58,14 @@ socket library.
    feature is absent from `kb-user/Cargo.toml`, not merely off.
    (Same structural guarantee as "no TUI in hardened": compile-time
    absent, not runtime-hidden.)
-4. `kb-hardened --help` and `kb-hardened complete bash` do not list
-   `mcp`. The subcommand is `#[command(hide = true)]`. A human or agent
-   that types `kb-hardened mcp serve` gets the server; one that never
-   heard of it never sees it.
+4. `kb-hardened --help` and `kb-hardened complete bash` do **not** list
+   `mcp` in the default build. The subcommand reads
+   `#[command(hide = crate::MCP_HIDDEN)]`, where
+   `MCP_HIDDEN = cfg!(feature = "mcp-hidden")`. That is *presentation
+   only*: flipping `mcp-hidden` off leaves an identical, fully-working
+   surface that simply appears in `--help`. A human or agent that types
+   `kb-hardened mcp serve` gets the server; one that never heard of it
+   never sees it under the default build.
 
 ## Identity: uuid in, path never out
 
@@ -188,7 +195,7 @@ told, and the no-escape goal dies.
 | `kb_roots`        | `roots`      | root *ids* only, not root *paths*                   |
 | `kb_stats`        | `stats`      | counts + sizes (numbers only)                       |
 
-**Write (feature-flagged, off by default):**
+**Write (feature-flagged; on by default in the hardened build):**
 
 | tool              | current verb | note                                                |
 |-------------------|--------------|-----------------------------------------------------|
@@ -208,9 +215,12 @@ agent add new filesystem roots (which is a leak, because the root
 *path* would be the argument).
 
 Write verbs are **feature-gated** behind a separate knob, `mcp-writes`,
-so the default hardened build the agent gets is **read-only** until the
-owner opts in. This also keeps the write surface smaller, and keeps the
-"hidden page is hidden" property stronger in the default posture.
+so a hardened build can be compiled to read-only if the owner opts out.
+In the shipped hardened build the write surface is **on by default**
+(open decision #2, resolved 2026-11-27): the hardened build *is* the
+agent-facing build, and an agent that can read the KB but cannot write
+half-uses the surface. The gate remains compile-time-only — there is no
+runtime flag that enables or disables writes after the fact.
 
 ## Layout (when we build it)
 
@@ -227,15 +237,19 @@ kb/mcp/                       # new module in the shared body
 
 kb/main.rs
   + #[cfg(feature = "mcp")]
-    #[command(hide = true)] Mcp { serve: bool, writes: bool }
+    #[command(hide = crate::MCP_HIDDEN)] Mcp { op: McpOp }   // the only op is `serve`
+  + // where `const MCP_HIDDEN: bool = cfg!(feature = "mcp-hidden");`
 
 kb-hardened/Cargo.toml
   + [features]
-  + mcp        = ["dep:serde_json"]      # OFF by default
-  + mcp-writes = ["mcp"]                 # OFF by default; implies read
+  + default    = ["mcp-writes", "mcp-hidden"]  # writes ON (open decision #2,
+  + mcp        = ["dep:serde_json"]            # resolved 2026-11-27); presence
+  + mcp-writes = ["mcp"]                       # + write handlers (implies mcp)
+  + mcp-hidden = ["mcp"]                       # cosmetic: hides from --help
 
 kb-user/Cargo.toml
-  + (unchanged) — `mcp` is NOT a feature here.
+  + (unchanged) — `mcp` is NOT a feature here: the `kb` binary never carries
+    the subcommand at all. Compile-time presence/absence, never runtime.
 
 gate.sh  (new stage)
   + cargo tree -p kb-hardened --features mcp  | ! grep -E 'reqwest|ureq|hyper|tokio|mio'
