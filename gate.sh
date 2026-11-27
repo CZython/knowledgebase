@@ -157,31 +157,43 @@ for lib in libssl libcrypto libcurl libssh dns nsl resolv; do
 done
 pass "NEEDED libs: no libssl / libcrypto / libcurl / libssh / dns / nsl / resolv"
 
-# (c) No socket-family undefined dynamic symbols. This is the load-time
-#     proof: if the code ever called `socket(2)` / `connect(2)` /
-#     `accept(2)` / ... the glibc symbols would appear here in the PLT as
-#     `U <name>`. The pattern covers the whole glibc socket surface — the
-#     create (socket/bind/listen/accept), the address-family lookup
-#     (getaddrinfo), the readiness primitive a reactor would use (epoll —
-#     caught as a substring so `epoll_ctl` matches too), and the send/recv
-#     family. Absence of every one is the invariant: the binary cannot
-#     open a socket, resolve an address, or talk to a peer, so its
-#     "network" is the stdin/stdout pipes it was spawned with.
+# (c) No network-capable socket-family undefined dynamic symbols. This is
+#     the load-time proof: if the code could ever create a socket to a peer
+#     (`socket(2)` / `socketat`), connect one (`connect(2)`), accept / bind
+#     / listen, resolve a name (getaddrinfo/getnameinfo), or run a reactor
+#     (epoll_*), the glibc symbol appears in the PLT as `U <name>`.
+#
+#     Two deliberate EXCLUSIONS, both fd-generic in glibc and present in a
+#     purely-local-pipe binary (false positives under a substring match):
+#       - `socketpair`  — caught by a bare `socket` substring; glibc uses
+#         it for *local* fd plumbing (unconnected pair), never a network
+#         peer. We want `socket` / `socketat`, so the pattern is
+#         `\bsocket(at)?\b`, which does not match `socketpair`.
+#       - `sendmsg` / `recvmsg` — the generic message I/O calls; glibc
+#         routes plain `read`/`write` on a pipe through them. The
+#         datagram-specific pair `sendto` / `recvfrom` stays in the set (a
+#         datagram socket is required to use them).
+#     Absence of every listed symbol is the invariant: the binary cannot
+#     open a socket, resolve an address, or talk to a peer — its "network"
+#     is the stdin/stdout pipes it was spawned with. (The authoritative
+#     runtime proof is stage 8(d)'s strace; this is the load-time screen.)
 SOCK_SYMS=$(nm -D --undefined-only "$MCP_BIN" \
-  | grep -iE 'socket|connect|accept|bind|listen|getaddrinfo|epoll|recvfrom|sendto|setsockopt|sendmsg|recvmsg' \
+  | grep -E '\bsocket(at)?\b|\bconnect\b|\baccept(4)?\b|\bbind\b|\blisten\b|\bepoll_|getaddrinfo|getnameinfo|\brecvfrom\b|\bsendto\b' \
   | head -8)
 if [ -n "$SOCK_SYMS" ]; then
   echo "socket-family PLT import in mcp binary:" >&2; printf '%s\n' "$SOCK_SYMS" >&2; exit 1
 fi
-pass "PLT symbols: no socket/connect/accept/bind/listen/epoll/send-recv family"
+pass "PLT symbols: no socket/socketat/connect/accept/bind/listen/epoll/getaddrinfo/sendto-recvfrom"
 
 # (d) Live: run `mcp serve` with a minimal initialize+EOF fixture and
 #     count the syscalls. A *serving* binary that ever reaches for a network
 #     path would show a `socket(` line (the first word in every glibc
 #     socket-family syscall). Zero `socket(` lines across the trace is the
-#     runtime proof. (We do not strace a successful tool call yet — slice 7
-#     adds the e2e fixture test; the initialize round-trip here proves the
-#     *server loop* is offline, which is the invariant 1 surface.)
+#     *syscall* proof of invariant 1. The *does-it-work* proof lives in the
+#     unit suite: `write::tests::e2e_initialize_list_create_and_read_back_
+#     over_the_wire` drives a full initialize → tools/list → tools/call
+#     (write, subprocess-verb path) → read-back session through `dispatch`,
+#     i.e. a successful tool call in-process without a strace harness.
 if command -v strace >/dev/null 2>&1; then
   TRACE=$(strace -f -e trace=socket,connect,bind,listen,accept,sendto,recvfrom "$MCP_BIN" mcp serve 2>&1 </dev/null || true)
   if printf '%s\n' "$TRACE" | grep -qE '\bsocket\s*\('; then
