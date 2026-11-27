@@ -1087,6 +1087,44 @@ pub(crate) fn cli_command() -> clap::Command {
     cmd
 }
 
+/// Build the command tree handed to `clap_complete`: the *same*
+/// `cli_command()` that parses the CLI at runtime, with **top-level
+/// `hide`d subcommands pruned**.
+///
+/// `clap_complete` 4.x walks `get_subcommands()` with **no** `hide`
+/// filter — unlike the `--help` renderer, it emits every subcommand
+/// regardless of `hide`. Requirement #4 (MCP.md) says the MCP surface
+/// must be absent from *both* `--help` **and** completions, so we
+/// mirror `--help` here.
+///
+/// `Command` has no public "remove subcommand" setter (only
+/// append-`subcommand()`), and `Command::args(impl IntoIterator)`
+/// likewise appends rather than replaces. Hence a fresh `Command`
+/// built from:
+///   * the base command's own args (so `--db` / `-V` / `--version`
+///     / `-h` survive in the top-level `opts=` line that
+///     `clap_complete` emits for the `*` branch), and
+///   * the visible subcommands only (each carries its own args).
+///
+/// The root *name* is irrelevant: the generators read `get_bin_name()`
+/// (set by `generate()` from the caller's `bin_name` arg) for the
+/// shell function name, and each subcommand's name for the case
+/// branches. A stable placeholder name is sufficient.
+#[cfg(feature = "completions")]
+fn completion_tree() -> clap::Command {
+    let base = cli_command();
+    let top_args: Vec<clap::Arg> = base.get_arguments().cloned().collect();
+    let visible_subs: Vec<clap::Command> = base
+        .get_subcommands()
+        .filter(|s| !s.is_hide_set())
+        .cloned()
+        .collect();
+    drop(base);
+    clap::Command::new("completion-root")
+        .args(top_args)
+        .subcommands(visible_subs)
+}
+
 /// Implement `kb complete bash|zsh` (the `completions` feature).
 /// Self-contained: no external `completion` package required — the
 /// script is generated from the *same* clap command instance that
@@ -1117,9 +1155,12 @@ fn cmd_complete(shell: &str, file: Option<&Path>) -> Result<i32, (String, i32)> 
         })
         .unwrap_or_else(|| "kb".to_string());
     let mut buf: Vec<u8> = Vec::new();
+    // Prune `hide`d subcommands so completions mirror `--help` (see
+    // `completion_tree` docs for the full rationale + req reference).
+    let mut pruned = completion_tree();
     generate(
         target,
-        &mut cli_command(),
+        &mut pruned,
         bin_name,
         &mut buf,
     );
@@ -2309,5 +2350,66 @@ mod links_tests {
         let links = vec![(5, 0), (5, 50)];
         let nearest = nearest_link_index(&links, 5, 48).unwrap();
         assert_eq!(nearest, 1, "same line, col 50 → closer than col 0");
+    }
+}
+
+#[cfg(test)]
+#[cfg(feature = "completions")]
+mod completion_tests {
+    use super::*;
+
+    /// The completion tree is the base command tree with *exactly* the
+    /// top-level `hide`d subcommands removed: every visible subcommand
+    /// survives, every hidden one is dropped, and nothing new is added.
+    ///
+    /// This is the invariant that keeps completions in lockstep with
+    /// `--help` regardless of which features are enabled (MCP.md req #4).
+    #[test]
+    fn completion_tree_strips_exactly_the_hidden_subcommands() {
+        let base = cli_command();
+        let pruned = completion_tree();
+
+        let pruned_names: std::collections::BTreeSet<_> = pruned
+            .get_subcommands()
+            .map(|c| c.get_name().to_string())
+            .collect();
+
+        // Visible subs all survive; nothing new appears.
+        let visible: std::collections::BTreeSet<_> = base
+            .get_subcommands()
+            .filter(|c| !c.is_hide_set())
+            .map(|c| c.get_name().to_string())
+            .collect();
+
+        assert_eq!(
+            pruned_names, visible,
+            "completion tree must be exactly `cli_command` minus hidden subs: pruned={pruned_names:?}, visible={visible:?}"
+        );
+
+        // The top-level global `--db` survives into the completion tree (so
+        // the `*` branch's `opts=` line still offers it).
+        assert!(
+            pruned.get_arguments().any(|a| a.get_long() == Some("db")),
+            "top-level global --db must survive into the completion tree"
+        );
+
+        // Feature-aware mcp assertion (MCP.md req #4): whenever the `mcp`
+        // feature is on, `kb mcp` must be hidden from *both* `--help` (via
+        // `hide`) and completions (via this pruning) — and only when the
+        // `mcp-hidden` feature is also on. Absent the `mcp` feature there is
+        // no `mcp` subcommand at all and the set equality above still holds.
+        #[cfg(feature = "mcp")]
+        {
+            let in_base = base
+                .get_subcommands()
+                .any(|c| c.get_name() == "mcp");
+            let in_pruned = pruned_names.contains("mcp");
+            assert!(in_base, "with feature `mcp`, base command must expose `mcp`");
+            if cfg!(feature = "mcp-hidden") {
+                assert!(!in_pruned, "mcp-hidden ON ⇒ mcp pruned from completions");
+            } else {
+                assert!(in_pruned, "mcp-hidden OFF ⇒ mcp retained in completions");
+            }
+        }
     }
 }
