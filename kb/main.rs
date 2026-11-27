@@ -60,14 +60,34 @@ use std::path::{Path, PathBuf};
 mod cli;
 use crate::cli::*;
 
-/// `kb mcp` — the MCP server surface (MCP.md). Gated on the `mcp` feature,
-/// which is **off by default** in `kb-hardened` and **absent** from
-/// `kb-user` (locked requirement #3: compile-time absent, not hidden).
+/// `kb mcp` — the MCP server surface (MCP.md). Presence and scope are
+/// **compile-time only** (open decision #2, resolved 2026-11-27: there is
+/// no runtime flag that turns the surface on or off after the fact):
 ///
-/// The whole module is `#[cfg(feature = "mcp")]`-compiled out when the
-/// feature is off, so a default hardened build carries zero MCP code +
-/// zero `serde_json` link. `mcp-writes` (off by default) adds the
-/// write-tool surface on top of the read surface (MCP.md decision #2).
+/// - In `kb-hardened` the `mcp-writes` (hence `mcp`) feature is **on by
+///   default** (`default = ["mcp-writes"]`) — the hardened build *is* the
+///   agent-facing build, so it ships the full read + write surface.
+///   Compiling with `--no-default-features` strips it out entirely: the
+///   `mod mcp` below is `#[cfg]`-compiled out and `serde_json` never
+///   links.
+/// - In `kb-user` the feature does not exist at all (locked requirement
+///   #3: compile-time absent, not hidden) — the `kb` binary has no `mcp`
+///   subcommand.
+///
+/// **Hiddenness is a separate, orthogonal feature** (`mcp-hidden`): it only
+/// flips the `hide` attribute used by clap for `--help` rendering and
+/// `clap_complete`'s script. With `mcp-hidden` OFF the surface is compiled
+/// in just as fully and `kb mcp serve` still works — it merely shows up in
+/// `--help`. There is never a runtime toggle: presence is `mcp`, visibility
+/// is `mcp-hidden`, both decided at build time.
+///
+/// `MCP_HIDDEN` is the single compile-time bool the `Cmd::Mcp` variant's
+/// `hide` attribute reads, so a feature flip is the only way to change it.
+// Only used by the `Cmd::Mcp` variant's `hide` attribute, which is
+// itself gated on `feature = "mcp"` — so the const shares that gate
+// to avoid a dead_code warning in `--no-default-features` builds.
+#[cfg(feature = "mcp")]
+const MCP_HIDDEN: bool = cfg!(feature = "mcp-hidden");
 #[cfg(feature = "mcp")]
 mod mcp;
 
@@ -562,22 +582,26 @@ pub(crate) enum Cmd {
     },
     /// `kb mcp serve` — the stdio JSON-RPC MCP server (MCP.md).
     ///
-    /// **Hidden surface** (locked requirement #4): `#[command(hide = true)]`
-    /// keeps it absent from `--help` and from `clap_complete`'s generated
-    /// script (which is built from this very command via `cli_command()`).
+    /// **Presence is compile-gated** (locked requirement #3): the whole
+    /// variant is `#[cfg(feature = "mcp")]`-compiled out. The feature does
+    /// not exist in `kb-user/Cargo.toml`, so `kb-user` (the `kb` binary)
+    /// has no `mcp` subcommand at all, and a hardened build compiled with
+    /// `--no-default-features` reports `kb-hardened mcp` as an
+    /// `unrecognized subcommand` (clap exit 2), mirroring the `tui` /
+    /// `edit` gates above.
     ///
-    /// **kb-hardened only** (locked requirement #3): the whole variant is
-    /// `#[cfg(feature = "mcp")]`-compiled out — the feature does not exist
-    /// in `kb-user/Cargo.toml`, so `kb-user` (the `kb` binary) has no
-    /// `mcp` subcommand at all, and a default hardened build (feature off)
-    /// reports `kb-hardened mcp` as `unrecognized subcommand` (clap exit 2),
-    /// mirroring the `tui` / `edit` gates above.
+    /// **Hiddenness is a SEPARATE feature** (`mcp-hidden`): it only flips
+    /// `hide` off/on for `--help` + `clap_complete` rendering. With
+    /// `mcp-hidden` off, `kb mcp` is visible in the help but the command
+    /// still works (and with it on, it still works — the flag is cosmetic).
+    /// There is never a runtime toggle: presence and visibility are both
+    /// decided at build time, independently.
     ///
     /// `serve` is the only form: a local, single-process stdio server. The
     /// DB path comes from the global `--db` flag (or `KB_DB`, or the
     /// default data dir) — there is no per-call `db` arg on the wire.
     #[cfg(feature = "mcp")]
-    #[command(hide = true)]
+    #[command(hide = crate::MCP_HIDDEN)]
     Mcp {
         #[command(subcommand)]
         op: McpOp,
@@ -961,9 +985,11 @@ pub(crate) fn run(cli: &Cli) -> i32 {
         #[allow(unused_variables)]
         #[cfg(feature = "completions")]
         Cmd::Complete { shell, file } => cmd_complete(shell, file.as_deref()),
-        // `kb mcp serve` (MCP.md) — the stdio JSON-RPC server. `hide = true`
-        // keeps it out of `--help`/completions; the `mcp` feature compiles
-        // this arm (and the whole `mcp` module) out of `kb-user`.
+        // `kb mcp serve` (MCP.md) — the stdio JSON-RPC server. The `mcp`
+        // feature compiles this arm (and the whole `mcp` module) out of
+        // `kb-user` entirely. Hiddenness is a SEPARATE cosmetic concern —
+        // the `mcp-hidden` feature flips `hide`, so the command works
+        // regardless; it only changes whether `--help` lists it.
         #[cfg(feature = "mcp")]
         Cmd::Mcp { .. } => mcp::serve(cli.db.as_deref()),
         Cmd::Cron { json } => {

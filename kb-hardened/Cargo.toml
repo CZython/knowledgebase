@@ -29,8 +29,16 @@ description = "kb-hardened — the headless, agent-facing build of `kb`: no TUI,
 workspace = true
 
 [features]
-default = []
-# Both surfaces exist but are OFF by default. Toggling them on is allowed
+# The hardened build *is* the agent-facing build (MCP.md open decision #2,
+# resolved 2026-11-27), so it ships the full read + write MCP surface AND
+# keeps it hidden from `--help`/completions — the same posture T2 shipped.
+# These are three orthogonal compile features (see `kb/mcp` in main.rs):
+#   mcp        — surface exists: `kb mcp serve` works, serde_json links
+#   mcp-writes — + the write handlers (implies mcp)
+#   mcp-hidden — cosmetic: hides `kb mcp` from --help + completions (implies mcp)
+# Turning `mcp-hidden` off gives the same working surface, just visible in --help.
+default = ["mcp-writes", "mcp-hidden"]
+# The remaining surfaces stay OFF by default. Toggling them on is allowed
 # (e.g. `cargo build -p kb-hardened --features tui`) — the shared body then
 # compiles in the same way as `kb-user` does.
 editor = []
@@ -40,18 +48,22 @@ tui = ["dep:ratatui", "dep:crossterm", "dep:unicode-width", "dep:serde", "dep:to
 # `clap_complete` and compiles the `Complete` verb.
 completions = ["dep:clap_complete"]
 # `kb mcp serve` (MCP.md). A stdio JSON-RPC server over the same DB / SQL as
-# every other verb, hidden from `--help` and completions. OFF by default
-# — the default hardened build is read-only and carries the mcp surface
-# only if the owner opts in. `serde_json` (and `serde` which it pulls in)
-# are pure-Rust, no socket: the no-network gate (gate.sh stage 7) asserts
-# the `NEEDED` + dynsym properties on every build, so enabling `mcp` can
-# never quietly drag a network stack into the binary.
+# every other verb. This is **presence**: the subcommand, the dispatch, and
+# `serde_json` all compile in. `serde_json` (and `serde` which it pulls in)
+# are pure-Rust, no socket: the no-network gate (gate.sh stage 8) asserts the
+# `NEEDED` + dynsym properties on the mcp build, so it can never quietly drag
+# a network stack into the binary.
 mcp = ["dep:serde_json"]
 # The write half of the MCP surface (create / section_* / replace / patch).
-# Off by default = the default hardened MCP server is read-only (MCP.md
-# decision #2 recommendation). Implies `mcp` so a build can never enable
-# writes without the read surface they ride on.
+# Implies `mcp` so a build can never enable writes without the read surface
+# they ride on. Compiling out `--no-default-features` is the only way to get
+# a build without the write handlers at all.
 mcp-writes = ["mcp"]
+# Purely cosmetic: flips `hide` on the `Cmd::Mcp` variant so it stays out of
+# `--help` and `clap_complete`'s script. The command still works regardless —
+# hiddenness is an orthogonal, independently-toggleable concern from presence.
+# Implies `mcp` since there is nothing to hide otherwise.
+mcp-hidden = ["mcp"]
 
 [[bin]]
 name = "kb-hardened"

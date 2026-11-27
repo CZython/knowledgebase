@@ -8,8 +8,10 @@
 //! module.
 //!
 //! Feature gating: every handler in this file is `#[cfg(feature =
-//! "mcp-writes")]`; the server is strictly read-only unless the extra
-//! `mcp-writes` feature is enabled at build time (which pulls in `mcp`).
+//! "mcp-writes")]`. The feature is **on by default** in the hardened build
+//! (`default = ["mcp-writes"]`); compiling it out (`--no-default-features`)
+//! is the only way to get a read-only server — compile-time only, there is
+//! no runtime flag.
 //!
 //! Error contract: a nonzero verb exit is mapped through
 //! `sanitize_error` to a stable (code, message). The *shape* of the

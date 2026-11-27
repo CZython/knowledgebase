@@ -45,17 +45,30 @@ pass "cargo build -p kb-hardened -> kb-hardened"
 # ---- (3) fmt + clippy: all targets, all members, -D warnings --------------
 # `cargo fmt --all -- --check` mirrors the CI build-and-test stage 3a gate;
 # clippy the whole workspace AND the `mcp` feature build (the MCP slice 1
-# surface only compiles with `--features mcp`; default features gate it out,
-# so the plain `--workspace` pass never sees that code).
+# surface only compiles with `--features mcp`; the plain `--workspace` pass
+# sees whatever the package defaults are for that member).
+#
+# `kb-hardened` exposes THREE orthogonal compile features (MCP.md):
+#   `mcp`        presence of the surface (serde_json links, `kb mcp` exists)
+#   `mcp-writes` + the write handlers (implies `mcp`)
+#   `mcp-hidden` cosmetic: hides the subcommand from --help / completions
+# `default = ["mcp-writes", "mcp-hidden"]` so the hardened build ships the
+# full working surface, hidden from --help. The two `--no-default-features`
+# passes below lock the OTHER corners of that decision space: (a) presence
+# off entirely (the `MCP_HIDDEN` const is `#[cfg]`'d out — dead_code check
+# must not fire), and (b) presence on but hiddenness off (`MCP_HIDDEN ==
+# false`, exactly what `hide = crate::MCP_HIDDEN` feeds clap).
 run "3/8 fmt + clippy --workspace --all-targets -- -D warnings"
 cargo fmt --all -- --check
 pass "fmt (all targets, 0 diffs)"
 cargo clippy --workspace --all-targets -- -D warnings
 pass "clippy (0 warnings, 4/4 crates)"
-cargo clippy -p kb-hardened --features mcp --all-targets -- -D warnings
-pass "clippy -p kb-hardened --features mcp (0 warnings)"
-cargo clippy -p kb-hardened --features mcp,mcp-writes --all-targets -- -D warnings
-pass "clippy -p kb-hardened --features mcp,mcp-writes (0 warnings)"
+cargo clippy -p kb-hardened --features mcp,mcp-writes,mcp-hidden --all-targets -- -D warnings
+pass "clippy -p kb-hardened --features mcp,mcp-writes,mcp-hidden (0 warnings)"
+cargo clippy -p kb-hardened --no-default-features --features mcp,mcp-writes --all-targets -- -D warnings
+pass "clippy -p kb-hardened --no-default-features --features mcp,mcp-writes (0 warnings)"
+cargo clippy -p kb-hardened --no-default-features --all-targets -- -D warnings
+pass "clippy -p kb-hardened --no-default-features (0 warnings)"
 
 # ---- (4) tests: every suite, workspace-wide --------------------------------
 run "4/8 tests — cargo test --workspace"
@@ -109,10 +122,11 @@ pass "user: ratatui + crossterm present"
 
 # ---- (8) no-network: the `mcp` build never talks to the world (invariant 1)
 run "8/8 no-network — mcp build has no socket capability"
-# Build the MCP feature so the stage can assert on the binary that actually
-# ships the server. The feature is off by default, so a plain `cargo build`
-# (stage 1) links a kb-hardened without any MCP code at all; the check here
-# has to run against the variant that does include it.
+# The `mcp` feature is ON by default in `kb-hardened` (T2 / open decision
+# #2, resolved 2026-11-27) — a plain `cargo build` (stage 1) already links
+# the server; the explicit `--features mcp` build below just makes the
+# assertion's target unambiguous and double-checks the read-only variant
+# (without `mcp-writes`) is also network-free.
 cargo build -p kb-hardened --features mcp
 MCP_BIN="$HERE/target/debug/kb-hardened"
 

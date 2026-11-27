@@ -35,7 +35,7 @@ unsafe_code = "forbid"
 # shared body (`kb/main.rs`) cleanly — a member that does not enable the
 # feature still must not get an `unexpected_cfgs` warning for the `cfg`
 # literal it sees in the included source.
-unexpected_cfgs = { level = "warn", check-cfg = ['cfg(verus_only)', 'cfg(feature, values("mcp"))', 'cfg(feature, values("mcp-writes"))'] }
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(verus_only)', 'cfg(feature, values("mcp"))', 'cfg(feature, values("mcp-writes"))', 'cfg(feature, values("mcp-hidden"))'] }
 
 [workspace.package]
 version = "0.1.0"
