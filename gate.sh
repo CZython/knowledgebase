@@ -69,6 +69,16 @@ cargo clippy -p kb-hardened --no-default-features --features mcp,mcp-writes --al
 pass "clippy -p kb-hardened --no-default-features --features mcp,mcp-writes (0 warnings)"
 cargo clippy -p kb-hardened --no-default-features --all-targets -- -D warnings
 pass "clippy -p kb-hardened --no-default-features (0 warnings)"
+# All-on corner: the `completions` feature is NOT in `kb-hardened`'s
+# defaults (defaults = mcp-writes, mcp-hidden), so the `completion_tree()`
+# code path and the `#[cfg(feature = "mcp")]` branch of
+# `completion_tests::completion_tree_strips_exactly_the_hidden_subcommands`
+# are never compiled under the workspace-default test run above. This
+# explicit corner locks (a) the prune-== base-minus-hidden invariant AND
+# (b) the feature-aware mcp hidden/retained branch, both of which CI
+# otherwise would not exercise.
+cargo clippy -p kb-hardened --features mcp,mcp-writes,mcp-hidden,completions --all-targets -- -D warnings
+pass "clippy -p kb-hardened --features mcp,mcp-writes,mcp-hidden,completions (0 warnings)"
 
 # ---- (4) tests: every suite, workspace-wide --------------------------------
 run "4/8 tests — cargo test --workspace"
@@ -76,6 +86,8 @@ cargo test --workspace
 pass "cargo test --workspace"
 cargo test -p kb-hardened --features mcp
 pass "cargo test -p kb-hardened --features mcp (8 sanitizer + dispatch tests)"
+cargo test -p kb-hardened --features mcp,mcp-writes,mcp-hidden,completions completion_tests
+pass "cargo test -p kb-hardened --features mcp,mcp-writes,mcp-hidden,completions completion_tests (hidden-prune invariant)"
 
 # ---- (5) verus: each spec file w/ z3 4.16.0 + kb-core tests ---------------
 run "5/8 verus — ./verify.sh (spec + z3 4.16.0)"
